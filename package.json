@@ -1,0 +1,93 @@
+{
+  "name": "RunContainer",
+  "productName": "RunContainer",
+  "version": "1.0.0",
+  "description": "A Windows-based container management application for running applications in a sandboxed environment.",
+  "main": "public/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "start:desktop": "node --openssl-legacy-provider ./node_modules/react-scripts/scripts/build.js && electron .",
+    "start:react": "node --openssl-legacy-provider ./node_modules/react-scripts/scripts/start.js",
+    "build": "node --openssl-legacy-provider ./node_modules/react-scripts/scripts/build.js",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "electron": "electron .",
+    "package:exe": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "dist": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "prepackage": "npm run build",
+    "premake": "npm run build",
+    "package": "electron-forge package",
+    "make": "electron-forge make"
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1",
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2",
+    "react-scripts": "4.0.3"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-deb": "^7.11.2",
+    "@electron-forge/maker-rpm": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.11.2",
+    "@electron-forge/plugin-fuses": "^7.11.2",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.0.0",
+    "electron-packager": "^17.1.0"
+  },
+  "config": {
+    "forge": {
+      "makers": [
+        {
+          "name": "@electron-forge/maker-squirrel",
+          "config": {}
+        },
+        {
+          "name": "@electron-forge/maker-zip",
+          "platforms": [
+            "win32"
+          ]
+        }
+      ]
+    }
+  },
+  "homepage": ".",
+  "build": {
+    "appId": "com.runcontainer.app",
+    "productName": "RunContainer",
+    "files": [
+      "build/**/*",
+      "public/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "public"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "RunContainer-Setup-${version}.exe"
+    }
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
