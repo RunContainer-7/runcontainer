@@ -573,6 +573,21 @@ export default function ContainerManager() {
               <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: https://discord.gg/rvMjMZJykE</span>
             </div>
           </div>
+          <div className="panel-section">
+            <h3>Completely free</h3>
+            <p>RunContainer is free forever and open source. There are no paid tiers, no locked features, and no trial countdown.</p>
+            <div className="profile-list">
+              <div className="profile-card active">
+                <strong>Free forever</strong>
+                <span>You can use every feature without paying. The app stays free for personal and everyday use.</span>
+              </div>
+              <div className="profile-card">
+                <strong>Open source</strong>
+                <span>The code is public and transparent, so you can inspect how it works, suggest changes, or build on it yourself.</span>
+              </div>
+            </div>
+          </div>
+ 559dffe (Add Completely free panel to Info tab)
         </div>
       )}
 
