@@ -4,7 +4,7 @@ import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
 
 describe("ContainerManager", () => {
-  it("renders the Apps tab and install action", () => {
+  it("renders the main tabs and header", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
 
@@ -13,7 +13,7 @@ describe("ContainerManager", () => {
     });
 
     expect(container.textContent).toContain("Apps");
-    expect(container.textContent).toContain("Install EXE");
+    expect(container.textContent).toContain("RunContainer");
 
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
@@ -29,7 +29,9 @@ describe("ContainerManager", () => {
       ReactDOM.render(<ContainerManager />, container);
     });
 
-    const sourceButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent.includes("Sources"));
+    const sourceButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent.includes("Sources")
+    );
 
     act(() => {
       sourceButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -52,7 +54,9 @@ describe("ContainerManager", () => {
       ReactDOM.render(<ContainerManager />, container);
     });
 
-    const settingsButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent.includes("Settings"));
+    const settingsButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent.includes("Settings")
+    );
 
     act(() => {
       settingsButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -60,6 +64,32 @@ describe("ContainerManager", () => {
 
     expect(container.textContent).toContain("Auto-isolate APPDATA");
     expect(container.textContent).toContain("Persistent logs");
+
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+    container.remove();
+  });
+
+  it("renders the Completely free section in the Info tab", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+
+    act(() => {
+      ReactDOM.render(<ContainerManager />, container);
+    });
+
+    const infoButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent.includes("Info")
+    );
+
+    act(() => {
+      infoButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Completely free");
+    expect(container.textContent).toContain("Free forever");
+    expect(container.textContent).toContain("Open source");
 
     act(() => {
       ReactDOM.unmountComponentAtNode(container);

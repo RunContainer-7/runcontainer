@@ -1,33 +1,9 @@
-export function openFileExplorer(callback) {
-  const { dialog } = window.require('electron').remote;
-  dialog.showOpenDialog({
-    properties: ['openFile'],
-    filters: [
-      { name: 'Executables', extensions: ['exe'] }
-    ]
-  }).then(result => {
-    if (!result.canceled && result.filePaths.length > 0) {
-      callback(result.filePaths[0]);
-    }
-  }).catch(err => {
-    console.error('Failed to open file explorer:', err);
-  });
-}
-
-export function installContainer(exePath) {
-  // Logic to install the container using the provided exePath
-  console.log('Installing container from:', exePath);
-  // Implement installation logic here
-}
-
-export function runContainer(containerId) {
-  // Logic to run the container in a sandboxed environment
-  console.log('Running container with ID:', containerId);
-  // Implement sandbox execution logic here
-}
-
-export function killContainer(containerId) {
-  // Logic to kill the running container
-  console.log('Killing container with ID:', containerId);
-  // Implement container termination logic here
-}
+/**
+ * NOTE: The real container service is at src/services/containerService.js.
+ *
+ * This module previously contained duplicate stubs for install/run/kill.
+ * Those stubs were not used by the app and could be mistaken for the
+ * actual implementation. The app uses the IPC-based service in
+ * src/services/containerService.js instead.
+ */
+export { installContainer, importFromUrl, runContainer, killContainer, launchDesktopContainer, updatePermissions, resetContainer, duplicateContainer, exportContainer, getAppLogs, stopContainer, listContainers } from "../services/containerService";

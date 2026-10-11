@@ -587,7 +587,6 @@ export default function ContainerManager() {
               </div>
             </div>
           </div>
- 559dffe (Add Completely free panel to Info tab)
         </div>
       )}
 
