@@ -1,7 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const https = require('https');
 const crypto = require('crypto');
 const {
@@ -14,11 +14,13 @@ const {
   parseSandboxPids,
   isWithinDirectory,
 } = require('./sandboxie-runtime');
+const { buildIsolatedEnvironment, buildProcessListArgs, buildTaskkillArgs, parseProcessIds } = require('./isolated-launch');
 
 let mainWindow;
 const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json');
 const sandboxMonitors = new Map();
 const sandboxRootBase = path.join(app.getPath('userData'), 'sandboxes');
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 app.setName('RunContainer');
 app.setAppUserModelId('RunContainer');
@@ -277,43 +279,218 @@ function broadcastContainerStatus(record) {
   }
 }
 
-async function monitorSandboxedContainer(appRecord, tools, boxName, logsRoot) {
-  const prior = sandboxMonitors.get(appRecord.id);
-  if (prior) clearInterval(prior);
+function failedLaunch(appRecord, reason) {
+  return { id: appRecord.id, status: 'Failed', error: reason, reason, embedded: false };
+}
+
+function getLaunchMode(appRecord) {
+  return appRecord.launchMode || (appRecord.sandboxieInitialized ? 'sandboxie' : 'isolated-profile');
+}
+
+function stopMonitor(appId) {
+  const monitor = sandboxMonitors.get(appId);
+  if (monitor) clearInterval(monitor);
+  sandboxMonitors.delete(appId);
+}
+
+async function listProcessIdsUnder(directory) {
+  if (process.platform !== 'win32') throw new Error('Process inspection requires Windows.');
+  const { stdout } = await executeFile('powershell.exe', buildProcessListArgs(directory));
+  return parseProcessIds(stdout);
+}
+
+async function listRunningPids(appRecord) {
+  if (getLaunchMode(appRecord) === 'sandboxie') {
+    const tools = resolveSandboxieTools();
+    if (!tools) throw new Error('Sandboxie-Plus is not installed, so this app box cannot be inspected.');
+    const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(appRecord.sandboxieBox));
+    const pids = parseSandboxPids(stdout);
+    if (pids === null) throw new Error('Sandboxie returned an unreadable process list.');
+    return pids;
+  }
+  return listProcessIdsUnder(appRecord.sandboxRoot || path.dirname(appRecord.source));
+}
+
+function monitorAppProcesses(appId, logPath) {
+  stopMonitor(appId);
   const interval = setInterval(async () => {
+    const current = getStoredApp(appId);
+    if (!current || current.status !== 'Running') {
+      stopMonitor(appId);
+      return;
+    }
     try {
-      const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(boxName));
-      const pids = parseSandboxPids(stdout);
-      if (pids === null) {
-        appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), 'Sandboxie returned an invalid process list; keeping the running state until it can be confirmed.');
-        return;
-      }
-      const apps = loadApps();
-      const current = apps.find((entry) => entry.id === appRecord.id);
-      if (!current || current.status !== 'Running') {
-        clearInterval(interval);
-        sandboxMonitors.delete(appRecord.id);
-        return;
-      }
+      const pids = await listRunningPids(current);
       if (pids.length === 0) {
         const updated = { ...current, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
-        saveApps(apps.map((entry) => entry.id === appRecord.id ? updated : entry));
-        appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), 'Sandboxie reports all processes in this app box have exited.');
-        clearInterval(interval);
-        sandboxMonitors.delete(appRecord.id);
+        saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
+        appendLog(logPath, 'All processes for this app have exited.');
+        stopMonitor(appId);
         broadcastContainerStatus(updated);
         return;
       }
       if (JSON.stringify(pids) !== JSON.stringify(current.sandboxPids || [])) {
         const updated = { ...current, pid: pids[0], sandboxPids: pids };
-        saveApps(apps.map((entry) => entry.id === appRecord.id ? updated : entry));
+        saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
         broadcastContainerStatus(updated);
       }
     } catch (error) {
-      appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), `Unable to query Sandboxie process state: ${error.message}`);
+      appendLog(logPath, `Unable to query process state: ${error.message}`);
     }
   }, 1500);
-  sandboxMonitors.set(appRecord.id, interval);
+  sandboxMonitors.set(appId, interval);
+}
+
+async function stopProcessesUnder(directory) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const pids = await listProcessIdsUnder(directory);
+    if (pids.length === 0) return;
+    for (const pid of pids) {
+      // taskkill fails if the process already exited; the re-check below is what decides success.
+      await executeFile('taskkill.exe', buildTaskkillArgs(pid)).catch(() => {});
+    }
+    await delay(800);
+  }
+  const remaining = await listProcessIdsUnder(directory);
+  if (remaining.length > 0) throw new Error(`Could not stop this app’s running processes (PIDs ${remaining.join(', ')}).`);
+}
+
+async function removeSandboxDirectory(sandboxRoot) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!fs.existsSync(sandboxRoot)) return;
+    try {
+      fs.rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+    } catch (error) {
+      lastError = error;
+    }
+    if (!fs.existsSync(sandboxRoot)) return;
+    await delay(700);
+  }
+  const code = lastError?.code || 'unknown';
+  throw new Error(`Windows is still holding files in ${sandboxRoot} (${code}). Close any window from this app and try Delete again.`);
+}
+
+async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
+  const boxName = appRecord.sandboxieBox || sandboxBoxName(appRecord.id);
+  const fileRootPath = appRecord.sandboxieFileRoot || path.join(sandboxRoot, 'SandboxieFiles');
+  if (!isWithinDirectory(sandboxRoot, fileRootPath)) {
+    return failedLaunch(appRecord, 'The Sandboxie file root is outside this app’s managed directory; refusing to launch it.');
+  }
+  ensureDirectory(fileRootPath);
+  try {
+    const launchResult = await launchInSandboxie({
+      tools,
+      boxName,
+      executablePath: appRecord.source,
+      fileRootPath,
+      execute: executeFile,
+      onConfigured: async () => {
+        saveApps(loadApps().map((entry) => (entry.id === appRecord.id
+          ? { ...entry, sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, sandboxieInitialized: true, launchMode: 'sandboxie' }
+          : entry)));
+      },
+    });
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const updatedApp = {
+      ...base,
+      sandboxieBox: boxName,
+      sandboxieFileRoot: fileRootPath,
+      sandboxieInitialized: true,
+      launchMode: 'sandboxie',
+      status: 'Running',
+      pid: launchResult.pids[0],
+      sandboxPids: launchResult.pids,
+      lastLaunchedAt: new Date().toISOString(),
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
+    appendLog(logPath, `Sandboxie launched app in box ${boxName}, PIDs: ${launchResult.pids.join(', ')}`);
+    monitorAppProcesses(appRecord.id, logPath);
+    broadcastContainerStatus(updatedApp);
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid: updatedApp.pid,
+      sandboxPids: updatedApp.sandboxPids,
+      launchMode: 'sandboxie',
+      embedded: false,
+      reason: 'Running in a dedicated Sandboxie-Plus box (OS-level isolation).',
+    };
+  } catch (error) {
+    appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
+    try {
+      await deleteSandboxieBox({ tools, boxName, execute: executeFile });
+    } catch (cleanupError) {
+      appendLog(logPath, `Sandboxie cleanup after failed launch also failed: ${cleanupError.message}`);
+    }
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id
+      ? { ...entry, sandboxieInitialized: false, launchMode: 'isolated-profile', status: 'Installed', pid: null, sandboxPids: [] }
+      : entry)));
+    return failedLaunch(appRecord, error.message);
+  }
+}
+
+async function runWithIsolatedProfile(appRecord, sandboxRoot, logPath, sandboxieFailure) {
+  const layout = ensureSandboxLayout(sandboxRoot);
+  const env = buildIsolatedEnvironment(process.env, sandboxRoot, layout);
+  let exitInfo = null;
+  try {
+    const child = spawn(appRecord.source, [], {
+      cwd: path.dirname(appRecord.source),
+      env,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.on('exit', (code, signal) => {
+      exitInfo = { code, signal };
+      appendLog(logPath, `Launched process exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`);
+    });
+    child.unref();
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+
+    let pids = [];
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      pids = await listProcessIdsUnder(sandboxRoot);
+      if (pids.length > 0 || exitInfo) break;
+      await delay(400);
+    }
+    if (pids.length === 0) {
+      throw new Error(exitInfo
+        ? `The app exited right after starting (code ${exitInfo.code}).`
+        : 'The app started, but no process running from its container was found.');
+    }
+
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const updatedApp = {
+      ...base,
+      status: 'Running',
+      launchMode: 'isolated-profile',
+      pid: pids[0],
+      sandboxPids: pids,
+      lastLaunchedAt: new Date().toISOString(),
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
+    appendLog(logPath, `Running in RunContainer profile container, PIDs: ${pids.join(', ')}`);
+    monitorAppProcesses(appRecord.id, logPath);
+    broadcastContainerStatus(updatedApp);
+    const fallbackNote = sandboxieFailure ? `Sandboxie-Plus could not start it (${sandboxieFailure}). ` : '';
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid: updatedApp.pid,
+      sandboxPids: pids,
+      launchMode: 'isolated-profile',
+      embedded: false,
+      reason: `${fallbackNote}Running in RunContainer’s per-app container (its AppData and Temp are redirected into the app’s own folders). This is not an OS security boundary; install Sandboxie-Plus for OS-level isolation.`,
+    };
+  } catch (error) {
+    appendLog(logPath, `Launch failed: ${error.message}`);
+    return failedLaunch(appRecord, error.message);
+  }
 }
 
 function resolveSandboxieTools() {
@@ -404,27 +581,22 @@ ipcMain.handle('open-file-dialog', async () => {
 
 ipcMain.handle('list-apps', async () => {
   const apps = loadApps();
-  const tools = resolveSandboxieTools();
-  if (!tools) return apps;
   let changed = false;
   const refreshed = await Promise.all(apps.map(async (entry) => {
-    if (entry.status !== 'Running' || !entry.sandboxieBox) return entry;
+    if (entry.status !== 'Running') return entry;
     try {
-      const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(entry.sandboxieBox));
-      const pids = parseSandboxPids(stdout);
-      if (pids && pids.length === 0) {
+      const pids = await listRunningPids(entry);
+      if (pids.length === 0) {
         changed = true;
-        const monitor = sandboxMonitors.get(entry.id);
-        if (monitor) clearInterval(monitor);
-        sandboxMonitors.delete(entry.id);
+        stopMonitor(entry.id);
         return { ...entry, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
       }
-      if (pids && JSON.stringify(pids) !== JSON.stringify(entry.sandboxPids || [])) {
+      if (JSON.stringify(pids) !== JSON.stringify(entry.sandboxPids || [])) {
         changed = true;
         return { ...entry, pid: pids[0], sandboxPids: pids };
       }
     } catch (error) {
-      // Keep the persisted state if Sandboxie is temporarily unavailable; logs capture details when actively monitored.
+      // Keep the persisted state if the process query is temporarily unavailable.
     }
     return entry;
   }));
@@ -560,96 +732,31 @@ ipcMain.handle('get-app-logs', async (_event, appRecord) => {
 ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id || !appRecord?.source) {
-    return { id: appRecord?.id, status: 'Failed', embedded: false, error: 'Installed app record is missing its id or executable path.' };
+    return { id: requestedAppRecord?.id, status: 'Failed', embedded: false, error: 'Installed app record is missing its id or executable path.' };
   }
 
   const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
   if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
-    return { id: appRecord.id, status: 'Failed', error: 'The app sandbox path is outside RunContainer’s managed sandbox directory; refusing to launch it.', embedded: false };
+    return failedLaunch(appRecord, 'The app container path is outside RunContainer’s managed directory; refusing to launch it.');
   }
-  const executableValidation = validateExe(appRecord.source);
-  if (!executableValidation.isValid) {
-    return { id: appRecord.id, status: 'Failed', error: executableValidation.reason, embedded: false };
-  }
-  const runtimeRoot = appRecord.runtimeRoot || path.join(sandboxRoot, 'runtime');
-  const appDataRoot = appRecord.appDataRoot || path.join(sandboxRoot, 'AppData');
-  const tempRoot = appRecord.tempRoot || path.join(sandboxRoot, 'Temp');
+  const validation = validateExe(appRecord.source);
+  if (!validation.isValid) return failedLaunch(appRecord, validation.reason);
+
   const logsRoot = appRecord.logsRoot || path.join(sandboxRoot, 'logs');
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
-
-  ensureDirectory(runtimeRoot);
-  ensureDirectory(appDataRoot);
-  ensureDirectory(tempRoot);
-  ensureDirectory(logsRoot);
+  ensureSandboxLayout(sandboxRoot);
   fs.writeFileSync(logPath, `Launch started at ${new Date().toISOString()}\n`, 'utf8');
-  appendLog(logPath, `Using sandbox root ${sandboxRoot}`);
+  appendLog(logPath, `Using container ${sandboxRoot}`);
+  stopMonitor(appRecord.id);
 
+  let sandboxieFailure = null;
   const tools = resolveSandboxieTools();
-  if (!tools) {
-    const reason = 'Sandboxie-Plus is required to run apps in an OS-managed sandbox. Install Sandboxie-Plus, or set RUNCONTAINER_SANDBOXIE_DIR to its folder containing Start.exe and SbieIni.exe.';
-    appendLog(logPath, reason);
-    return { id: appRecord.id, status: 'Failed', error: reason, reason, embedded: false };
+  if (tools) {
+    const result = await runWithSandboxie(appRecord, tools, sandboxRoot, logPath);
+    if (result.status === 'Running') return result;
+    sandboxieFailure = result.reason;
   }
-  const boxName = appRecord.sandboxieBox || sandboxBoxName(appRecord.id);
-  const fileRootPath = appRecord.sandboxieFileRoot || path.join(sandboxRoot, 'SandboxieFiles');
-  if (!isWithinDirectory(sandboxRoot, fileRootPath)) {
-    const reason = 'The Sandboxie file root is outside this app’s managed directory; refusing to launch it.';
-    appendLog(logPath, reason);
-    return { id: appRecord.id, status: 'Failed', error: reason, reason, embedded: false };
-  }
-  ensureDirectory(fileRootPath);
-  let boxConfigurationAttempted = true;
-  try {
-    const launchResult = await launchInSandboxie({
-      tools,
-      boxName,
-      executablePath: appRecord.source,
-      fileRootPath,
-      execute: executeFile,
-      onConfigured: async () => {
-        const configuredRecord = { ...appRecord, sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, sandboxieInitialized: true };
-        saveApps(loadApps().map((entry) => entry.id === appRecord.id ? configuredRecord : entry));
-      },
-    });
-    const updatedApp = {
-      ...appRecord,
-      sandboxieBox: boxName,
-      sandboxieFileRoot: fileRootPath,
-      sandboxieInitialized: true,
-      status: 'Running',
-      pid: launchResult.pids[0],
-      sandboxPids: launchResult.pids,
-      lastLaunchedAt: new Date().toISOString(),
-    };
-    saveApps(loadApps().map((entry) => entry.id === appRecord.id ? updatedApp : entry));
-    appendLog(logPath, `Sandboxie launched app in box ${boxName}, PIDs: ${launchResult.pids.join(', ')}`);
-    await monitorSandboxedContainer(updatedApp, tools, boxName, logsRoot);
-    broadcastContainerStatus(updatedApp);
-    return {
-      id: updatedApp.id,
-      status: 'Running',
-      pid: updatedApp.pid,
-      sandboxPids: updatedApp.sandboxPids,
-      sandboxieBox: boxName,
-      embedded: false,
-      reason: 'Running in a dedicated Sandboxie-Plus box. The app uses its own Windows window; generic in-window embedding is not supported.',
-    };
-  } catch (error) {
-    appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
-    if (boxConfigurationAttempted) {
-      let cleanupSucceeded = false;
-      try {
-        await deleteSandboxieBox({ tools, boxName, execute: executeFile });
-        cleanupSucceeded = true;
-      } catch (cleanupError) {
-        appendLog(logPath, `Sandboxie cleanup after failed launch also failed: ${cleanupError.message}`);
-      }
-      saveApps(loadApps().map((entry) => entry.id === appRecord.id
-        ? { ...entry, sandboxieInitialized: !cleanupSucceeded, status: 'Installed', pid: null, sandboxPids: [] }
-        : entry));
-    }
-    return { id: appRecord.id, status: 'Failed', error: error.message, reason: error.message, embedded: false };
-  }
+  return runWithIsolatedProfile(appRecord, sandboxRoot, logPath, sandboxieFailure);
 });
 
 ipcMain.handle('launch-desktop', async () => ({
@@ -666,42 +773,23 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   }
 
   const sandboxRoot = appRecord.sandboxRoot;
-  if (!sandboxRoot) {
-    return { id: appRecord.id, status: 'Failed', removed: false, error: 'The app has no managed sandbox path; refusing to report deletion.' };
-  }
-  if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
-    return { id: appRecord.id, status: 'Failed', removed: false, error: 'Refusing to delete a path outside RunContainer’s managed sandbox directory.' };
+  if (!sandboxRoot || !isWithinDirectory(sandboxRootBase, sandboxRoot)) {
+    return { id: appRecord.id, status: 'Failed', removed: false, error: 'Refusing to delete a path outside RunContainer’s managed directory.' };
   }
 
   try {
+    stopMonitor(appRecord.id);
+    await stopProcessesUnder(sandboxRoot);
     if (appRecord.sandboxieBox && appRecord.sandboxieInitialized) {
       const tools = resolveSandboxieTools();
-      if (!tools) throw new Error('Sandboxie-Plus is required to stop and remove this app’s sandbox.');
-      await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
-    } else if (appRecord.pid) {
-      if (process.platform === 'win32') {
-        await executeFile('taskkill.exe', ['/PID', String(appRecord.pid), '/T', '/F']);
-      } else {
-        try { process.kill(appRecord.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-      }
+      if (tools) await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
     }
-
-    const monitor = sandboxMonitors.get(appRecord.id);
-    if (monitor) clearInterval(monitor);
-    sandboxMonitors.delete(appRecord.id);
-
-    if (sandboxRoot && fs.existsSync(sandboxRoot)) {
-      fs.rmSync(sandboxRoot, { recursive: true, force: false, maxRetries: 3, retryDelay: 250 });
-    }
-    if (sandboxRoot && fs.existsSync(sandboxRoot)) {
-      throw new Error(`Sandbox files remain after deletion: ${sandboxRoot}`);
-    }
+    await removeSandboxDirectory(sandboxRoot);
 
     const remainingApps = removeAppRecord(appRecord);
     if (loadApps().some((entry) => entry.id === appRecord.id)) {
       throw new Error('App record remains in RunContainer’s persistent store after deletion.');
     }
-
     return { id: appRecord.id, status: 'Reset', removed: true, remainingCount: remainingApps.length };
   } catch (error) {
     appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Delete failed for ${appRecord.name || appRecord.id}: ${error.message}`);
@@ -712,23 +800,16 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
 ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
-  const appLog = path.join(appRecord.logsRoot || app.getPath('userData'), `${sanitizeName(appRecord.name || 'app')}.log`);
+  const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
+  const appLog = path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
   try {
-    if (appRecord.sandboxieBox && appRecord.sandboxieInitialized) {
+    stopMonitor(appRecord.id);
+    if (getLaunchMode(appRecord) === 'sandboxie') {
       const tools = resolveSandboxieTools();
-      if (!tools) throw new Error('Sandboxie-Plus is required to stop this app’s sandbox.');
-      await terminateSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
-    } else if (appRecord.pid) {
-      if (process.platform === 'win32') {
-        await executeFile('taskkill.exe', ['/PID', String(appRecord.pid), '/T', '/F']);
-      } else {
-        try { process.kill(appRecord.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-      }
+      if (tools) await terminateSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
     }
-    const monitor = sandboxMonitors.get(appRecord.id);
-    if (monitor) clearInterval(monitor);
-    sandboxMonitors.delete(appRecord.id);
-    const apps = loadApps().map((entry) => entry.id === appRecord.id ? { ...entry, status: 'Stopped', pid: null, sandboxPids: [] } : entry);
+    await stopProcessesUnder(sandboxRoot);
+    const apps = loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, status: 'Stopped', pid: null, sandboxPids: [] } : entry));
     saveApps(apps);
     appendLog(appLog, `App ${appRecord.id} stopped.`);
     const updated = apps.find((entry) => entry.id === appRecord.id);

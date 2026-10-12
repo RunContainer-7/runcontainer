@@ -176,14 +176,14 @@ export default function ContainerManager() {
   }
 
   function handleRun(container) {
-    setInstallMessage(`Starting ${container.name} in its isolated Sandboxie box...`);
+    setInstallMessage(`Starting ${container.name} in its RunContainer container...`);
     setActiveSession({ ...container, embedded: false, status: 'Launching' });
 
     runContainer(container)
       .then(async (result) => {
         if (!result || result.status !== 'Running' || !result.pid) {
           setActiveSession(null);
-          const reason = result?.error || result?.reason || 'Sandboxie did not confirm that an app process started.';
+          const reason = result?.error || result?.reason || 'RunContainer did not confirm that an app process started.';
           setInstallMessage(`${container.name} was not launched: ${reason}`);
           updateContainerStatus(container.id, result?.status || 'Failed');
           await refreshContainers();
@@ -192,7 +192,7 @@ export default function ContainerManager() {
 
         updateContainerStatus(container.id, result.status);
         setActiveSession({ ...container, ...result, status: 'Running', embedded: false });
-        setInstallMessage(`${container.name} is running in Sandboxie-Plus (PID ${result.pid}). Its Windows app window opens separately; generic in-window embedding is not supported.`);
+        setInstallMessage(`${container.name} is running (PID ${result.pid}). ${result.reason || ''}`);
         refreshContainers();
       })
       .catch((error) => {
@@ -205,7 +205,7 @@ export default function ContainerManager() {
     killContainer(container)
       .then((result) => {
         if (result?.status !== 'Stopped') {
-          setInstallMessage(`Could not stop ${container.name}: ${result?.error || 'Sandboxie did not confirm that the box stopped.'}`);
+          setInstallMessage(`Could not stop ${container.name}: ${result?.error || 'RunContainer did not confirm that the app stopped.'}`);
           return;
         }
         updateContainerStatus(container.id, result.status);
@@ -302,7 +302,7 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div>
               <h2>{activeSession.status === 'Launching' ? 'Starting isolated app' : activeSession.status === 'Running' ? 'Isolated app running' : 'Isolated app stopped'}</h2>
-              <span className="muted">{activeSession.name} • Sandbox engine: Sandboxie-Plus</span>
+              <span className="muted">{activeSession.name} • {activeSession.launchMode === 'sandboxie' ? 'Sandboxie-Plus box (OS-level isolation)' : 'RunContainer per-app container'}</span>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
@@ -312,10 +312,10 @@ export default function ContainerManager() {
                 <strong>{activeSession.name}</strong>
                 <div className="muted">
                   {activeSession.status === 'Launching'
-                    ? 'Waiting for Sandboxie-Plus to confirm the process.'
+                    ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
-                      ? `Running in isolated box ${activeSession.sandboxieBox || '—'}${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. The app opens in its own Windows window.`
-                      : 'Sandboxie-Plus reports that the app processes have exited.'}
+                      ? `Running${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. The app opens in its own Windows window.`
+                      : 'All processes for this app have exited.'}
                 </div>
               </div>
               <div className="detail-actions">
