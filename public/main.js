@@ -345,32 +345,44 @@ async function listRunningPids(appRecord) {
 
 function monitorAppProcesses(appId, logPath) {
   stopMonitor(appId);
+  // A PowerShell process query can take longer than the poll interval; skip ticks while one is still running.
+  let checking = false;
   const interval = setInterval(async () => {
-    const current = getStoredApp(appId);
-    if (!current || current.status !== 'Running') {
-      stopMonitor(appId);
-      return;
-    }
+    if (checking) return;
+    checking = true;
     try {
-      const pids = await listRunningPids(current);
-      if (pids.length === 0) {
-        const updated = { ...current, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
-        saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
-        appendLog(logPath, 'All processes for this app have exited.');
-        stopMonitor(appId);
-        broadcastContainerStatus(updated);
-        return;
-      }
-      if (JSON.stringify(pids) !== JSON.stringify(current.sandboxPids || [])) {
-        const updated = { ...current, pid: pids[0], sandboxPids: pids };
-        saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
-        broadcastContainerStatus(updated);
-      }
-    } catch (error) {
-      appendLog(logPath, `Unable to query process state: ${error.message}`);
+      await checkAppProcesses(appId, logPath);
+    } finally {
+      checking = false;
     }
   }, 1500);
   sandboxMonitors.set(appId, interval);
+}
+
+async function checkAppProcesses(appId, logPath) {
+  const current = getStoredApp(appId);
+  if (!current || current.status !== 'Running') {
+    stopMonitor(appId);
+    return;
+  }
+  try {
+    const pids = await listRunningPids(current);
+    if (pids.length === 0) {
+      const updated = { ...current, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
+      saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
+      appendLog(logPath, 'All processes for this app have exited.');
+      stopMonitor(appId);
+      broadcastContainerStatus(updated);
+      return;
+    }
+    if (JSON.stringify(pids) !== JSON.stringify(current.sandboxPids || [])) {
+      const updated = { ...current, pid: pids[0], sandboxPids: pids };
+      saveApps(loadApps().map((entry) => (entry.id === appId ? updated : entry)));
+      broadcastContainerStatus(updated);
+    }
+  } catch (error) {
+    appendLog(logPath, `Unable to query process state: ${error.message}`);
+  }
 }
 
 async function stopProcessesUnder(directory) {

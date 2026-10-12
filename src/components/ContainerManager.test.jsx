@@ -73,7 +73,7 @@ describe("ContainerManager", () => {
   it("shows the RunContainer version in Info", () => {
     const container = render();
     openTab(container, "Info");
-    expect(container.textContent).toContain("RunContainer v0.8.0");
+    expect(container.textContent).toContain("RunContainer v1.0.0");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
