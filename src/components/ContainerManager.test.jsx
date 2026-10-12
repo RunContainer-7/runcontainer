@@ -70,6 +70,15 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("shows the RunContainer version in Info", () => {
+    const container = render();
+    openTab(container, "Info");
+    expect(container.textContent).toContain("RunContainer v0.8.0");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("shows the Completely free section in Info", () => {
     const container = render();
     openTab(container, "Info");

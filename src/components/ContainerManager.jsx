@@ -408,6 +408,7 @@ export default function ContainerManager() {
               </div>
             </div>
           </div>
+          <p className="muted info-version">RunContainer v0.8.0</p>
         </div>
       )}
 
