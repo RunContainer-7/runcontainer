@@ -1,13 +1,24 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const { spawn, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const https = require('https');
+const crypto = require('crypto');
+const {
+  sandboxBoxName,
+  findSandboxieTools,
+  buildListPidsArgs,
+  launchInSandboxie,
+  terminateSandboxieBox,
+  deleteSandboxieBox,
+  parseSandboxPids,
+  isWithinDirectory,
+} = require('./sandboxie-runtime');
 
 let mainWindow;
 const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json');
-const sessionHosts = new Map();
+const sandboxMonitors = new Map();
+const sandboxRootBase = path.join(app.getPath('userData'), 'sandboxes');
 
 app.setName('RunContainer');
 app.setAppUserModelId('RunContainer');
@@ -32,13 +43,18 @@ function saveApps(apps) {
   fs.writeFileSync(appStorePath, JSON.stringify(apps, null, 2), 'utf8');
 }
 
+function getStoredApp(appId) {
+  if (!appId) return null;
+  return loadApps().find((entry) => entry.id === appId) || null;
+}
+
 function removeAppRecord(appRecord) {
   const apps = loadApps();
   const remainingApps = apps.filter((entry) => {
-    if (appRecord?.id && entry.id && entry.id === appRecord.id) return false;
-    if (appRecord?.source && entry.source && entry.source === appRecord.source) return false;
-    if (appRecord?.sandboxRoot && entry.sandboxRoot && entry.sandboxRoot === appRecord.sandboxRoot) return false;
-    if (!appRecord?.id && appRecord?.name && entry.name && entry.name === appRecord.name) return false;
+    if (appRecord?.id) return entry.id !== appRecord.id;
+    if (appRecord?.source && entry.source) return entry.source !== appRecord.source;
+    if (appRecord?.sandboxRoot && entry.sandboxRoot) return entry.sandboxRoot !== appRecord.sandboxRoot;
+    if (appRecord?.name && entry.name) return entry.name !== appRecord.name;
     return true;
   });
 
@@ -112,49 +128,6 @@ function ensureSandboxLayout(sandboxRoot) {
   return layout;
 }
 
-function getSandboxEnvironment(sandboxRoot, appDataRoot, tempRoot, runtimeRoot) {
-  const desktopRoot = path.join(sandboxRoot, 'Desktop');
-  const documentsRoot = path.join(sandboxRoot, 'Documents');
-  const downloadsRoot = path.join(sandboxRoot, 'Downloads');
-  const picturesRoot = path.join(sandboxRoot, 'Pictures');
-  const musicRoot = path.join(sandboxRoot, 'Music');
-  const videosRoot = path.join(sandboxRoot, 'Videos');
-  const programFilesRoot = path.join(sandboxRoot, 'Program Files');
-  const programDataRoot = path.join(sandboxRoot, 'ProgramData');
-
-  return {
-    ...process.env,
-    APPDATA: appDataRoot,
-    LOCALAPPDATA: appDataRoot,
-    USERPROFILE: sandboxRoot,
-    HOME: sandboxRoot,
-    TEMP: tempRoot,
-    TMP: tempRoot,
-    DESKTOP: desktopRoot,
-    Desktop: desktopRoot,
-    DOCUMENTS: documentsRoot,
-    Documents: documentsRoot,
-    DOWNLOADS: downloadsRoot,
-    Downloads: downloadsRoot,
-    PICTURES: picturesRoot,
-    Pictures: picturesRoot,
-    MUSIC: musicRoot,
-    Music: musicRoot,
-    VIDEOS: videosRoot,
-    Videos: videosRoot,
-    PROGRAMFILES: programFilesRoot,
-    ProgramFiles: programFilesRoot,
-    PROGRAMDATA: programDataRoot,
-    ProgramData: programDataRoot,
-    PUBLIC: path.join(sandboxRoot, 'Public'),
-    Public: path.join(sandboxRoot, 'Public'),
-    HOMEDRIVE: process.env.HOMEDRIVE || 'C:',
-    HOMEPATH: path.join(path.sep, 'Users', sanitizeName(path.basename(sandboxRoot)) || 'RunContainerSandbox'),
-    RUNCONTAINER_SANDBOX_ROOT: sandboxRoot,
-    RUNCONTAINER_RUNTIME_ROOT: runtimeRoot,
-    RUNCONTAINER_APPDATA_ROOT: appDataRoot,
-  };
-}
 
 function validateExe(exePath) {
   if (!exePath || typeof exePath !== 'string') {
@@ -169,10 +142,15 @@ function validateExe(exePath) {
     return { isValid: false, reason: 'Only .exe files are supported.' };
   }
 
-  const buffer = fs.readFileSync(exePath);
-  const signature = buffer.toString('hex', 0, 2);
-  if (signature !== '4d5a') {
-    return { isValid: false, reason: 'The file is not a valid Windows executable.' };
+  const fileDescriptor = fs.openSync(exePath, 'r');
+  const header = Buffer.alloc(2);
+  try {
+    const bytesRead = fs.readSync(fileDescriptor, header, 0, header.length, 0);
+    if (bytesRead !== 2 || header.toString('hex') !== '4d5a') {
+      return { isValid: false, reason: 'The file is not a valid Windows executable.' };
+    }
+  } finally {
+    fs.closeSync(fileDescriptor);
   }
 
   return { isValid: true, reason: 'Valid Windows executable.' };
@@ -280,197 +258,66 @@ function downloadUrl(url, outputPath) {
   });
 }
 
-function getParentWindowHandle(targetWindow) {
-  const windowRef = targetWindow || mainWindow;
-  if (!windowRef || windowRef.isDestroyed()) {
-    return null;
-  }
-
-  try {
-    const handle = windowRef.getNativeWindowHandle();
-    if (!handle || handle.length === 0) {
-      return null;
-    }
-
-    if (handle.length >= 8) {
-      return `0x${handle.readBigUInt64LE(0).toString(16)}`;
-    }
-
-    return `0x${handle.readUInt32LE(0).toString(16)}`;
-  } catch (error) {
-    return null;
-  }
-}
-
-function ensureSessionHost(appRecord) {
-  const existing = sessionHosts.get(appRecord.id);
-  if (existing && !existing.isDestroyed()) {
-    return existing;
-  }
-
-  const hostWindow = new BrowserWindow({
-    parent: mainWindow || undefined,
-    width: 960,
-    height: 640,
-    show: true,
-    frame: true,
-    titleBarStyle: 'default',
-    resizable: true,
-    movable: true,
-    minimizable: false,
-    maximizable: false,
-    title: `RunContainer · ${appRecord.name}`,
-    backgroundColor: '#020617',
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      enableRemoteModule: true,
-    },
-  });
-
-  hostWindow.setMenuBarVisibility(false);
-  hostWindow.setSkipTaskbar(false);
-  hostWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`
-    <html>
-      <body style="margin:0;background:#020617;color:#f8fafc;font-family:Segoe UI,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;">
-        <div style="text-align:center;padding:24px;border:1px solid rgba(96,165,250,0.2);border-radius:18px;background:rgba(2,6,23,0.95);box-shadow:0 16px 42px rgba(0,0,0,0.28);">
-          <div style="font-size:46px;margin-bottom:10px;">▣</div>
-          <div style="font-size:16px;font-weight:700;">${appRecord.name}</div>
-          <div style="margin-top:8px;color:#94a3b8;font-size:13px;">Launching inside RunContainer…</div>
-        </div>
-      </body>
-    </html>
-  `));
-
-  hostWindow.on('closed', () => {
-    sessionHosts.delete(appRecord.id);
-  });
-
-  sessionHosts.set(appRecord.id, hostWindow);
-  return hostWindow;
-}
-
-function closeSessionHost(appRecord) {
-  const existing = sessionHosts.get(appRecord?.id);
-  if (existing && !existing.isDestroyed()) {
-    existing.close();
-  }
-  sessionHosts.delete(appRecord?.id);
-}
-
-function promptDesktopFallback(appRecord, parentWindow) {
-  return new Promise((resolve) => {
-    const preferredParent = parentWindow && !parentWindow.isDestroyed() ? parentWindow : mainWindow;
-    if (!preferredParent || preferredParent.isDestroyed()) {
-      resolve(false);
-      return;
-    }
-
-    const scriptPath = path.join(__dirname, 'show-windows-fallback.ps1');
-    const args = [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      scriptPath,
-      '-Title',
-      'RunContainer',
-      '-Message',
-      `${appRecord.name} did not appear inside the sandbox after 5 seconds.`,
-      '-Detail',
-      'Would you like to launch it on the desktop instead?',
-    ];
-
-    execFile('powershell.exe', args, { windowsHide: true }, (error, stdout) => {
+function executeFile(filePath, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(filePath, args, { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, ...options }, (error, stdout, stderr) => {
       if (error) {
-        resolve(false);
+        const details = String(stderr || stdout || error.message).trim();
+        reject(new Error(details || `Command failed: ${path.basename(filePath)}`));
         return;
       }
-
-      const response = String(stdout || '').trim().toUpperCase();
-      resolve(response === 'YES');
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
   });
 }
 
-function launchSandboxedProcess(appRecord, sandboxRoot, runtimeRoot, appDataRoot, tempRoot, logsRoot, hostWindow) {
-  const executablePath = appRecord.source;
-  const launchEnv = getSandboxEnvironment(sandboxRoot, appDataRoot, tempRoot, runtimeRoot);
-  const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
-  const launcherScriptPath = path.join(__dirname, 'launch-sandboxed.ps1');
-  const parentHwnd = getParentWindowHandle(hostWindow);
+function broadcastContainerStatus(record) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('container:status', record);
+  }
+}
 
-  return new Promise((resolve) => {
+async function monitorSandboxedContainer(appRecord, tools, boxName, logsRoot) {
+  const prior = sandboxMonitors.get(appRecord.id);
+  if (prior) clearInterval(prior);
+  const interval = setInterval(async () => {
     try {
-      const commandArgs = [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        launcherScriptPath,
-        '-ExePath',
-        executablePath,
-        '-SandboxRoot',
-        sandboxRoot,
-        '-RuntimeRoot',
-        runtimeRoot,
-        '-AppDataRoot',
-        appDataRoot,
-        '-TempRoot',
-        tempRoot,
-        '-LogsRoot',
-        logsRoot,
-      ];
-
-      if (parentHwnd) {
-        commandArgs.push('-ParentHwnd', parentHwnd);
+      const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(boxName));
+      const pids = parseSandboxPids(stdout);
+      if (pids === null) {
+        appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), 'Sandboxie returned an invalid process list; keeping the running state until it can be confirmed.');
+        return;
       }
-
-      execFile('powershell.exe', commandArgs, { windowsHide: true }, (error, stdout, stderr) => {
-        appendLog(logPath, `PowerShell launcher exited with error=${Boolean(error)} stderr=${(stderr || '').slice(0, 400)}`);
-
-        if (error) {
-          resolve({
-            pid: null,
-            embedded: false,
-            needsDesktopChoice: true,
-            error: error.message,
-            reason: 'RunContainer could not start this app with the Windows sandbox launcher.',
-          });
-          return;
-        }
-
-        try {
-          const parsed = JSON.parse(stdout.trim());
-          resolve({
-            pid: parsed.pid || null,
-            embedded: Boolean(parsed.embedded),
-            needsDesktopChoice: Boolean(parsed.needsDesktopChoice),
-            promptDesktopFallback: Boolean(parsed.needsDesktopChoice),
-            reason: parsed.reason || 'The sandbox launcher completed.',
-            name: parsed.name || null,
-          });
-        } catch (parseError) {
-          resolve({
-            pid: null,
-            embedded: false,
-            needsDesktopChoice: true,
-            error: parseError.message,
-            reason: 'RunContainer could not parse the sandbox launcher response.',
-          });
-        }
-      });
+      const apps = loadApps();
+      const current = apps.find((entry) => entry.id === appRecord.id);
+      if (!current || current.status !== 'Running') {
+        clearInterval(interval);
+        sandboxMonitors.delete(appRecord.id);
+        return;
+      }
+      if (pids.length === 0) {
+        const updated = { ...current, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
+        saveApps(apps.map((entry) => entry.id === appRecord.id ? updated : entry));
+        appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), 'Sandboxie reports all processes in this app box have exited.');
+        clearInterval(interval);
+        sandboxMonitors.delete(appRecord.id);
+        broadcastContainerStatus(updated);
+        return;
+      }
+      if (JSON.stringify(pids) !== JSON.stringify(current.sandboxPids || [])) {
+        const updated = { ...current, pid: pids[0], sandboxPids: pids };
+        saveApps(apps.map((entry) => entry.id === appRecord.id ? updated : entry));
+        broadcastContainerStatus(updated);
+      }
     } catch (error) {
-      appendLog(logPath, `Sandbox launcher failed: ${error.message}`);
-      resolve({
-        pid: null,
-        embedded: false,
-        needsDesktopChoice: true,
-        error: error.message,
-        reason: 'RunContainer could not start this app from the sandbox.',
-      });
+      appendLog(path.join(logsRoot, `${sanitizeName(appRecord.name)}.log`), `Unable to query Sandboxie process state: ${error.message}`);
     }
-  });
+  }, 1500);
+  sandboxMonitors.set(appRecord.id, interval);
+}
+
+function resolveSandboxieTools() {
+  return findSandboxieTools(process.env);
 }
 
 function createWindow() {
@@ -555,40 +402,61 @@ ipcMain.handle('open-file-dialog', async () => {
   return result.filePaths[0];
 });
 
-ipcMain.handle('list-apps', async () => loadApps());
+ipcMain.handle('list-apps', async () => {
+  const apps = loadApps();
+  const tools = resolveSandboxieTools();
+  if (!tools) return apps;
+  let changed = false;
+  const refreshed = await Promise.all(apps.map(async (entry) => {
+    if (entry.status !== 'Running' || !entry.sandboxieBox) return entry;
+    try {
+      const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(entry.sandboxieBox));
+      const pids = parseSandboxPids(stdout);
+      if (pids && pids.length === 0) {
+        changed = true;
+        const monitor = sandboxMonitors.get(entry.id);
+        if (monitor) clearInterval(monitor);
+        sandboxMonitors.delete(entry.id);
+        return { ...entry, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
+      }
+      if (pids && JSON.stringify(pids) !== JSON.stringify(entry.sandboxPids || [])) {
+        changed = true;
+        return { ...entry, pid: pids[0], sandboxPids: pids };
+      }
+    } catch (error) {
+      // Keep the persisted state if Sandboxie is temporarily unavailable; logs capture details when actively monitored.
+    }
+    return entry;
+  }));
+  if (changed) saveApps(refreshed);
+  return refreshed;
+});
 
-ipcMain.handle('install-exe', async (_event, exePath) => {
+async function installExe(exePath) {
   const validation = validateExe(exePath);
-  if (!validation.isValid) {
-    throw new Error(validation.reason);
-  }
+  if (!validation.isValid) throw new Error(validation.reason);
 
+  const appId = crypto.randomUUID();
   const baseName = sanitizeName(path.basename(exePath, path.extname(exePath)));
-  const sandboxRoot = path.join(app.getPath('userData'), 'sandboxes', baseName);
+  const sandboxRoot = path.join(sandboxRootBase, `app-${appId}`);
   const sandboxLayout = ensureSandboxLayout(sandboxRoot);
-  const runtimeRoot = sandboxLayout.runtime;
-  const appDataRoot = sandboxLayout.appData;
-  const tempRoot = sandboxLayout.temp;
-  const logsRoot = sandboxLayout.logs;
-
   const destination = path.join(sandboxRoot, path.basename(exePath));
   fs.copyFileSync(exePath, destination);
 
   const metadata = await getExeMetadata(exePath);
   const iconPath = path.join(sandboxRoot, 'icon.ico');
   const extractedIcon = await extractExeIcon(exePath, iconPath);
-
   const profile = getSandboxProfile('default');
   const record = {
-    id: `${Date.now()}`,
+    id: appId,
     name: metadata.title || baseName,
     status: 'Installed',
     source: destination,
     sandboxRoot,
-    runtimeRoot,
-    appDataRoot,
-    tempRoot,
-    logsRoot,
+    runtimeRoot: sandboxLayout.runtime,
+    appDataRoot: sandboxLayout.appData,
+    tempRoot: sandboxLayout.temp,
+    logsRoot: sandboxLayout.logs,
     desktopRoot: sandboxLayout.desktop,
     documentsRoot: sandboxLayout.documents,
     downloadsRoot: sandboxLayout.downloads,
@@ -596,21 +464,19 @@ ipcMain.handle('install-exe', async (_event, exePath) => {
     programDataRoot: sandboxLayout.programData,
     metadata,
     iconPath: extractedIcon || null,
-    permissions: {
-      network: profile.network,
-      filesystem: profile.filesystem,
-      registry: profile.registry,
-    },
+    permissions: { network: profile.network, filesystem: profile.filesystem, registry: profile.registry },
     profile: 'default',
     sandboxConfig: profile,
+    sandboxieBox: sandboxBoxName(appId),
+    sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
+    sandboxieInitialized: false,
     createdAt: new Date().toISOString(),
   };
-
-  const apps = loadApps();
-  apps.push(record);
-  saveApps(apps);
+  saveApps([...loadApps(), record]);
   return record;
-});
+}
+
+ipcMain.handle('install-exe', async (_event, exePath) => installExe(exePath));
 
 ipcMain.handle('import-url', async (_event, url) => {
   if (!url || typeof url !== 'string') {
@@ -618,13 +484,15 @@ ipcMain.handle('import-url', async (_event, url) => {
   }
 
   const parsedUrl = new URL(url);
-  const fileName = sanitizeName(path.basename(parsedUrl.pathname) || 'downloaded-app.exe');
+  if (parsedUrl.protocol !== 'https:') throw new Error('Only HTTPS download URLs are supported.');
+  const originalName = path.basename(parsedUrl.pathname) || 'downloaded-app.exe';
+  const fileName = `${sanitizeName(path.basename(originalName, path.extname(originalName)))}.exe`;
   const downloadsRoot = path.join(app.getPath('userData'), 'downloads');
   ensureDirectory(downloadsRoot);
-  const outputPath = path.join(downloadsRoot, `${fileName}.exe`);
+  const outputPath = path.join(downloadsRoot, fileName);
   const downloadedPath = await downloadUrl(parsedUrl.toString(), outputPath);
 
-  return ipcMain.handle('install-exe', null, downloadedPath);
+  return installExe(downloadedPath);
 });
 
 ipcMain.handle('update-permissions', async (_event, appRecord, permissions) => {
@@ -634,16 +502,41 @@ ipcMain.handle('update-permissions', async (_event, appRecord, permissions) => {
 });
 
 ipcMain.handle('duplicate-container', async (_event, appRecord) => {
-  const apps = loadApps();
+  if (!appRecord?.id || !fs.existsSync(appRecord.source || '')) throw new Error('The installed executable is missing.');
+  const appId = crypto.randomUUID();
+  const sandboxRoot = path.join(sandboxRootBase, `app-${appId}`);
+  const layout = ensureSandboxLayout(sandboxRoot);
+  const destination = path.join(sandboxRoot, path.basename(appRecord.source));
+  fs.copyFileSync(appRecord.source, destination);
+  const iconPath = appRecord.iconPath && fs.existsSync(appRecord.iconPath)
+    ? path.join(sandboxRoot, path.basename(appRecord.iconPath))
+    : null;
+  if (iconPath) fs.copyFileSync(appRecord.iconPath, iconPath);
   const duplicate = {
     ...appRecord,
-    id: `${Date.now()}`,
+    id: appId,
     name: `${appRecord.name} Copy`,
+    source: destination,
+    sandboxRoot,
+    runtimeRoot: layout.runtime,
+    appDataRoot: layout.appData,
+    tempRoot: layout.temp,
+    logsRoot: layout.logs,
+    desktopRoot: layout.desktop,
+    documentsRoot: layout.documents,
+    downloadsRoot: layout.downloads,
+    programFilesRoot: layout.programFiles,
+    programDataRoot: layout.programData,
+    iconPath,
+    sandboxieBox: sandboxBoxName(appId),
+    sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
+    sandboxieInitialized: false,
     status: 'Installed',
+    pid: null,
+    sandboxPids: [],
     createdAt: new Date().toISOString(),
   };
-  apps.push(duplicate);
-  saveApps(apps);
+  saveApps([...loadApps(), duplicate]);
   return duplicate;
 });
 
@@ -664,26 +557,20 @@ ipcMain.handle('get-app-logs', async (_event, appRecord) => {
   return fs.readFileSync(logPath, 'utf8').trim().split(/\n/).filter(Boolean);
 });
 
-async function launchAppOnDesktop(appRecord) {
-  const executablePath = appRecord?.source;
-  if (!executablePath) return null;
-
-  const child = spawn(executablePath, [], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    cwd: path.dirname(executablePath),
-    env: process.env,
-    shell: true,
-  });
-  child.unref();
-  return { pid: child.pid, embedded: false, reason: 'Opened directly on the desktop because the app could not be embedded into RunContainer.' };
-}
-
-ipcMain.handle('run-exe', async (_event, appRecord) => {
-  if (!appRecord?.source) return null;
+ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id || !appRecord?.source) {
+    return { id: appRecord?.id, status: 'Failed', embedded: false, error: 'Installed app record is missing its id or executable path.' };
+  }
 
   const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
+  if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
+    return { id: appRecord.id, status: 'Failed', error: 'The app sandbox path is outside RunContainer’s managed sandbox directory; refusing to launch it.', embedded: false };
+  }
+  const executableValidation = validateExe(appRecord.source);
+  if (!executableValidation.isValid) {
+    return { id: appRecord.id, status: 'Failed', error: executableValidation.reason, embedded: false };
+  }
   const runtimeRoot = appRecord.runtimeRoot || path.join(sandboxRoot, 'runtime');
   const appDataRoot = appRecord.appDataRoot || path.join(sandboxRoot, 'AppData');
   const tempRoot = appRecord.tempRoot || path.join(sandboxRoot, 'Temp');
@@ -697,140 +584,158 @@ ipcMain.handle('run-exe', async (_event, appRecord) => {
   fs.writeFileSync(logPath, `Launch started at ${new Date().toISOString()}\n`, 'utf8');
   appendLog(logPath, `Using sandbox root ${sandboxRoot}`);
 
-  const hostWindow = ensureSessionHost(appRecord);
-  const launchResult = await launchSandboxedProcess(appRecord, sandboxRoot, runtimeRoot, appDataRoot, tempRoot, logsRoot, hostWindow);
-  appendLog(logPath, `Process launched with pid ${launchResult.pid}${launchResult.embedded ? ' (embedded into RunContainer)' : ''}`);
-  appendLog(logPath, `Launch outcome: embedded=${Boolean(launchResult.embedded)} needsDesktopChoice=${Boolean(launchResult.needsDesktopChoice)} reason=${launchResult.reason || 'none'}`);
-
-  if (launchResult.promptDesktopFallback) {
-    const shouldUseDesktop = await promptDesktopFallback(appRecord, hostWindow);
-    if (shouldUseDesktop) {
-      const desktopLaunchResult = await launchAppOnDesktop(appRecord);
-      closeSessionHost(appRecord);
-      const apps = loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, status: 'Running', pid: desktopLaunchResult?.pid || null, lastLaunchedAt: new Date().toISOString() } : entry));
-      saveApps(apps);
-      return {
-        id: appRecord.id,
-        status: 'Running',
-        pid: desktopLaunchResult?.pid || null,
-        embedded: false,
-        reason: desktopLaunchResult?.reason || 'Opened on the desktop instead.',
-      };
-    }
+  const tools = resolveSandboxieTools();
+  if (!tools) {
+    const reason = 'Sandboxie-Plus is required to run apps in an OS-managed sandbox. Install Sandboxie-Plus, or set RUNCONTAINER_SANDBOXIE_DIR to its folder containing Start.exe and SbieIni.exe.';
+    appendLog(logPath, reason);
+    return { id: appRecord.id, status: 'Failed', error: reason, reason, embedded: false };
   }
-
-  if (launchResult.needsDesktopChoice || (!launchResult.embedded && launchResult.reason && launchResult.reason.toLowerCase().includes('embed'))) {
-    return {
-      id: appRecord.id,
-      status: 'NeedsDesktopChoice',
-      embedded: false,
-      pid: launchResult.pid,
-      needsDesktopChoice: true,
-      reason: launchResult.reason || 'RunContainer could not embed this app into its host surface.',
-    };
+  const boxName = appRecord.sandboxieBox || sandboxBoxName(appRecord.id);
+  const fileRootPath = appRecord.sandboxieFileRoot || path.join(sandboxRoot, 'SandboxieFiles');
+  if (!isWithinDirectory(sandboxRoot, fileRootPath)) {
+    const reason = 'The Sandboxie file root is outside this app’s managed directory; refusing to launch it.';
+    appendLog(logPath, reason);
+    return { id: appRecord.id, status: 'Failed', error: reason, reason, embedded: false };
   }
-
-  const apps = loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, status: 'Running', pid: launchResult.pid, lastLaunchedAt: new Date().toISOString() } : entry));
-  saveApps(apps);
-
-  if (launchResult.error) {
-    return {
-      id: appRecord.id,
-      status: 'Failed',
-      error: launchResult.error,
-      embedded: false,
-    };
-  }
-
-  if (!launchResult.embedded) {
-    return {
-      id: appRecord.id,
-      status: 'Running',
-      pid: launchResult.pid,
-      embedded: false,
-      reason: launchResult.reason || 'The app launched from the sandbox and will run normally.',
-    };
-  }
-
-  return {
-    id: appRecord.id,
-    status: 'Running',
-    pid: launchResult.pid,
-    embedded: true,
-  };
-});
-
-ipcMain.handle('launch-desktop', async (_event, appRecord) => {
-  const desktopLaunchResult = await launchAppOnDesktop(appRecord);
-  closeSessionHost(appRecord);
-  const apps = loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, status: 'Running', pid: desktopLaunchResult?.pid || null, lastLaunchedAt: new Date().toISOString() } : entry));
-  saveApps(apps);
-  return {
-    id: appRecord.id,
-    status: 'Running',
-    pid: desktopLaunchResult?.pid || null,
-    embedded: false,
-    reason: desktopLaunchResult?.reason || 'Opened on the desktop instead.',
-  };
-});
-
-ipcMain.handle('reset-container', async (_event, appRecord) => {
+  ensureDirectory(fileRootPath);
+  let boxConfigurationAttempted = true;
   try {
-    const appId = appRecord?.id;
-    const sandboxRoot = appRecord?.sandboxRoot;
-    if (sandboxRoot && fs.existsSync(sandboxRoot)) {
-      fs.rmSync(sandboxRoot, { recursive: true, force: true });
-    }
-
-    const remainingApps = removeAppRecord(appRecord);
-
-    const logPath = path.join(appRecord?.logsRoot || path.join(appRecord?.sandboxRoot || path.dirname(appRecord?.source || ''), 'logs'), `${sanitizeName(appRecord?.name || 'app')}.log`);
-    if (logPath) {
+    const launchResult = await launchInSandboxie({
+      tools,
+      boxName,
+      executablePath: appRecord.source,
+      fileRootPath,
+      execute: executeFile,
+      onConfigured: async () => {
+        const configuredRecord = { ...appRecord, sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, sandboxieInitialized: true };
+        saveApps(loadApps().map((entry) => entry.id === appRecord.id ? configuredRecord : entry));
+      },
+    });
+    const updatedApp = {
+      ...appRecord,
+      sandboxieBox: boxName,
+      sandboxieFileRoot: fileRootPath,
+      sandboxieInitialized: true,
+      status: 'Running',
+      pid: launchResult.pids[0],
+      sandboxPids: launchResult.pids,
+      lastLaunchedAt: new Date().toISOString(),
+    };
+    saveApps(loadApps().map((entry) => entry.id === appRecord.id ? updatedApp : entry));
+    appendLog(logPath, `Sandboxie launched app in box ${boxName}, PIDs: ${launchResult.pids.join(', ')}`);
+    await monitorSandboxedContainer(updatedApp, tools, boxName, logsRoot);
+    broadcastContainerStatus(updatedApp);
+    return {
+      id: updatedApp.id,
+      status: 'Running',
+      pid: updatedApp.pid,
+      sandboxPids: updatedApp.sandboxPids,
+      sandboxieBox: boxName,
+      embedded: false,
+      reason: 'Running in a dedicated Sandboxie-Plus box. The app uses its own Windows window; generic in-window embedding is not supported.',
+    };
+  } catch (error) {
+    appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
+    if (boxConfigurationAttempted) {
+      let cleanupSucceeded = false;
       try {
-        appendLog(logPath, `Container removed from RunContainer.`);
-      } catch (_error) {
-        // ignore log cleanup failures
+        await deleteSandboxieBox({ tools, boxName, execute: executeFile });
+        cleanupSucceeded = true;
+      } catch (cleanupError) {
+        appendLog(logPath, `Sandboxie cleanup after failed launch also failed: ${cleanupError.message}`);
+      }
+      saveApps(loadApps().map((entry) => entry.id === appRecord.id
+        ? { ...entry, sandboxieInitialized: !cleanupSucceeded, status: 'Installed', pid: null, sandboxPids: [] }
+        : entry));
+    }
+    return { id: appRecord.id, status: 'Failed', error: error.message, reason: error.message, embedded: false };
+  }
+});
+
+ipcMain.handle('launch-desktop', async () => ({
+  status: 'Failed',
+  error: 'Direct desktop launch is disabled so RunContainer does not bypass its isolation engine.',
+  reason: 'Direct desktop launch is disabled so RunContainer does not bypass its isolation engine.',
+  embedded: false,
+}));
+
+ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) {
+    return { id: requestedAppRecord?.id, status: 'Failed', removed: false, error: 'App is not in RunContainer’s persistent app list.' };
+  }
+
+  const sandboxRoot = appRecord.sandboxRoot;
+  if (!sandboxRoot) {
+    return { id: appRecord.id, status: 'Failed', removed: false, error: 'The app has no managed sandbox path; refusing to report deletion.' };
+  }
+  if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
+    return { id: appRecord.id, status: 'Failed', removed: false, error: 'Refusing to delete a path outside RunContainer’s managed sandbox directory.' };
+  }
+
+  try {
+    if (appRecord.sandboxieBox && appRecord.sandboxieInitialized) {
+      const tools = resolveSandboxieTools();
+      if (!tools) throw new Error('Sandboxie-Plus is required to stop and remove this app’s sandbox.');
+      await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
+    } else if (appRecord.pid) {
+      if (process.platform === 'win32') {
+        await executeFile('taskkill.exe', ['/PID', String(appRecord.pid), '/T', '/F']);
+      } else {
+        try { process.kill(appRecord.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
       }
     }
 
-    if (appRecord?.id) {
-      sessionHosts.delete(appRecord.id);
+    const monitor = sandboxMonitors.get(appRecord.id);
+    if (monitor) clearInterval(monitor);
+    sandboxMonitors.delete(appRecord.id);
+
+    if (sandboxRoot && fs.existsSync(sandboxRoot)) {
+      fs.rmSync(sandboxRoot, { recursive: true, force: false, maxRetries: 3, retryDelay: 250 });
+    }
+    if (sandboxRoot && fs.existsSync(sandboxRoot)) {
+      throw new Error(`Sandbox files remain after deletion: ${sandboxRoot}`);
     }
 
-    return { id: appId, status: 'Reset', removed: true, remainingCount: remainingApps.length };
+    const remainingApps = removeAppRecord(appRecord);
+    if (loadApps().some((entry) => entry.id === appRecord.id)) {
+      throw new Error('App record remains in RunContainer’s persistent store after deletion.');
+    }
+
+    return { id: appRecord.id, status: 'Reset', removed: true, remainingCount: remainingApps.length };
   } catch (error) {
-    return { id: appRecord?.id, status: 'Reset', removed: true, error: error.message };
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Delete failed for ${appRecord.name || appRecord.id}: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', removed: false, error: error.message };
   }
 });
 
-ipcMain.handle('kill-exe', async (_event, appRecord) => {
-  if (!appRecord?.pid) {
-    const apps = loadApps().map((entry) => (entry.id === appRecord?.id ? { ...entry, status: 'Stopped', pid: null } : entry));
-    saveApps(apps);
-    return { id: appRecord?.id, status: 'Stopped' };
-  }
-
+ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const appLog = path.join(appRecord.logsRoot || app.getPath('userData'), `${sanitizeName(appRecord.name || 'app')}.log`);
   try {
-    if (process.platform === 'win32') {
-      const killer = spawn('taskkill', ['/PID', String(appRecord.pid), '/T', '/F'], { stdio: 'ignore' });
-      killer.unref();
-    } else {
-      process.kill(appRecord.pid);
+    if (appRecord.sandboxieBox && appRecord.sandboxieInitialized) {
+      const tools = resolveSandboxieTools();
+      if (!tools) throw new Error('Sandboxie-Plus is required to stop this app’s sandbox.');
+      await terminateSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
+    } else if (appRecord.pid) {
+      if (process.platform === 'win32') {
+        await executeFile('taskkill.exe', ['/PID', String(appRecord.pid), '/T', '/F']);
+      } else {
+        try { process.kill(appRecord.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      }
     }
+    const monitor = sandboxMonitors.get(appRecord.id);
+    if (monitor) clearInterval(monitor);
+    sandboxMonitors.delete(appRecord.id);
+    const apps = loadApps().map((entry) => entry.id === appRecord.id ? { ...entry, status: 'Stopped', pid: null, sandboxPids: [] } : entry);
+    saveApps(apps);
+    appendLog(appLog, `App ${appRecord.id} stopped.`);
+    const updated = apps.find((entry) => entry.id === appRecord.id);
+    if (updated) broadcastContainerStatus(updated);
+    return { id: appRecord.id, status: 'Stopped' };
   } catch (error) {
-    // ignore termination failures and still update the UI
+    appendLog(appLog, `Stop failed: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', error: error.message };
   }
-
-  const logPath = path.join(appRecord.logsRoot || path.join(appRecord.sandboxRoot || path.dirname(appRecord.source), 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
-  appendLog(logPath, `Process ${appRecord.pid} terminated`);
-
-  const sessionHost = sessionHosts.get(appRecord?.id);
-  if (sessionHost && !sessionHost.isDestroyed()) {
-    sessionHost.close();
-  }
-  sessionHosts.delete(appRecord?.id);
-
-  const apps = loadApps().map((entry) => (entry.id === appRecord?.id ? { ...entry, status: 'Stopped', pid: null } : entry));
-  saveApps(apps);
-  return { id: appRecord?.id, status: 'Stopped' };
 });

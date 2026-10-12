@@ -6,12 +6,18 @@ const initialContainers = [];
 export default function useContainers() {
   const [containers, setContainers] = useState(initialContainers);
 
-  const refreshContainers = () => {
-    listContainers().then((items) => {
+  const refreshContainers = async () => {
+    try {
+      const items = await listContainers();
       if (Array.isArray(items)) {
         setContainers(items);
+        return items;
       }
-    });
+      return null;
+    } catch (error) {
+      console.error("Unable to refresh installed apps:", error);
+      return null;
+    }
   };
 
   useEffect(() => {

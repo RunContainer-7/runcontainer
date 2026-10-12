@@ -26,96 +26,68 @@ function createContainerRecord(source, status = 'Installed') {
   };
 }
 
-export async function installContainer(exePathOrFile) {
+function requireIpc(operation) {
   if (!ipcRenderer) {
-    return Promise.resolve(createContainerRecord(exePathOrFile, 'Installed'));
+    throw new Error(`${operation} is available only in the RunContainer desktop app.`);
   }
+  return ipcRenderer;
+}
 
+export async function installContainer(exePathOrFile) {
+  const ipc = requireIpc('Installing apps');
   const exePath = typeof exePathOrFile === 'string' ? exePathOrFile : exePathOrFile?.path || exePathOrFile?.name;
-  const record = await ipcRenderer.invoke('install-exe', exePath);
+  const record = await ipc.invoke('install-exe', exePath);
   return record;
 }
 
 export async function importFromUrl(url) {
-  if (!ipcRenderer) {
-    return Promise.resolve({ id: 'mock-url', name: 'Imported app', status: 'Installed' });
-  }
-
-  return ipcRenderer.invoke('import-url', url);
+  return requireIpc('Importing apps').invoke('import-url', url);
 }
 
 export async function updatePermissions(container, permissions) {
-  if (!ipcRenderer) {
-    return { ...container, permissions };
-  }
-
-  return ipcRenderer.invoke('update-permissions', container, permissions);
+  return requireIpc('Updating app permissions').invoke('update-permissions', container, permissions);
 }
 
 export async function resetContainer(container) {
-  if (!ipcRenderer) {
-    return { ...container, status: 'Reset' };
-  }
-
-  return ipcRenderer.invoke('reset-container', container);
+  return requireIpc('Deleting apps').invoke('reset-container', container);
 }
 
 export async function duplicateContainer(container) {
-  if (!ipcRenderer) {
-    return { ...container, id: `${container.id}-copy`, name: `${container.name} Copy` };
-  }
-
-  return ipcRenderer.invoke('duplicate-container', container);
+  return requireIpc('Duplicating apps').invoke('duplicate-container', container);
 }
 
 export async function exportContainer(container) {
-  if (!ipcRenderer) {
-    return { ...container, exported: true };
-  }
-
-  return ipcRenderer.invoke('export-container', container);
+  return requireIpc('Exporting apps').invoke('export-container', container);
 }
 
 export async function getAppLogs(container) {
-  if (!ipcRenderer) {
-    return [];
-  }
-
-  return ipcRenderer.invoke('get-app-logs', container);
+  return requireIpc('Reading app logs').invoke('get-app-logs', container);
 }
 
 export async function runContainer(container) {
-  if (!ipcRenderer) {
-    return { id: container?.id, status: 'Running', embedded: false };
-  }
-
-  return ipcRenderer.invoke('run-exe', container);
+  return requireIpc('Running apps').invoke('run-exe', container);
 }
 
 export async function killContainer(container) {
-  if (!ipcRenderer) {
-    return { id: container?.id, status: 'Stopped' };
-  }
-
-  return ipcRenderer.invoke('kill-exe', container);
+  return requireIpc('Stopping apps').invoke('kill-exe', container);
 }
 
 export async function launchDesktopContainer(container) {
-  if (!ipcRenderer) {
-    return { id: container?.id, status: 'Running', embedded: false };
-  }
-
-  return ipcRenderer.invoke('launch-desktop', container);
+  return requireIpc('Launching apps').invoke('launch-desktop', container);
 }
 
-export async function stopContainer(containerId) {
-  return killContainer(containerId);
+export async function stopContainer(container) {
+  return killContainer(container);
+}
+
+export function onContainerStatus(callback) {
+  if (!ipcRenderer) return () => {};
+  const listener = (_event, record) => callback(record);
+  ipcRenderer.on('container:status', listener);
+  return () => ipcRenderer.removeListener('container:status', listener);
 }
 
 export async function listContainers() {
-  if (!ipcRenderer) {
-    return [];
-  }
-
+  if (!ipcRenderer) return [];
   return ipcRenderer.invoke('list-apps');
 }

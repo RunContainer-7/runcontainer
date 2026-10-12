@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, launchDesktopContainer, updatePermissions, resetContainer, duplicateContainer, exportContainer, getAppLogs } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, updatePermissions, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -23,7 +23,7 @@ const tabIcons = {
 };
 
 export default function ContainerManager() {
-  const { containers, setContainers, addContainer, removeContainer, updateContainerStatus, refreshContainers } = useContainers();
+  const { containers, addContainer, removeContainer, updateContainerStatus, refreshContainers } = useContainers();
   const [activeTab, setActiveTab] = useState("Apps");
   const [showInstallMenu, setShowInstallMenu] = useState(false);
   const [selectedExe, setSelectedExe] = useState(null);
@@ -36,10 +36,15 @@ export default function ContainerManager() {
   const [settings, setSettings] = useState({ autoIsolateAppData: true, persistentLogs: true });
   const [showInstallWizard, setShowInstallWizard] = useState(false);
   const [activeSession, setActiveSession] = useState(null);
-  const [launchChoice, setLaunchChoice] = useState(null);
   const booting = useBootAnimation();
 
   const appContainers = useMemo(() => containers.filter((container) => container?.source), [containers]);
+
+  useEffect(() => onContainerStatus((record) => {
+    if (!record?.id) return;
+    if (record.status) updateContainerStatus(record.id, record.status);
+    setActiveSession((current) => current?.id === record.id ? { ...current, ...record } : current);
+  }), [updateContainerStatus]);
 
   useEffect(() => {
     if (!selectedApp) return;
@@ -68,7 +73,8 @@ export default function ContainerManager() {
         setShowInstallWizard(false);
       }).catch((error) => {
         console.error("Install failed:", error);
-        setInstallMessage("Unable to install that EXE.");
+        setShowInstallWizard(false);
+        setInstallMessage(error?.message || "Unable to install that EXE.");
       });
     };
 
@@ -116,7 +122,8 @@ export default function ContainerManager() {
       })
       .catch((error) => {
         console.error("Import failed:", error);
-        setInstallMessage("Unable to import from that URL.");
+        setShowInstallWizard(false);
+        setInstallMessage(error?.message || "Unable to import from that URL.");
       });
   }
 
@@ -129,25 +136,6 @@ export default function ContainerManager() {
     });
   }
 
-  function handleReset(container) {
-    const removedId = container?.id;
-    if (removedId) {
-      setContainers((prevContainers) => prevContainers.filter((entry) => !(
-        entry.id === removedId ||
-        (container?.source && entry.source === container.source) ||
-        (container?.sandboxRoot && entry.sandboxRoot === container.sandboxRoot)
-      )));
-      removeContainer(removedId);
-    }
-    setActiveSession(null);
-    setSelectedApp(null);
-    setInstallMessage(`Reset ${container.name}`);
-    resetContainer(container).then(() => {
-      refreshContainers();
-    }).catch(() => {
-      refreshContainers();
-    });
-  }
 
   function handleDuplicate(container) {
     duplicateContainer(container).then((duplicateApp) => {
@@ -188,99 +176,75 @@ export default function ContainerManager() {
   }
 
   function handleRun(container) {
-    setInstallMessage(`Launching ${container.name} inside its sandbox...`);
-    setActiveSession({ ...container, embedded: false, embedReason: null, status: 'Launching' });
+    setInstallMessage(`Starting ${container.name} in its isolated Sandboxie box...`);
+    setActiveSession({ ...container, embedded: false, status: 'Launching' });
 
     runContainer(container)
-      .then((updatedContainer) => {
-        if (updatedContainer?.status) {
-          updateContainerStatus(container.id, updatedContainer.status);
-        }
-
-        if (updatedContainer?.status === 'NeedsDesktopChoice' || updatedContainer?.needsDesktopChoice) {
+      .then(async (result) => {
+        if (!result || result.status !== 'Running' || !result.pid) {
           setActiveSession(null);
-          setInstallMessage(`${container.name} will use the sandbox fallback prompt if the app does not appear immediately.`);
+          const reason = result?.error || result?.reason || 'Sandboxie did not confirm that an app process started.';
+          setInstallMessage(`${container.name} was not launched: ${reason}`);
+          updateContainerStatus(container.id, result?.status || 'Failed');
+          await refreshContainers();
           return;
         }
 
-        if (updatedContainer?.status === 'Cancelled' || updatedContainer?.status === 'Failed' || updatedContainer?.error) {
-          setActiveSession(null);
-          setLaunchChoice({ container, reason: updatedContainer.reason || updatedContainer.error || 'RunContainer could not start this app.' });
-          setInstallMessage(updatedContainer.reason || updatedContainer.error || 'Launch was cancelled.');
-          return;
-        }
-
-        setActiveSession((prev) => prev && prev.id === container.id
-          ? { ...prev, status: updatedContainer?.status || 'Running', embedded: Boolean(updatedContainer?.embedded), embedReason: updatedContainer?.reason || null }
-          : { ...container, status: updatedContainer?.status || 'Running', embedded: Boolean(updatedContainer?.embedded), embedReason: updatedContainer?.reason || null });
-
-        setInstallMessage(updatedContainer?.reason || `Launched ${container.name} from the sandbox runtime.`);
+        updateContainerStatus(container.id, result.status);
+        setActiveSession({ ...container, ...result, status: 'Running', embedded: false });
+        setInstallMessage(`${container.name} is running in Sandboxie-Plus (PID ${result.pid}). Its Windows app window opens separately; generic in-window embedding is not supported.`);
+        refreshContainers();
       })
       .catch((error) => {
         setActiveSession(null);
-        setLaunchChoice({ container, reason: error?.message || 'RunContainer could not start this app.' });
-        setInstallMessage(`${container.name} could not be launched. RunContainer reported a runtime error.`);
+        setInstallMessage(`${container.name} was not launched: ${error?.message || 'Unknown launch error.'}`);
       });
-  }
-
-  function handleLaunchChoice(choice) {
-    if (!launchChoice?.container) {
-      setLaunchChoice(null);
-      return;
-    }
-
-    if (choice === 'desktop') {
-      const container = launchChoice.container;
-      setLaunchChoice(null);
-      setActiveSession(null);
-      setInstallMessage(`Opening ${container.name} on the desktop...`);
-      launchDesktopContainer(container).then((result) => {
-        if (result?.status) {
-          updateContainerStatus(container.id, result.status);
-        }
-        setInstallMessage(result?.reason || `Opened ${container.name} on the desktop.`);
-      });
-      return;
-    }
-
-    setLaunchChoice(null);
-    setInstallMessage('Launch cancelled.');
   }
 
   function handleKill(container) {
-    killContainer(container).then((updatedContainer) => {
-      if (updatedContainer?.status) {
-        updateContainerStatus(container.id, updatedContainer.status);
-      }
-      setActiveSession(null);
-      setInstallMessage(`${container.name} closed. Re-open it from the app launcher.`);
-    });
+    killContainer(container)
+      .then((result) => {
+        if (result?.status !== 'Stopped') {
+          setInstallMessage(`Could not stop ${container.name}: ${result?.error || 'Sandboxie did not confirm that the box stopped.'}`);
+          return;
+        }
+        updateContainerStatus(container.id, result.status);
+        setActiveSession((current) => current?.id === container.id ? { ...current, ...result, status: 'Stopped', pid: null, sandboxPids: [] } : current);
+        setInstallMessage(`${container.name} stopped.`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not stop ${container.name}: ${error?.message || 'Unknown error.'}`);
+      });
   }
 
   function handleDelete(container) {
     if (!container) return;
 
-    const removedId = container?.id;
-    if (removedId) {
-      setContainers((prevContainers) => prevContainers.filter((entry) => !(
-        entry.id === removedId ||
-        (container?.source && entry.source === container.source) ||
-        (container?.sandboxRoot && entry.sandboxRoot === container.sandboxRoot)
-      )));
-      removeContainer(removedId);
-    }
-    setActiveSession(null);
-    setSelectedApp(null);
-    setInstallMessage(`Deleting ${container.name}...`);
-
+    setInstallMessage(`Deleting ${container.name} and its sandbox...`);
     resetContainer(container)
-      .then((result) => {
-        refreshContainers();
-        setInstallMessage(result?.status === 'Reset' ? `${container.name} deleted from RunContainer.` : `${container.name} removed from RunContainer.`);
+      .then(async (result) => {
+        if (!result?.removed || result.status !== 'Reset') {
+          setInstallMessage(`Could not delete ${container.name}: ${result?.error || 'RunContainer did not confirm deletion.'}`);
+          return;
+        }
+
+        if (activeSession?.id === container.id) setActiveSession(null);
+        if (selectedApp?.id === container.id) setSelectedApp(null);
+        removeContainer(container.id);
+        const remaining = await refreshContainers();
+        if (!Array.isArray(remaining)) {
+          setInstallMessage(`${container.name} was deleted, but the app list could not be refreshed.`);
+          return;
+        }
+        if (remaining.some((entry) => entry.id === container.id)) {
+          setInstallMessage(`${container.name} was removed from disk, but its launcher record is still present. Refresh RunContainer and check its app store.`);
+          return;
+        }
+        setInstallMessage(`${container.name} and its sandbox were deleted.`);
       })
-      .catch(() => {
-        refreshContainers();
-        setInstallMessage(`${container.name} removed from the launcher view.`);
+      .catch((error) => {
+        setInstallMessage(`Could not delete ${container.name}: ${error?.message || 'Unknown deletion error.'}`);
       });
   }
 
@@ -315,27 +279,6 @@ export default function ContainerManager() {
         )}
       </div>
 
-      {launchChoice && (
-        <div className="modal-backdrop" onClick={() => setLaunchChoice(null)}>
-          <div className="detail-panel" onClick={(event) => event.stopPropagation()}>
-            <div className="detail-header">
-              <h3>Launch fallback</h3>
-              <button className="icon-button" onClick={() => setLaunchChoice(null)}>×</button>
-            </div>
-            <p className="wizard-copy">RunContainer could not host {launchChoice.container?.name} inside its window surface.</p>
-            <p className="wizard-copy">{launchChoice.reason}</p>
-            <div className="wizard-steps">
-              <div className="wizard-step">• The app was still launched from its sandboxed runtime path.</div>
-              <div className="wizard-step">• Windows blocked the in-window attach attempt, so RunContainer offered a desktop fallback.</div>
-              <div className="wizard-step">• If the app is refusing to open, check the sandbox logs for the exact startup reason.</div>
-            </div>
-            <div className="detail-actions">
-              <button className="settings-button" onClick={() => handleLaunchChoice('desktop')}>Open on desktop</button>
-              <button className="settings-button ghost" onClick={() => handleLaunchChoice('cancel')}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showInstallWizard && (
         <div className="modal-backdrop" onClick={() => setShowInstallWizard(false)}>
@@ -358,79 +301,27 @@ export default function ContainerManager() {
         <div className="apps-panel session-shell">
           <div className="panel-title-row">
             <div>
-              <h2>Container OS</h2>
-              <span className="muted">{activeSession.embedded ? `${activeSession.name} is live-embedded into the RunContainer host surface` : (activeSession.status === 'Running' ? `${activeSession.name} is running from its sandboxed runtime` : (activeSession.embedReason ? `${activeSession.name} launched in the sandbox but could not be embedded` : `${activeSession.name} is launching inside the sandbox desktop`))}</span>
+              <h2>{activeSession.status === 'Launching' ? 'Starting isolated app' : activeSession.status === 'Running' ? 'Isolated app running' : 'Isolated app stopped'}</h2>
+              <span className="muted">{activeSession.name} • Sandbox engine: Sandboxie-Plus</span>
             </div>
-            <div className="pill">Live sandbox session</div>
+            <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
           <div className="session-surface">
             <div className="session-surface-header">
               <div>
                 <strong>{activeSession.name}</strong>
-                <div className="muted">Runtime: isolated • AppData: redirected • Temp: sandboxed • Embed: {activeSession.embedded ? 'live' : 'pending'}{activeSession.embedReason ? ` • ${activeSession.embedReason}` : ''}</div>
+                <div className="muted">
+                  {activeSession.status === 'Launching'
+                    ? 'Waiting for Sandboxie-Plus to confirm the process.'
+                    : activeSession.status === 'Running'
+                      ? `Running in isolated box ${activeSession.sandboxieBox || '—'}${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. The app opens in its own Windows window.`
+                      : 'Sandboxie-Plus reports that the app processes have exited.'}
+                </div>
               </div>
               <div className="detail-actions">
-                <button className="settings-button" onClick={() => setActiveSession(null)}>Return to launcher</button>
-                <button className="settings-button ghost" onClick={() => handleKill(activeSession)}>Close session</button>
-                <button className="settings-button ghost" onClick={() => handleDelete(activeSession)}>Delete container</button>
-              </div>
-            </div>
-            <div className="container-os-shell">
-              <div className="container-os-topbar">
-                <div className="container-os-badge">RunContainer OS</div>
-                <div className="container-os-status-row">
-                  <span className="status-chip">Isolated sandbox</span>
-                  <span className="status-chip">Network policy: restricted</span>
-                  <span className="status-chip">Logs: enabled</span>
-                  <span className="status-chip">Status: {activeSession.status || 'Launching'}</span>
-                </div>
-              </div>
-              <div className="container-os-desktop">
-                <div className="desktop-tile active">
-                  <div className="desktop-tile-icon">▣</div>
-                  <div>
-                    <strong>Hosted launch</strong>
-                    <p>{activeSession.embedded ? 'This app is being hosted inside the RunContainer surface.' : 'The app launched from the sandbox runtime and will appear in its own window if Windows allows it.'}</p>
-                  </div>
-                </div>
-                <div className="desktop-tile active">
-                  <div className="desktop-tile-icon">▶</div>
-                  <div>
-                    <strong>{activeSession.name}</strong>
-                    <p>Running inside the hosted container environment</p>
-                  </div>
-                </div>
-                <div className="desktop-tile">
-                  <div className="desktop-tile-icon">📁</div>
-                  <div>
-                    <strong>Sandbox folders</strong>
-                    <p>Desktop • Downloads • AppData • Temp</p>
-                  </div>
-                </div>
-                <div className="desktop-tile">
-                  <div className="desktop-tile-icon">🧾</div>
-                  <div>
-                    <strong>Session logs</strong>
-                    <p>Captured and retained per container</p>
-                  </div>
-                </div>
-                <div className="container-os-window">
-                  <div className="window-titlebar">
-                    <span>Sandbox Console</span>
-                    <span className="window-dot" />
-                  </div>
-                  <div className="window-body">
-                    <p>Container runtime active.</p>
-                    <p>Executable launched from sandbox root.</p>
-                    <p>Host system remains protected.</p>
-                  </div>
-                </div>
-              </div>
-              <div className="container-os-taskbar">
-                <div className="taskbar-start">▣</div>
-                <div className="taskbar-app">{activeSession.name}</div>
-                <div className="taskbar-spacer" />
-                <div className="taskbar-status">Sandboxed • Live</div>
+                {activeSession.status === 'Running' && <button className="settings-button ghost" onClick={() => handleKill(activeSession)}>Stop app</button>}
+                <button className="settings-button" onClick={() => setActiveSession(null)}>Back to app list</button>
+                <button className="settings-button ghost" onClick={() => handleDelete(activeSession)}>Delete app and sandbox</button>
               </div>
             </div>
           </div>
