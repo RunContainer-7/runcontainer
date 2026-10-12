@@ -9,7 +9,6 @@ jest.mock("../services/containerService", () => ({
   importFromUrl: jest.fn(),
   runContainer: jest.fn(),
   killContainer: jest.fn(),
-  updatePermissions: jest.fn(),
   resetContainer: jest.fn(),
   duplicateContainer: jest.fn(),
   exportContainer: jest.fn(),
@@ -63,8 +62,9 @@ describe("ContainerManager", () => {
   it("shows settings controls in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Auto-isolate APPDATA");
-    expect(container.textContent).toContain("Persistent logs");
+    expect(container.textContent).toContain("Isolation engine");
+    expect(container.textContent).toContain("App storage");
+    expect(container.textContent).not.toContain("Auto-isolate APPDATA");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

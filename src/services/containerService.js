@@ -44,10 +44,6 @@ export async function importFromUrl(url) {
   return requireIpc('Importing apps').invoke('import-url', url);
 }
 
-export async function updatePermissions(container, permissions) {
-  return requireIpc('Updating app permissions').invoke('update-permissions', container, permissions);
-}
-
 export async function resetContainer(container) {
   return requireIpc('Deleting apps').invoke('reset-container', container);
 }
@@ -70,10 +66,6 @@ export async function runContainer(container) {
 
 export async function killContainer(container) {
   return requireIpc('Stopping apps').invoke('kill-exe', container);
-}
-
-export async function launchDesktopContainer(container) {
-  return requireIpc('Launching apps').invoke('launch-desktop', container);
 }
 
 export async function stopContainer(container) {

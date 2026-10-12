@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, updatePermissions, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -12,13 +12,11 @@ function useBootAnimation() {
 
   return booting;
 }
-const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info"];
+const tabs = ["Sources", "Apps", "Settings", "Info"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
-  Tweaks: "⚙",
   Settings: "⚙",
-  Profiles: "◧",
   Info: "◌",
 };
 
@@ -29,11 +27,8 @@ export default function ContainerManager() {
   const [selectedExe, setSelectedExe] = useState(null);
   const [installMessage, setInstallMessage] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
-  const [permissions, setPermissions] = useState({ network: true, filesystem: false, registry: false });
   const [logs, setLogs] = useState([]);
-  const [profile, setProfile] = useState("default");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [settings, setSettings] = useState({ autoIsolateAppData: true, persistentLogs: true });
   const [showInstallWizard, setShowInstallWizard] = useState(false);
   const [activeSession, setActiveSession] = useState(null);
   const booting = useBootAnimation();
@@ -45,15 +40,6 @@ export default function ContainerManager() {
     if (record.status) updateContainerStatus(record.id, record.status);
     setActiveSession((current) => current?.id === record.id ? { ...current, ...record } : current);
   }), [updateContainerStatus]);
-
-  useEffect(() => {
-    if (!selectedApp) return;
-    setPermissions({
-      network: selectedApp.permissions?.network ?? true,
-      filesystem: selectedApp.permissions?.filesystem ?? false,
-      registry: selectedApp.permissions?.registry ?? false,
-    });
-  }, [selectedApp]);
 
   function handleInstallExe() {
     const pickFile = (file) => {
@@ -127,16 +113,6 @@ export default function ContainerManager() {
       });
   }
 
-  function handlePermissionsSave() {
-    if (!selectedApp) return;
-
-    updatePermissions(selectedApp, permissions).then((updatedApp) => {
-      setSelectedApp(updatedApp);
-      setInstallMessage(`Permissions updated for ${updatedApp.name}`);
-    });
-  }
-
-
   function handleDuplicate(container) {
     duplicateContainer(container).then((duplicateApp) => {
       addContainer(duplicateApp);
@@ -155,24 +131,6 @@ export default function ContainerManager() {
       setLogs(appLogs);
       setSelectedApp(container);
     });
-  }
-
-  function applyProfile(option) {
-    const profileMap = {
-      default: { network: true, filesystem: false, registry: false },
-      relaxed: { network: true, filesystem: true, registry: false },
-      locked: { network: false, filesystem: false, registry: false },
-    };
-
-    const resolvedPermissions = profileMap[option] || { network: true, filesystem: false, registry: false };
-    setProfile(option);
-    setPermissions(resolvedPermissions);
-    if (selectedApp) {
-      updatePermissions(selectedApp, resolvedPermissions).then((updatedApp) => {
-        setSelectedApp(updatedApp);
-      });
-    }
-    setInstallMessage(`Profile set to ${option}`);
   }
 
   function handleRun(container) {
@@ -274,7 +232,7 @@ export default function ContainerManager() {
             </div>
             <button className="icon-button" aria-label="Import from URL" onClick={() => { setActiveTab("Sources"); }}>🔗</button>
             <button className="icon-button" aria-label="Container manager" onClick={() => { setActiveTab("Apps"); }}>📦</button>
-            <button className="icon-button" aria-label="App permissions" onClick={() => { setActiveTab("Settings"); }}>▢</button>
+            <button className="icon-button" aria-label="Settings" onClick={() => { setActiveTab("Settings"); }}>▢</button>
           </div>
         )}
       </div>
@@ -374,24 +332,6 @@ export default function ContainerManager() {
         </div>
       )}
 
-      {activeTab === "Profiles" && (
-        <div className="placeholder-panel">
-          <h3>Profiles</h3>
-          <p>Profiles let you apply curated permission and isolation settings to each sandboxed app.</p>
-          <div className="profile-list">
-            {['default', 'relaxed', 'locked'].map((option) => (
-              <button key={option} className={`profile-card ${profile === option ? 'active' : ''}`} onClick={() => applyProfile(option)}>
-                <strong>{option}</strong>
-                <span>{option === 'default' ? 'Balanced sandbox' : option === 'relaxed' ? 'More access' : 'Max isolation'}</span>
-              </button>
-            ))}
-          </div>
-          <div className="detail-actions">
-            <button className="settings-button" onClick={() => setInstallMessage(`Profile set to ${profile}`)}>Apply profile</button>
-          </div>
-        </div>
-      )}
-
       {activeTab === "Sources" && (
         <div className="placeholder-panel">
           <h3>Sources</h3>
@@ -411,33 +351,23 @@ export default function ContainerManager() {
         </div>
       )}
 
-      {activeTab === "Tweaks" && (
-        <div className="placeholder-panel">
-          <h3>Tweaks</h3>
-          <p>Use tuning and compatibility tweaks for sandboxed apps without touching the host system.</p>
-          <div className="profile-list">
-            <button className="profile-card active"><strong>Compatibility mode</strong><span>Uses isolated temp and appdata paths.</span></button>
-            <button className="profile-card"><strong>Network-safe mode</strong><span>Blocks external network traffic while the app runs.</span></button>
-          </div>
-        </div>
-      )}
-
       {activeTab === "Settings" && (
         <div className="placeholder-panel">
           <h3>Settings</h3>
-          <p>Control sandbox defaults, logs, permissions, and app isolation preferences.</p>
+          <p>How RunContainer isolates each app.</p>
           <div className="profile-list">
-            <button className={`profile-card ${settings.autoIsolateAppData ? "active" : ""}`} onClick={() => setSettings((prev) => ({ ...prev, autoIsolateAppData: !prev.autoIsolateAppData }))}>
-              <strong>Auto-isolate APPDATA</strong>
-              <span>{settings.autoIsolateAppData ? "Enabled for every installed app." : "Disabled for this session."}</span>
-            </button>
-            <button className={`profile-card ${settings.persistentLogs ? "active" : ""}`} onClick={() => setSettings((prev) => ({ ...prev, persistentLogs: !prev.persistentLogs }))}>
-              <strong>Persistent logs</strong>
-              <span>{settings.persistentLogs ? "Launch logs are stored per sandbox." : "Logs are kept temporarily only."}</span>
-            </button>
-          </div>
-          <div className="detail-actions">
-            <button className="settings-button" onClick={() => setInstallMessage("Settings updated")}>Save settings</button>
+            <div className="profile-card active">
+              <strong>Isolation engine</strong>
+              <span>Apps run in a Sandboxie-Plus box (OS-level isolation) when Sandboxie-Plus is installed. Otherwise they run in RunContainer’s per-app container, which redirects the app’s AppData and Temp folders into its own folder. The container is not an OS security boundary.</span>
+            </div>
+            <div className="profile-card">
+              <strong>App storage</strong>
+              <span>Each app has its own folder under RunContainer’s data directory. Duplicate creates a separate copy with separate data, and Delete removes that app’s folder.</span>
+            </div>
+            <div className="profile-card">
+              <strong>Logs</strong>
+              <span>Launch, stop, and exit events are written to each app’s log, which you can open with the Logs button.</span>
+            </div>
           </div>
         </div>
       )}
@@ -457,7 +387,7 @@ export default function ContainerManager() {
             </div>
             <div className="profile-card">
               <strong>Lifecycle</strong>
-              <span>Run launches the app inside the container, Close hides the active sandbox session, and Delete removes the app from RunContainer.</span>
+              <span>Run starts the app and confirms its process is running. Close or Stop ends the app’s processes. Delete ends them and removes the app and its folder.</span>
             </div>
             <div className="profile-card">
               <strong>Beta notice</strong>
@@ -492,15 +422,6 @@ export default function ContainerManager() {
               <div>
                 <h4>Sandbox</h4>
                 <p>{selectedApp.sandboxRoot}</p>
-              </div>
-              <div>
-                <h4>Permissions</h4>
-                <div className="permission-list">
-                  <label><input type="checkbox" checked={permissions.network} onChange={() => setPermissions((prev) => ({ ...prev, network: !prev.network }))} /> Network</label>
-                  <label><input type="checkbox" checked={permissions.filesystem} onChange={() => setPermissions((prev) => ({ ...prev, filesystem: !prev.filesystem }))} /> Filesystem</label>
-                  <label><input type="checkbox" checked={permissions.registry} onChange={() => setPermissions((prev) => ({ ...prev, registry: !prev.registry }))} /> Registry</label>
-                </div>
-                <button className="settings-button" onClick={handlePermissionsSave}>Save permissions</button>
               </div>
               <div>
                 <h4>Logs</h4>

@@ -38,7 +38,30 @@ function buildTaskkillArgs(pid) {
   return ['/PID', String(pid), '/T', '/F'];
 }
 
+// Merges status updates computed from a snapshot into the latest store contents,
+// so records added or deleted while the snapshot was being checked are not overwritten.
+function mergeStatusUpdates(latestApps, updatesById) {
+  return latestApps.map((entry) => (updatesById.has(entry.id) ? { ...entry, ...updatesById.get(entry.id) } : entry));
+}
+
+// Resolves a redirect Location header against the current URL and refuses non-HTTPS targets.
+function resolveDownloadRedirect(currentUrl, location) {
+  const next = new URL(location, currentUrl);
+  if (next.protocol !== 'https:') {
+    throw new Error('The download redirected to a non-HTTPS address, which RunContainer does not follow.');
+  }
+  return next.toString();
+}
+
+// Clears runtime state so a copy of an app starts from a clean, never-launched record.
+function resetLaunchState(record) {
+  return { ...record, status: 'Installed', pid: null, sandboxPids: [], launchMode: null, lastLaunchedAt: null, lastExitAt: null };
+}
+
 module.exports = {
+  mergeStatusUpdates,
+  resolveDownloadRedirect,
+  resetLaunchState,
   buildIsolatedEnvironment,
   buildProcessListArgs,
   parseProcessIds,

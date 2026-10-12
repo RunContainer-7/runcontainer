@@ -14,7 +14,15 @@ const {
   parseSandboxPids,
   isWithinDirectory,
 } = require('./sandboxie-runtime');
-const { buildIsolatedEnvironment, buildProcessListArgs, buildTaskkillArgs, parseProcessIds } = require('./isolated-launch');
+const {
+  buildIsolatedEnvironment,
+  buildProcessListArgs,
+  buildTaskkillArgs,
+  mergeStatusUpdates,
+  parseProcessIds,
+  resolveDownloadRedirect,
+  resetLaunchState,
+} = require('./isolated-launch');
 
 let mainWindow;
 const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json');
@@ -238,22 +246,46 @@ function extractExeIcon(exePath, outputPath) {
   });
 }
 
-function downloadUrl(url, outputPath) {
+function downloadUrl(url, outputPath, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(outputPath);
-    https.get(url, (response) => {
-      if (response.statusCode >= 400) {
-        response.destroy();
-        reject(new Error(`Download failed with status ${response.statusCode}`));
+    const request = https.get(url, (response) => {
+      const status = response.statusCode || 0;
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume();
+        if (redirectsLeft <= 0) {
+          reject(new Error('The download redirected too many times.'));
+          return;
+        }
+        let nextUrl;
+        try {
+          nextUrl = resolveDownloadRedirect(url, response.headers.location);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        downloadUrl(nextUrl, outputPath, redirectsLeft - 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        response.resume();
+        reject(new Error(`Download failed with status ${status}.`));
         return;
       }
 
+      const file = fs.createWriteStream(outputPath);
       response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        resolve(outputPath);
+      file.on('finish', () => file.close(() => resolve(outputPath)));
+      file.on('error', (error) => {
+        fs.unlink(outputPath, () => {});
+        reject(error);
       });
-    }).on('error', (error) => {
+      response.on('error', (error) => {
+        file.destroy();
+        fs.unlink(outputPath, () => {});
+        reject(error);
+      });
+    });
+    request.on('error', (error) => {
       fs.unlink(outputPath, () => {});
       reject(error);
     });
@@ -580,28 +612,26 @@ ipcMain.handle('open-file-dialog', async () => {
 });
 
 ipcMain.handle('list-apps', async () => {
-  const apps = loadApps();
-  let changed = false;
-  const refreshed = await Promise.all(apps.map(async (entry) => {
-    if (entry.status !== 'Running') return entry;
+  const snapshot = loadApps().filter((entry) => entry.status === 'Running');
+  const updatesById = new Map();
+  await Promise.all(snapshot.map(async (entry) => {
     try {
       const pids = await listRunningPids(entry);
       if (pids.length === 0) {
-        changed = true;
         stopMonitor(entry.id);
-        return { ...entry, status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() };
-      }
-      if (JSON.stringify(pids) !== JSON.stringify(entry.sandboxPids || [])) {
-        changed = true;
-        return { ...entry, pid: pids[0], sandboxPids: pids };
+        updatesById.set(entry.id, { status: 'Stopped', pid: null, sandboxPids: [], lastExitAt: new Date().toISOString() });
+      } else if (JSON.stringify(pids) !== JSON.stringify(entry.sandboxPids || [])) {
+        updatesById.set(entry.id, { pid: pids[0], sandboxPids: pids });
       }
     } catch (error) {
       // Keep the persisted state if the process query is temporarily unavailable.
     }
-    return entry;
   }));
-  if (changed) saveApps(refreshed);
-  return refreshed;
+  if (updatesById.size === 0) return loadApps();
+  // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
+  const current = mergeStatusUpdates(loadApps(), updatesById);
+  saveApps(current);
+  return current;
 });
 
 async function installExe(exePath) {
@@ -667,12 +697,6 @@ ipcMain.handle('import-url', async (_event, url) => {
   return installExe(downloadedPath);
 });
 
-ipcMain.handle('update-permissions', async (_event, appRecord, permissions) => {
-  const apps = loadApps().map((entry) => (entry.id === appRecord?.id ? { ...entry, permissions } : entry));
-  saveApps(apps);
-  return apps.find((entry) => entry.id === appRecord?.id) || appRecord;
-});
-
 ipcMain.handle('duplicate-container', async (_event, appRecord) => {
   if (!appRecord?.id || !fs.existsSync(appRecord.source || '')) throw new Error('The installed executable is missing.');
   const appId = crypto.randomUUID();
@@ -703,13 +727,11 @@ ipcMain.handle('duplicate-container', async (_event, appRecord) => {
     sandboxieBox: sandboxBoxName(appId),
     sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
     sandboxieInitialized: false,
-    status: 'Installed',
-    pid: null,
-    sandboxPids: [],
     createdAt: new Date().toISOString(),
   };
-  saveApps([...loadApps(), duplicate]);
-  return duplicate;
+  const cleanCopy = resetLaunchState(duplicate);
+  saveApps([...loadApps(), cleanCopy]);
+  return cleanCopy;
 });
 
 ipcMain.handle('export-container', async (_event, appRecord) => {
@@ -745,6 +767,24 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   const logsRoot = appRecord.logsRoot || path.join(sandboxRoot, 'logs');
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   ensureSandboxLayout(sandboxRoot);
+
+  const existingPids = await listRunningPids(appRecord).catch(() => []);
+  if (existingPids.length > 0) {
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const alreadyRunning = { ...base, status: 'Running', pid: existingPids[0], sandboxPids: existingPids };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? alreadyRunning : entry)));
+    monitorAppProcesses(appRecord.id, logPath);
+    broadcastContainerStatus(alreadyRunning);
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid: existingPids[0],
+      sandboxPids: existingPids,
+      launchMode: getLaunchMode(alreadyRunning),
+      embedded: false,
+      reason: 'This app is already running, so RunContainer did not start a second copy.',
+    };
+  }
   fs.writeFileSync(logPath, `Launch started at ${new Date().toISOString()}\n`, 'utf8');
   appendLog(logPath, `Using container ${sandboxRoot}`);
   stopMonitor(appRecord.id);
@@ -758,13 +798,6 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   }
   return runWithIsolatedProfile(appRecord, sandboxRoot, logPath, sandboxieFailure);
 });
-
-ipcMain.handle('launch-desktop', async () => ({
-  status: 'Failed',
-  error: 'Direct desktop launch is disabled so RunContainer does not bypass its isolation engine.',
-  reason: 'Direct desktop launch is disabled so RunContainer does not bypass its isolation engine.',
-  embedded: false,
-}));
 
 ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);

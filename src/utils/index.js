@@ -6,4 +6,4 @@
  * actual implementation. The app uses the IPC-based service in
  * src/services/containerService.js instead.
  */
-export { installContainer, importFromUrl, runContainer, killContainer, launchDesktopContainer, updatePermissions, resetContainer, duplicateContainer, exportContainer, getAppLogs, stopContainer, listContainers } from "../services/containerService";
+export { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, stopContainer, listContainers } from "../services/containerService";
