@@ -400,7 +400,8 @@ async function stopProcessesUnder(directory, seedPids = []) {
 
 async function removeSandboxDirectory(sandboxRoot) {
   let lastError = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  // Sandboxie releases its file-root locks asynchronously after the box is deleted, so keep retrying for a while.
+  for (let attempt = 0; attempt < 15; attempt += 1) {
     if (!fs.existsSync(sandboxRoot)) return;
     try {
       fs.rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
@@ -408,7 +409,7 @@ async function removeSandboxDirectory(sandboxRoot) {
       lastError = error;
     }
     if (!fs.existsSync(sandboxRoot)) return;
-    await delay(700);
+    await delay(1000);
   }
   const code = lastError?.code || 'unknown';
   throw new Error(`Windows is still holding files in ${sandboxRoot} (${code}). Close any window from this app and try Delete again.`);
@@ -461,6 +462,8 @@ async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
     };
   } catch (error) {
     appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
+    // Anything still running from this folder started outside the box; stop it so no unboxed copy stays open.
+    await stopProcessesUnder(sandboxRoot, []).catch((stopError) => appendLog(logPath, `Could not stop unboxed copy: ${stopError.message}`));
     try {
       await deleteSandboxieBox({ tools, boxName, execute: executeFile });
     } catch (cleanupError) {

@@ -63,6 +63,7 @@ describe("Sandboxie runtime helpers", () => {
     const execute = async (exe, args) => {
       calls.push([exe, args]);
       if (args.includes("/listpids")) return { stdout: "1\r\n321\r\n" };
+      if (args[0] === "query" && args[2] === "Enabled") return { stdout: "Enabled=y\r\n" };
       if (args[0] === "query") return { stdout: "C:\\Data\\Sandboxes\\box1\r\n" };
       return { stdout: "" };
     };
@@ -82,6 +83,7 @@ describe("Sandboxie runtime helpers", () => {
   it("fails when launch cannot be confirmed by Sandboxie", async () => {
     const execute = async (_exe, args) => {
       if (args.includes("/listpids")) return { stdout: "0\r\n" };
+      if (args[0] === "query" && args[2] === "Enabled") return { stdout: "Enabled=y\r\n" };
       if (args[0] === "query") return { stdout: "C:\\Data\\Sandboxes\\box1\r\n" };
       return { stdout: "" };
     };

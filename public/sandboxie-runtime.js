@@ -88,6 +88,10 @@ async function configureSandboxieBox({ tools, boxName, fileRootPath, execute }) 
   await execute(tools.sbieIniExe, buildConfigureBoxArgs(boxName, 'Enabled', 'y'));
   await execute(tools.sbieIniExe, buildConfigureBoxArgs(boxName, 'FileRootPath', fileRootPath));
   await execute(tools.startExe, ['/reload']);
+  const { stdout: enabledOut } = await execute(tools.sbieIniExe, ['query', boxName, 'Enabled']);
+  if (String(enabledOut || '').replace(/^Enabled\s*=\s*/i, '').trim().toLowerCase() !== 'y') {
+    throw new Error(`Sandboxie did not enable box ${boxName}, so the app would not run inside it.`);
+  }
   const { stdout } = await execute(tools.sbieIniExe, ['query', boxName, 'FileRootPath']);
   const configuredRoot = String(stdout || '').trim().replace(/^FileRootPath\s*=\s*/i, '').replace(/^['"]|['"]$/g, '');
   const normalizedRoot = configuredRoot.replace(/[\\/]+$/, '').toLowerCase();
