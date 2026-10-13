@@ -1,37 +1,61 @@
 const path = require('path');
 
-// Per-app container environment: the app reads/writes its own AppData and Temp folders
-// inside RunContainer's managed sandbox directory instead of the user's real profile.
-function buildIsolatedEnvironment(baseEnv, sandboxRoot, layout) {
-  return {
-    ...baseEnv,
-    APPDATA: layout.appData,
-    LOCALAPPDATA: layout.appData,
-    TEMP: layout.temp,
-    TMP: layout.temp,
-    RUNCONTAINER_SANDBOX_ROOT: sandboxRoot,
-    RUNCONTAINER_APPDATA_ROOT: layout.appData,
-  };
+// Lists every process with its parent PID and executable path, so an app's whole process
+// tree can be found (path match for the app folder, plus descendants of those processes).
+function buildProcessTableArgs() {
+  const script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress";
+  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
+}
+
+function parseProcessTable(output) {
+  const text = String(output || '').trim();
+  if (!text) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error('Windows returned an unreadable process list.');
+  }
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  return rows
+    .map((row) => ({
+      pid: Number(row.ProcessId),
+      ppid: Number(row.ParentProcessId),
+      path: typeof row.ExecutablePath === 'string' ? row.ExecutablePath : '',
+    }))
+    .filter((row) => Number.isSafeInteger(row.pid) && row.pid > 0);
 }
 
 function withTrailingSeparator(directory) {
   return directory.endsWith(path.win32.sep) ? directory : `${directory}${path.win32.sep}`;
 }
 
-// Lists PIDs of processes whose executable lives inside the given directory.
-function buildProcessListArgs(directory) {
-  const scope = withTrailingSeparator(directory).replace(/'/g, "''");
-  const script = `Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith('${scope}', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.Id }`;
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
-}
+// Returns PIDs of processes executing from `directory`, the seed PIDs still alive,
+// and every descendant of those, so a launcher's child processes are stopped too.
+function findAppProcessIds(table, directory, seedPids = []) {
+  const scope = withTrailingSeparator(directory).toLowerCase();
+  const alive = new Set(table.map((row) => row.pid));
+  const childrenOf = new Map();
+  for (const row of table) {
+    if (!childrenOf.has(row.ppid)) childrenOf.set(row.ppid, []);
+    childrenOf.get(row.ppid).push(row.pid);
+  }
 
-function parseProcessIds(output) {
-  return String(output || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^\d+$/.test(line))
-    .map(Number)
-    .filter((pid) => pid > 0);
+  const found = new Set();
+  const queue = [];
+  for (const row of table) {
+    if (row.path && row.path.toLowerCase().startsWith(scope)) queue.push(row.pid);
+  }
+  for (const pid of seedPids) {
+    if (alive.has(pid)) queue.push(pid);
+  }
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (found.has(pid) || pid === process.pid) continue;
+    found.add(pid);
+    for (const child of childrenOf.get(pid) || []) queue.push(child);
+  }
+  return [...found];
 }
 
 function buildTaskkillArgs(pid) {
@@ -62,8 +86,8 @@ module.exports = {
   mergeStatusUpdates,
   resolveDownloadRedirect,
   resetLaunchState,
-  buildIsolatedEnvironment,
-  buildProcessListArgs,
-  parseProcessIds,
+  buildProcessTableArgs,
+  parseProcessTable,
+  findAppProcessIds,
   buildTaskkillArgs,
 };

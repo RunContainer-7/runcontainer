@@ -260,7 +260,7 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div>
               <h2>{activeSession.status === 'Launching' ? 'Starting isolated app' : activeSession.status === 'Running' ? 'Isolated app running' : 'Isolated app stopped'}</h2>
-              <span className="muted">{activeSession.name} • {activeSession.launchMode === 'sandboxie' ? 'Sandboxie-Plus box (OS-level isolation)' : 'RunContainer per-app container'}</span>
+              <span className="muted">{activeSession.name} • Sandboxie-Plus box (OS-level isolation)</span>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
@@ -358,7 +358,7 @@ export default function ContainerManager() {
           <div className="profile-list">
             <div className="profile-card active">
               <strong>Isolation engine</strong>
-              <span>Apps run in a Sandboxie-Plus box (OS-level isolation) when Sandboxie-Plus is installed. Otherwise they run in RunContainer’s per-app container, which redirects the app’s AppData and Temp folders into its own folder. The container is not an OS security boundary.</span>
+              <span>Every app runs in its own Sandboxie-Plus box (OS-level isolation), which redirects the app’s file writes into its own folder. Sandboxie-Plus must be installed; RunContainer does not start apps outside it. Get it from github.com/sandboxie-plus/Sandboxie/releases.</span>
             </div>
             <div className="profile-card">
               <strong>App storage</strong>
