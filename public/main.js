@@ -1,7 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const https = require('https');
 const crypto = require('crypto');
 const {
@@ -23,9 +23,10 @@ const {
   mergeStatusUpdates,
   resolveDownloadRedirect,
   resetLaunchState,
+  buildIsolatedEnvironment,
+  removeDirectoryWithRetries,
+  buildClearReadOnlyArgs,
 } = require('./isolated-launch');
-
-const SANDBOXIE_REQUIRED_MESSAGE = 'Sandboxie-Plus is required to run apps in RunContainer’s sandbox. Install it from https://github.com/sandboxie-plus/Sandboxie/releases, then click Run again. You can also set RUNCONTAINER_SANDBOXIE_DIR to its folder containing Start.exe and SbieIni.exe.';
 
 let mainWindow;
 const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json');
@@ -326,13 +327,13 @@ function stopMonitor(appId) {
 
 async function listProcessTable() {
   if (process.platform !== 'win32') throw new Error('Process inspection requires Windows.');
-  const { stdout } = await executeFile('powershell.exe', buildProcessTableArgs());
+  const { stdout } = await executeFile('powershell.exe', buildProcessTableArgs(), { maxBuffer: 16 * 1024 * 1024 });
   return parseProcessTable(stdout);
 }
 
 async function listRunningPids(appRecord) {
   const tools = resolveSandboxieTools();
-  if (appRecord.sandboxieInitialized && tools) {
+  if (appRecord.launchMode === 'sandboxie' && tools) {
     const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(appRecord.sandboxieBox));
     const pids = parseSandboxPids(stdout);
     if (pids === null) throw new Error('Sandboxie returned an unreadable process list.');
@@ -400,20 +401,92 @@ async function stopProcessesUnder(directory, seedPids = []) {
 }
 
 async function removeSandboxDirectory(sandboxRoot) {
-  let lastError = null;
-  // Sandboxie's two-phase delete runs asynchronously; allow phase two time to release file locks.
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (!fs.existsSync(sandboxRoot)) return;
-    try {
-      fs.rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
-    } catch (error) {
-      lastError = error;
+  await removeDirectoryWithRetries({
+    directory: sandboxRoot,
+    clearReadOnly: async () => {
+      if (process.platform === 'win32') await executeFile('attrib.exe', buildClearReadOnlyArgs(sandboxRoot));
+    },
+  });
+}
+
+async function runWithIsolatedProfile(appRecord, sandboxRoot, logPath) {
+  const layout = ensureSandboxLayout(sandboxRoot);
+  const env = buildIsolatedEnvironment(process.env, sandboxRoot, layout);
+  let exitInfo = null;
+  let childPid = null;
+  try {
+    const child = spawn(appRecord.source, [], {
+      cwd: path.dirname(appRecord.source),
+      env,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    });
+    child.on('exit', (code, signal) => {
+      exitInfo = { code, signal };
+      appendLog(logPath, `App process exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`);
+    });
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    childPid = child.pid;
+    let pids = [];
+    const launchDeadline = Date.now() + 8000;
+    while (Date.now() < launchDeadline) {
+      pids = findAppProcessIds(await listProcessTable(), sandboxRoot, [child.pid]);
+      if (pids.length > 0 || exitInfo) break;
+      await delay(400);
     }
-    if (!fs.existsSync(sandboxRoot)) return;
-    await delay(1000);
+    if (pids.length === 0) {
+      throw new Error(exitInfo
+        ? `The app exited immediately after starting (code ${exitInfo.code}).`
+        : 'The process started, but Windows did not confirm it is still running.');
+    }
+    child.unref();
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const updatedApp = {
+      ...base,
+      status: 'Running',
+      sandboxieInitialized: false,
+      sandboxieCleanupPending: false,
+      launchMode: 'isolated-profile',
+      pid: pids[0],
+      sandboxPids: pids,
+      lastLaunchedAt: new Date().toISOString(),
+      launchCleanupPending: false,
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
+    appendLog(logPath, `Started app with per-app profile redirection (PID ${child.pid}).`);
+    monitorAppProcesses(appRecord.id, logPath);
+    broadcastContainerStatus(updatedApp);
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid: pids[0],
+      sandboxPids: pids,
+      launchMode: 'isolated-profile',
+      embedded: false,
+      reason: 'Started in a separate Windows app window with APPDATA and TEMP redirected into its per-app folder. This is profile isolation, not a Windows security sandbox.',
+    };
+  } catch (error) {
+    appendLog(logPath, `Launch failed: ${error.message}`);
+    let cleanupPending = false;
+    if (childPid) {
+      try {
+        await stopProcessesUnder(sandboxRoot, [childPid]);
+      } catch (cleanupError) {
+        cleanupPending = true;
+        appendLog(logPath, `Failed launch process could not be confirmed stopped: ${cleanupError.message}`);
+      }
+    }
+    if (cleanupPending) {
+      saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchCleanupPending: true, pid: childPid } : entry)));
+    }
+    return failedLaunch(appRecord, cleanupPending
+      ? `${error.message} A process may still be running; Delete this app or close it before retrying.`
+      : error.message);
   }
-  const code = lastError?.code || 'unknown';
-  throw new Error(`Windows is still holding files in ${sandboxRoot} (${code}). Close any window from this app and try Delete again.`);
 }
 
 async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
@@ -740,8 +813,8 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   ensureSandboxLayout(sandboxRoot);
 
-  const existingPids = resolveSandboxieTools() && appRecord.sandboxieInitialized
-    ? await listRunningPids(appRecord).catch(() => [])
+  const existingPids = appRecord.status === 'Running'
+    ? await listProcessTable().then((table) => findAppProcessIds(table, sandboxRoot, [...(appRecord.sandboxPids || []), appRecord.pid])).catch(() => (appRecord.pid ? [appRecord.pid] : []))
     : [];
   if (existingPids.length > 0) {
     const base = getStoredApp(appRecord.id) || appRecord;
@@ -754,7 +827,7 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
       status: 'Running',
       pid: existingPids[0],
       sandboxPids: existingPids,
-      launchMode: 'sandboxie',
+      launchMode: appRecord.launchMode || 'isolated-profile',
       embedded: false,
       reason: 'This app is already running, so RunContainer did not start a second copy.',
     };
@@ -763,12 +836,7 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   appendLog(logPath, `Using container ${sandboxRoot}`);
   stopMonitor(appRecord.id);
 
-  const tools = resolveSandboxieTools();
-  if (!tools) {
-    appendLog(logPath, `Launch refused: ${SANDBOXIE_REQUIRED_MESSAGE}`);
-    return failedLaunch(appRecord, SANDBOXIE_REQUIRED_MESSAGE);
-  }
-  return runWithSandboxie(appRecord, tools, sandboxRoot, logPath);
+  return runWithIsolatedProfile(appRecord, sandboxRoot, logPath);
 });
 
 ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
@@ -777,7 +845,7 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
     return { id: requestedAppRecord?.id, status: 'Failed', removed: false, error: 'App is not in RunContainer’s persistent app list.' };
   }
 
-  const sandboxRoot = appRecord.sandboxRoot;
+  const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source || '');
   if (!sandboxRoot || !isWithinDirectory(sandboxRootBase, sandboxRoot)) {
     return { id: appRecord.id, status: 'Failed', removed: false, error: 'Refusing to delete a path outside RunContainer’s managed directory.' };
   }
@@ -785,13 +853,16 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   try {
     stopMonitor(appRecord.id);
     const tools = resolveSandboxieTools();
+    const cleanupRecord = appRecord.launchMode === 'sandboxie'
+      ? appRecord
+      : { ...appRecord, sandboxieInitialized: false, sandboxieCleanupPending: false };
     await deleteContainerResources({
-      appRecord,
+      appRecord: { ...cleanupRecord, sandboxRoot },
       tools,
       execute: executeFile,
-      stopProcesses: stopProcessesUnder,
+      stopProcesses: (directory, pids) => stopProcessesUnder(directory, [...new Set([...(pids || []), appRecord.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))]),
       removeDirectory: removeSandboxDirectory,
-      onCleanupError: (error) => appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Sandboxie delete attempt failed for ${appRecord.name || appRecord.id}; stopping remaining app processes and retrying: ${error.message}`),
+      onCleanupError: (error) => appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Sandboxie cleanup warning for ${appRecord.name || appRecord.id}: ${error.message}`),
     });
 
     const remainingApps = removeAppRecord(appRecord);
@@ -813,10 +884,10 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
   try {
     stopMonitor(appRecord.id);
     const tools = resolveSandboxieTools();
-    if (appRecord.sandboxieInitialized && tools) {
+    if (appRecord.launchMode === 'sandboxie' && tools) {
       await terminateSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
     }
-    await stopProcessesUnder(sandboxRoot, appRecord.sandboxPids || []);
+    await stopProcessesUnder(sandboxRoot, [...new Set([...(appRecord.sandboxPids || []), appRecord.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))]);
     const apps = loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, status: 'Stopped', pid: null, sandboxPids: [] } : entry));
     saveApps(apps);
     appendLog(appLog, `App ${appRecord.id} stopped.`);

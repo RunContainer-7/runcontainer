@@ -1,9 +1,72 @@
 const {
+  buildIsolatedEnvironment,
+  buildClearReadOnlyArgs,
+  removeDirectoryWithRetries,
   buildProcessTableArgs,
   parseProcessTable,
   findAppProcessIds,
   buildTaskkillArgs,
 } = require("../../public/isolated-launch");
+
+describe("per-app profile environment", () => {
+  it("redirects conventional data and temp paths to the app's own directories", () => {
+    const env = buildIsolatedEnvironment({ PATH: "C:\\Windows", APPDATA: "C:\\Users\\me\\AppData\\Roaming" }, "C:\\RunContainer\\app1", {
+      appData: "C:\\RunContainer\\app1\\AppData",
+      temp: "C:\\RunContainer\\app1\\Temp",
+    });
+    expect(env).toMatchObject({
+      PATH: "C:\\Windows",
+      APPDATA: "C:\\RunContainer\\app1\\AppData",
+      LOCALAPPDATA: "C:\\RunContainer\\app1\\AppData",
+      TEMP: "C:\\RunContainer\\app1\\Temp",
+      TMP: "C:\\RunContainer\\app1\\Temp",
+      RUNCONTAINER_SANDBOX_ROOT: "C:\\RunContainer\\app1",
+    });
+  });
+});
+
+describe("per-app directory cleanup", () => {
+  it("clears read-only attributes recursively before removing a directory", () => {
+    expect(buildClearReadOnlyArgs("C:\\RunContainer\\app1")).toEqual(["-R", "C:\\RunContainer\\app1\\*", "/S", "/D"]);
+  });
+
+  it("reports the actual final Windows deletion error after bounded retries", async () => {
+    await expect(removeDirectoryWithRetries({
+      directory: "C:\\RunContainer\\locked",
+      existsSync: () => true,
+      removeSync: () => {
+        const error = new Error("Access denied by another process");
+        error.code = "EPERM";
+        throw error;
+      },
+      wait: async () => {},
+      attempts: 2,
+    })).rejects.toThrow("Could not remove C:\\RunContainer\\locked after 2 attempts (EPERM): Access denied by another process");
+  });
+
+  it("retries transient Windows removal errors and resolves when the directory disappears", async () => {
+    let exists = true;
+    let attempts = 0;
+    const clearReadOnly = jest.fn(async () => {});
+    await expect(removeDirectoryWithRetries({
+      directory: "C:\\RunContainer\\app1",
+      existsSync: () => exists,
+      removeSync: () => {
+        attempts += 1;
+        if (attempts === 1) {
+          const error = new Error("sharing violation");
+          error.code = "EPERM";
+          throw error;
+        }
+        exists = false;
+      },
+      clearReadOnly,
+      wait: async () => {},
+    })).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(clearReadOnly).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("process tree helpers", () => {
   const table = [
@@ -19,13 +82,32 @@ describe("process tree helpers", () => {
     expect(findAppProcessIds(table, root).sort()).toEqual([10, 11, 12]);
   });
 
+  it("finds a process by its command line when Windows denies executable-path access", () => {
+    const hiddenPath = [{ pid: 41, ppid: 1, path: "", commandLine: `"${root}\\ScreenRec.exe" /quiet` }];
+    expect(findAppProcessIds(hiddenPath, root)).toEqual([41]);
+    expect(findAppProcessIds([{ ...hiddenPath[0], commandLine: `${root}-other\\ScreenRec.exe` }], root)).toEqual([]);
+  });
+
   it("matches the folder with a trailing separator so sibling app folders are not caught", () => {
     expect(findAppProcessIds(table, root)).not.toContain(30);
   });
 
-  it("includes live seed PIDs (launched PIDs) and their children, ignoring dead ones", () => {
-    const withoutPathMatch = table.map((row) => ({ ...row, path: "" }));
-    expect(findAppProcessIds(withoutPathMatch, root, [10, 999]).sort()).toEqual([10, 11, 12]);
+  it("uses app-folder command lines as seeds and ignores stale PIDs", () => {
+    const hiddenPaths = table.map((row) => ({ ...row, path: "", commandLine: row.pid === 10 ? `${root}\\ScreenRec.exe` : "" }));
+    expect(findAppProcessIds(hiddenPaths, root, [10, 999]).sort()).toEqual([10, 11, 12]);
+  });
+
+  it("finds surviving descendants after the original app process has exited", () => {
+    const exitedParentTable = [
+      { pid: 51, ppid: 10, path: "C:\\\\Program Files\\\\ScreenRec\\\\worker.exe", commandLine: "" },
+      { pid: 52, ppid: 51, path: "", commandLine: "" },
+    ];
+    expect(findAppProcessIds(exitedParentTable, root, [10]).sort()).toEqual([51, 52]);
+  });
+
+  it("does not kill an unrelated process just because Windows reused a stored PID", () => {
+    const unrelated = [{ pid: 10, ppid: 1, path: "C:\\\\Windows\\\\notepad.exe", commandLine: "notepad.exe" }];
+    expect(findAppProcessIds(unrelated, root, [10])).toEqual([]);
   });
 
   it("returns nothing when no process belongs to the app", () => {
@@ -34,19 +116,21 @@ describe("process tree helpers", () => {
 
   it("parses the process table JSON, including single-row and empty output", () => {
     expect(parseProcessTable("")).toEqual([]);
-    expect(parseProcessTable('{"ProcessId":5,"ParentProcessId":1,"ExecutablePath":null}')).toEqual([
-      { pid: 5, ppid: 1, path: "" },
+    expect(parseProcessTable('{"ProcessId":5,"ParentProcessId":1,"ExecutablePath":null,"CommandLine":"C:\\\\\\\\app.exe"}')).toEqual([
+      { pid: 5, ppid: 1, path: "", commandLine: "C:\\\\app.exe" },
     ]);
     expect(parseProcessTable('[{"ProcessId":7,"ParentProcessId":2,"ExecutablePath":"C:\\\\a.exe"}]')).toEqual([
-      { pid: 7, ppid: 2, path: "C:\\a.exe" },
+      { pid: 7, ppid: 2, path: "C:\\a.exe", commandLine: "" },
     ]);
     expect(() => parseProcessTable("not json")).toThrow("unreadable");
   });
 
-  it("queries the process table through PowerShell CIM", () => {
+  it("queries process paths, command lines, and parent PIDs through PowerShell CIM", () => {
     const args = buildProcessTableArgs();
     expect(args[3]).toBe("-Command");
     expect(args[args.length - 1]).toContain("Win32_Process");
+    expect(args[args.length - 1]).toContain("ParentProcessId");
+    expect(args[args.length - 1]).toContain("CommandLine");
   });
 
   it("builds forced tree kill arguments", () => {
@@ -94,6 +178,9 @@ describe("app store and download helpers", () => {
       launchMode: "sandboxie",
       lastLaunchedAt: "2026-01-01T00:00:00.000Z",
       lastExitAt: "2026-01-01T00:01:00.000Z",
+      sandboxieInitialized: true,
+      sandboxieCleanupPending: true,
+      launchCleanupPending: true,
       name: "App Copy",
     });
     expect(copy).toMatchObject({
@@ -105,6 +192,9 @@ describe("app store and download helpers", () => {
       launchMode: null,
       lastLaunchedAt: null,
       lastExitAt: null,
+      sandboxieInitialized: false,
+      sandboxieCleanupPending: false,
+      launchCleanupPending: false,
     });
   });
 });

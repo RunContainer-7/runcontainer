@@ -62,9 +62,20 @@ describe("ContainerManager", () => {
   it("shows settings controls in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Isolation engine");
+    expect(container.textContent).toContain("App profile");
     expect(container.textContent).toContain("App storage");
     expect(container.textContent).not.toContain("Auto-isolate APPDATA");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("explains profile redirection without claiming it is a security boundary", () => {
+    const container = render();
+    openTab(container, "Settings");
+    expect(container.textContent).toContain("No third-party sandbox is required");
+    expect(container.textContent).toContain("not a Windows security boundary");
+    expect(container.textContent).not.toContain("Sandboxie-Plus must be installed");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

@@ -154,9 +154,10 @@ async function deleteSandboxieBox({ tools, boxName, execute, wait = delay }) {
 
 async function deleteContainerResources({ appRecord, tools, execute, stopProcesses, removeDirectory, onCleanupError = () => {} }) {
   const shouldCleanSandboxie = Boolean((appRecord.sandboxieInitialized || appRecord.sandboxieCleanupPending) && appRecord.sandboxieBox);
-  let sandboxieCleanupError = shouldCleanSandboxie && !tools
-    ? new Error('Sandboxie-Plus tools are unavailable.')
-    : null;
+  let sandboxieCleanupError = null;
+  if (shouldCleanSandboxie && !tools) {
+    onCleanupError(new Error('Legacy Sandboxie box could not be cleared because Sandboxie-Plus is unavailable.'));
+  }
 
   if (shouldCleanSandboxie && tools) {
     try {
@@ -179,9 +180,7 @@ async function deleteContainerResources({ appRecord, tools, execute, stopProcess
   }
 
   await removeDirectory(appRecord.sandboxRoot);
-  if (sandboxieCleanupError) {
-    throw new Error(`The app folder was removed, but Sandboxie box cleanup failed: ${sandboxieCleanupError.message}`);
-  }
+  if (sandboxieCleanupError) onCleanupError(sandboxieCleanupError);
 }
 
 module.exports = {

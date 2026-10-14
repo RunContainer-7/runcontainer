@@ -216,7 +216,7 @@ export default function ContainerManager() {
       )}
       <div className="app-header">
         <div>
-          <div className="eyebrow">Sandboxed app launcher</div>
+          <div className="eyebrow">Per-app profile launcher</div>
           <div className="header-title">RunContainer</div>
         </div>
         {activeTab === "Apps" && (
@@ -245,7 +245,7 @@ export default function ContainerManager() {
               <h3>Installing into RunContainer</h3>
               <button className="icon-button" onClick={() => setShowInstallWizard(false)}>×</button>
             </div>
-            <p className="wizard-copy">RunContainer is preparing the app as a sandboxed container entry. The executable will be stored inside the container workspace and opened from there.</p>
+            <p className="wizard-copy">RunContainer is preparing a managed app profile. The executable will be stored in its own folder and started with common app-data and temporary paths redirected there.</p>
             <div className="wizard-steps">
               <div className="wizard-step active">1. Validate app</div>
               <div className="wizard-step active">2. Create sandbox</div>
@@ -260,7 +260,7 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div>
               <h2>{activeSession.status === 'Launching' ? 'Starting isolated app' : activeSession.status === 'Running' ? 'Isolated app running' : 'Isolated app stopped'}</h2>
-              <span className="muted">{activeSession.name} • Sandboxie-Plus box (OS-level isolation)</span>
+              <span className="muted">{activeSession.name} • RunContainer app profile</span>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
@@ -289,7 +289,7 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div>
               <h2>My Apps</h2>
-              <span className="muted">Sandboxed apps</span>
+              <span className="muted">Managed apps</span>
             </div>
             <div className="pill">Live container mode</div>
           </div>
@@ -357,8 +357,8 @@ export default function ContainerManager() {
           <p>How RunContainer isolates each app.</p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>Isolation engine</strong>
-              <span>Every app runs in its own Sandboxie-Plus box (OS-level isolation), which redirects the app’s file writes into its own folder. Sandboxie-Plus must be installed; RunContainer does not start apps outside it. Get it from github.com/sandboxie-plus/Sandboxie/releases.</span>
+              <strong>App profile</strong>
+              <span>RunContainer starts each EXE directly with APPDATA, LOCALAPPDATA, TEMP, and TMP redirected to that app’s private folders. No third-party sandbox is required. This separates common app data, but it is not a Windows security boundary: apps can still access other host resources.</span>
             </div>
             <div className="profile-card">
               <strong>App storage</strong>
@@ -375,15 +375,15 @@ export default function ContainerManager() {
       {activeTab === "Info" && (
         <div className="placeholder-panel info-panel">
           <h3>What RunContainer is</h3>
-          <p>RunContainer is a sandboxed app launcher for Windows. It lets you install EXE-based apps into isolated container spaces, run them within a managed environment, and keep them separate from your normal desktop.</p>
+          <p>RunContainer is a Windows app launcher that gives each installed EXE its own managed app folder and redirected user-data profile.</p>
           <div className="profile-list">
             <div className="profile-card active">
               <strong>How it works</strong>
-              <span>Each app is copied into its own sandbox folder with isolated runtime, appdata, temp, and log paths.</span>
+              <span>Each app is copied into its own folder. RunContainer redirects common user-data and temporary-file environment paths into that folder; this is profile separation, not OS-enforced security isolation.</span>
             </div>
             <div className="profile-card">
               <strong>Use cases</strong>
-              <span>Use it for testing unfamiliar apps, isolating tools, preserving a clean desktop, or launching apps in a contained workspace.</span>
+              <span>Use it to keep common app data separate, test software, and remove an app together with its managed profile.</span>
             </div>
             <div className="profile-card">
               <strong>Lifecycle</strong>
