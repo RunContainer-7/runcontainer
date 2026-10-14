@@ -11,6 +11,7 @@ const {
   launchInSandboxie,
   terminateSandboxieBox,
   deleteSandboxieBox,
+  deleteContainerResources,
   parseSandboxPids,
   isWithinDirectory,
 } = require('./sandboxie-runtime');
@@ -400,8 +401,8 @@ async function stopProcessesUnder(directory, seedPids = []) {
 
 async function removeSandboxDirectory(sandboxRoot) {
   let lastError = null;
-  // Sandboxie releases its file-root locks asynchronously after the box is deleted, so keep retrying for a while.
-  for (let attempt = 0; attempt < 15; attempt += 1) {
+  // Sandboxie's two-phase delete runs asynchronously; allow phase two time to release file locks.
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     if (!fs.existsSync(sandboxRoot)) return;
     try {
       fs.rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
@@ -422,6 +423,8 @@ async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
     return failedLaunch(appRecord, 'The Sandboxie file root is outside this app’s managed directory; refusing to launch it.');
   }
   ensureDirectory(fileRootPath);
+  let sandboxieConfigured = Boolean(appRecord.sandboxieInitialized);
+  let sandboxieCleanupPending = Boolean(appRecord.sandboxieCleanupPending);
   try {
     const launchResult = await launchInSandboxie({
       tools,
@@ -430,6 +433,8 @@ async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
       fileRootPath,
       execute: executeFile,
       onConfigured: async () => {
+        sandboxieConfigured = true;
+        sandboxieCleanupPending = false;
         saveApps(loadApps().map((entry) => (entry.id === appRecord.id
           ? { ...entry, sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, sandboxieInitialized: true, launchMode: 'sandboxie' }
           : entry)));
@@ -446,6 +451,7 @@ async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
       pid: launchResult.pids[0],
       sandboxPids: launchResult.pids,
       lastLaunchedAt: new Date().toISOString(),
+      sandboxieCleanupPending: false,
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
     appendLog(logPath, `Sandboxie launched app in box ${boxName}, PIDs: ${launchResult.pids.join(', ')}`);
@@ -462,17 +468,29 @@ async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
     };
   } catch (error) {
     appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
-    // Anything still running from this folder started outside the box; stop it so no unboxed copy stays open.
-    await stopProcessesUnder(sandboxRoot, []).catch((stopError) => appendLog(logPath, `Could not stop unboxed copy: ${stopError.message}`));
+    // Anything still running from this folder may be unboxed. Do not silently allow a second launch if cleanup cannot be verified.
+    let unboxedStopError = null;
+    try {
+      await stopProcessesUnder(sandboxRoot, []);
+    } catch (stopError) {
+      unboxedStopError = stopError;
+      appendLog(logPath, `Could not stop unboxed copy: ${stopError.message}`);
+    }
     try {
       await deleteSandboxieBox({ tools, boxName, execute: executeFile });
+      sandboxieConfigured = false;
+      sandboxieCleanupPending = false;
     } catch (cleanupError) {
+      sandboxieCleanupPending = true;
       appendLog(logPath, `Sandboxie cleanup after failed launch also failed: ${cleanupError.message}`);
     }
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id
-      ? { ...entry, sandboxieInitialized: false, launchMode: null, status: 'Installed', pid: null, sandboxPids: [] }
+      ? { ...entry, sandboxieInitialized: sandboxieConfigured, sandboxieCleanupPending, launchCleanupPending: Boolean(unboxedStopError), sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, launchMode: null, status: 'Installed', pid: null, sandboxPids: [] }
       : entry)));
-    return failedLaunch(appRecord, error.message);
+    const failureReason = unboxedStopError
+      ? `${error.message} Also could not verify or stop a possible unboxed process: ${unboxedStopError.message}. Delete this app or close its processes before trying Run again.`
+      : error.message;
+    return failedLaunch(appRecord, failureReason);
   }
 }
 
@@ -712,6 +730,9 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
     return failedLaunch(appRecord, 'The app container path is outside RunContainer’s managed directory; refusing to launch it.');
   }
+  if (appRecord.launchCleanupPending) {
+    return failedLaunch(appRecord, 'A previous launch could not be confirmed stopped. Delete this app or close its processes before trying Run again.');
+  }
   const validation = validateExe(appRecord.source);
   if (!validation.isValid) return failedLaunch(appRecord, validation.reason);
 
@@ -763,12 +784,15 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
 
   try {
     stopMonitor(appRecord.id);
-    await stopProcessesUnder(sandboxRoot, appRecord.sandboxPids || []);
-    if (appRecord.sandboxieBox && appRecord.sandboxieInitialized) {
-      const tools = resolveSandboxieTools();
-      if (tools) await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
-    }
-    await removeSandboxDirectory(sandboxRoot);
+    const tools = resolveSandboxieTools();
+    await deleteContainerResources({
+      appRecord,
+      tools,
+      execute: executeFile,
+      stopProcesses: stopProcessesUnder,
+      removeDirectory: removeSandboxDirectory,
+      onCleanupError: (error) => appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Sandboxie delete attempt failed for ${appRecord.name || appRecord.id}; stopping remaining app processes and retrying: ${error.message}`),
+    });
 
     const remainingApps = removeAppRecord(appRecord);
     if (loadApps().some((entry) => entry.id === appRecord.id)) {

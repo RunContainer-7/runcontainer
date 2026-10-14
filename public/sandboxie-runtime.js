@@ -46,11 +46,13 @@ function buildDeleteSandboxArgs(boxName) {
 }
 
 function buildConfigureBoxArgs(boxName, setting, value) {
-  return ['set', boxName, setting, value];
+  // /drv asks Sandboxie to update its active configuration through the driver API,
+  // rather than relying on RunContainer writing Sandboxie.ini in a protected directory.
+  return ['set', '/drv', boxName, setting, value];
 }
 
 function buildRemoveBoxArgs(boxName) {
-  return ['set', boxName, '*', ''];
+  return ['set', '/drv', boxName, '*', ''];
 }
 
 function parseSandboxPids(output) {
@@ -89,7 +91,8 @@ async function configureSandboxieBox({ tools, boxName, fileRootPath, execute }) 
   await execute(tools.sbieIniExe, buildConfigureBoxArgs(boxName, 'FileRootPath', fileRootPath));
   await execute(tools.startExe, ['/reload']);
   const { stdout: enabledOut } = await execute(tools.sbieIniExe, ['query', boxName, 'Enabled']);
-  if (String(enabledOut || '').replace(/^Enabled\s*=\s*/i, '').trim().toLowerCase() !== 'y') {
+  // SbieIni query SECTION Setting prints the value only (e.g. `y`), not `Enabled=y`.
+  if (String(enabledOut || '').trim().toLowerCase() !== 'y') {
     throw new Error(`Sandboxie did not enable box ${boxName}, so the app would not run inside it.`);
   }
   const { stdout } = await execute(tools.sbieIniExe, ['query', boxName, 'FileRootPath']);
@@ -149,6 +152,38 @@ async function deleteSandboxieBox({ tools, boxName, execute, wait = delay }) {
   await execute(tools.startExe, ['/reload']);
 }
 
+async function deleteContainerResources({ appRecord, tools, execute, stopProcesses, removeDirectory, onCleanupError = () => {} }) {
+  const shouldCleanSandboxie = Boolean((appRecord.sandboxieInitialized || appRecord.sandboxieCleanupPending) && appRecord.sandboxieBox);
+  let sandboxieCleanupError = shouldCleanSandboxie && !tools
+    ? new Error('Sandboxie-Plus tools are unavailable.')
+    : null;
+
+  if (shouldCleanSandboxie && tools) {
+    try {
+      await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute });
+    } catch (error) {
+      sandboxieCleanupError = error;
+      onCleanupError(error);
+    }
+  }
+
+  await stopProcesses(appRecord.sandboxRoot, appRecord.sandboxPids || []);
+
+  if (sandboxieCleanupError && tools) {
+    try {
+      await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute });
+      sandboxieCleanupError = null;
+    } catch (error) {
+      sandboxieCleanupError = error;
+    }
+  }
+
+  await removeDirectory(appRecord.sandboxRoot);
+  if (sandboxieCleanupError) {
+    throw new Error(`The app folder was removed, but Sandboxie box cleanup failed: ${sandboxieCleanupError.message}`);
+  }
+}
+
 module.exports = {
   sandboxBoxName,
   findSandboxieTools,
@@ -164,4 +199,5 @@ module.exports = {
   launchInSandboxie,
   terminateSandboxieBox,
   deleteSandboxieBox,
+  deleteContainerResources,
 };
