@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -12,6 +12,8 @@ function useBootAnimation() {
 
   return booting;
 }
+// Used only until the main process reports the version from package.json.
+const APP_VERSION_FALLBACK = "0.5.0";
 const tabs = ["Sources", "Apps", "Settings", "Info"];
 const tabIcons = {
   Sources: "◫",
@@ -30,8 +32,29 @@ export default function ContainerManager() {
   const [logs, setLogs] = useState([]);
   const [sourceUrl, setSourceUrl] = useState("");
   const [showInstallWizard, setShowInstallWizard] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const [activeSession, setActiveSession] = useState(null);
+  const [appVersion, setAppVersion] = useState(APP_VERSION_FALLBACK);
   const booting = useBootAnimation();
+
+  useEffect(() => {
+    // Promise.resolve keeps this safe when the bridge is unavailable (for example in tests
+    // or when the app runs outside Electron) instead of throwing on an undefined result.
+    Promise.resolve(getAppVersion())
+      .then((version) => {
+        if (version) setAppVersion(version);
+      })
+      .catch(() => {});
+  }, []);
+
+  function isolationLabel(app) {
+    if (app.status !== 'Running') return null;
+    if (app.isolated) {
+      const engine = app.activeEngine === 'sandboxie' ? 'Sandboxie-Plus box' : 'Windows AppContainer';
+      return `Isolated by ${engine}`;
+    }
+    return 'Running WITHOUT isolation (profile redirection only)';
+  }
 
   const appContainers = useMemo(() => containers.filter((container) => container?.source), [containers]);
 
@@ -176,12 +199,53 @@ export default function ContainerManager() {
       });
   }
 
+  function handleCancelDelete(container) {
+    if (!container) return;
+    cancelDeleteContainer(container).then(() => {
+      setInstallMessage(`Cancelling the deletion of ${container.name}...`);
+    });
+  }
+
+  function handleSetWindowHosting(container, enabled) {
+    setWindowHosting({ id: container.id, windowHosting: enabled }).then((result) => {
+      if (result?.status === 'Failed') {
+        setInstallMessage(`Could not change window hosting for ${container.name}: ${result.error}`);
+        return;
+      }
+      setSelectedApp((current) => current?.id === container.id ? { ...current, windowHosting: result.windowHosting } : current);
+      setInstallMessage(result.windowHosting
+        ? `${container.name} will be shown inside RunContainer the next time it runs.`
+        : `${container.name} will open in its own window the next time it runs.`);
+    });
+  }
+
+  function handleSetIsolationEngine(container, engine) {
+    setIsolationEngine({ id: container.id, isolationEngine: engine }).then((result) => {
+      if (result?.status === 'Failed') {
+        setInstallMessage(`Could not change the engine for ${container.name}: ${result.error}`);
+        return;
+      }
+      setSelectedApp((current) => current?.id === container.id ? { ...current, isolationEngine: result.isolationEngine } : current);
+      updateContainerStatus(container.id, container.status);
+      refreshContainers();
+      setInstallMessage(result.isolationEngine === 'profile'
+        ? `${container.name} will now start without isolation when it is launched again.`
+        : `${container.name} will use the strongest available isolation engine when it is launched again.`);
+    });
+  }
+
   function handleDelete(container) {
     if (!container) return;
 
+    setDeletingId(container.id);
     setInstallMessage(`Deleting ${container.name} and its sandbox...`);
     resetContainer(container)
       .then(async (result) => {
+        if (result?.status === 'Cancelled') {
+          setInstallMessage(`Deletion of ${container.name} was cancelled. The app is still listed; run Delete again to finish removing its folder.`);
+          await refreshContainers();
+          return;
+        }
         if (!result?.removed || result.status !== 'Reset') {
           setInstallMessage(`Could not delete ${container.name}: ${result?.error || 'RunContainer did not confirm deletion.'}`);
           return;
@@ -199,11 +263,14 @@ export default function ContainerManager() {
           setInstallMessage(`${container.name} was removed from disk, but its launcher record is still present. Refresh RunContainer and check its app store.`);
           return;
         }
-        setInstallMessage(`${container.name} and its sandbox were deleted.`);
+        setInstallMessage(result.containerCleanupWarning
+          ? `${container.name} and its sandbox were deleted, but its container profile could not be confirmed removed: ${result.containerCleanupWarning}`
+          : `${container.name} and its sandbox were deleted.`);
       })
       .catch((error) => {
         setInstallMessage(`Could not delete ${container.name}: ${error?.message || 'Unknown deletion error.'}`);
-      });
+      })
+      .finally(() => setDeletingId(null));
   }
 
   return (
@@ -245,7 +312,7 @@ export default function ContainerManager() {
               <h3>Installing into RunContainer</h3>
               <button className="icon-button" onClick={() => setShowInstallWizard(false)}>×</button>
             </div>
-            <p className="wizard-copy">RunContainer is preparing a managed app profile. The executable will be stored in its own folder and started with common app-data and temporary paths redirected there.</p>
+            <p className="wizard-copy">RunContainer is preparing a managed app folder. The executable is copied into it, and Run starts it inside a Windows AppContainer (or in a Sandboxie-Plus box when that is installed) so the process cannot reach the rest of your profile.</p>
             <div className="wizard-steps">
               <div className="wizard-step active">1. Validate app</div>
               <div className="wizard-step active">2. Create sandbox</div>
@@ -259,8 +326,8 @@ export default function ContainerManager() {
         <div className="apps-panel session-shell">
           <div className="panel-title-row">
             <div>
-              <h2>{activeSession.status === 'Launching' ? 'Starting isolated app' : activeSession.status === 'Running' ? 'Isolated app running' : 'Isolated app stopped'}</h2>
-              <span className="muted">{activeSession.name} • RunContainer app profile</span>
+              <h2>{activeSession.status === 'Launching' ? 'Starting app' : activeSession.status === 'Running' ? (activeSession.isolated ? 'App running isolated' : 'App running') : 'App stopped'}</h2>
+              <span className="muted">{activeSession.name} • {isolationLabel(activeSession) || 'RunContainer app profile'}</span>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
@@ -272,14 +339,23 @@ export default function ContainerManager() {
                   {activeSession.status === 'Launching'
                     ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
-                      ? `Running${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. The app opens in its own Windows window.`
+                      ? `Running${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. ${activeSession.windowHosted ? 'Shown inside RunContainer (visual only).' : 'The app opens in its own Windows window.'}`
                       : 'All processes for this app have exited.'}
                 </div>
+                {activeSession.status === 'Running' && (
+                  <div className="muted">
+                    {activeSession.isolated
+                      ? `Isolation: ${activeSession.activeEngine === 'sandboxie' ? 'Sandboxie-Plus box' : 'Windows AppContainer (token verified)'}.`
+                      : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
+                  </div>
+                )}
               </div>
               <div className="detail-actions">
                 {activeSession.status === 'Running' && <button className="settings-button ghost" onClick={() => handleKill(activeSession)}>Stop app</button>}
                 <button className="settings-button" onClick={() => setActiveSession(null)}>Back to app list</button>
-                <button className="settings-button ghost" onClick={() => handleDelete(activeSession)}>Delete app and sandbox</button>
+                {deletingId === activeSession.id
+                  ? <button className="settings-button ghost" onClick={() => handleCancelDelete(activeSession)}>Cancel delete</button>
+                  : <button className="settings-button ghost" onClick={() => handleDelete(activeSession)}>Delete app and sandbox</button>}
               </div>
             </div>
           </div>
@@ -312,6 +388,8 @@ export default function ContainerManager() {
                       <div className="container-status">
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}
+                        {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
+                        {container.isolationEngine === 'profile' ? ' • Unguarded mode selected' : ''}
                       </div>
                     </div>
                   </div>
@@ -320,7 +398,9 @@ export default function ContainerManager() {
                     <button className="settings-button" onClick={() => setSelectedApp(container)}>Manage</button>
                     <button className="settings-button" onClick={() => handleRun(container)}>Run</button>
                     <button className="settings-button ghost" onClick={() => handleKill(container)}>Close</button>
-                    <button className="settings-button ghost" onClick={() => handleDelete(container)}>Delete</button>
+                    {deletingId === container.id
+                      ? <button className="settings-button ghost" onClick={() => handleCancelDelete(container)}>Cancel delete</button>
+                      : <button className="settings-button ghost" onClick={() => handleDelete(container)}>Delete</button>}
                     <button className="settings-button ghost" onClick={() => handleDuplicate(container)}>Duplicate</button>
                     <button className="settings-button ghost" onClick={() => handleExport(container)}>Export</button>
                     <button className="settings-button ghost" onClick={() => handleViewLogs(container)}>Logs</button>
@@ -357,8 +437,16 @@ export default function ContainerManager() {
           <p>How RunContainer isolates each app.</p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>App profile</strong>
-              <span>RunContainer starts each EXE directly with APPDATA, LOCALAPPDATA, TEMP, and TMP redirected to that app’s private folders. No third-party sandbox is required. This separates common app data, but it is not a Windows security boundary: apps can still access other host resources.</span>
+              <strong>Isolation engine</strong>
+              <span>Run launches each app inside a Windows AppContainer, which is built into Windows 10 and 11 and needs no third-party software. RunContainer verifies the launched process carries the container token before it reports the app as isolated. If Sandboxie-Plus is installed, that box is used instead because it also isolates the registry and redirects writes.</span>
+            </div>
+            <div className="profile-card">
+              <strong>Unguarded profile mode</strong>
+              <span>An app that cannot run inside a container (installers and apps that need administrator rights usually cannot) can be switched to unguarded profile mode in Manage. That mode only redirects APPDATA, LOCALAPPDATA, TEMP and TMP; it is not a Windows security boundary, and RunContainer labels it as not isolated.</span>
+            </div>
+            <div className="profile-card">
+              <strong>Windows inside RunContainer</strong>
+              <span>Run also tries to host the app’s window inside RunContainer’s own window, which is how an app appears to run “inside” RunContainer. This is presentation only: it adds no isolation, and Windows often refuses to re-parent a window at a lower integrity level, in which case the app opens in its own window. Turn it off per app in Manage.</span>
             </div>
             <div className="profile-card">
               <strong>App storage</strong>
@@ -379,7 +467,11 @@ export default function ContainerManager() {
           <div className="profile-list">
             <div className="profile-card active">
               <strong>How it works</strong>
-              <span>Each app is copied into its own folder. RunContainer redirects common user-data and temporary-file environment paths into that folder; this is profile separation, not OS-enforced security isolation.</span>
+              <span>Each app is copied into its own folder and launched with an isolation engine: a Windows AppContainer by default, or a Sandboxie-Plus box when one is installed. The app runs as a separate Windows application — RunContainer never embeds another program’s window — and the container is what keeps it away from the rest of your profile.</span>
+            </div>
+            <div className="profile-card">
+              <strong>What isolation you actually get</strong>
+              <span>With an AppContainer or Sandboxie box, the process runs with a restricted token and cannot reach the rest of your files, registry or processes. Runs that fall back to unguarded profile mode are reported as not isolated, in the app list and in the app’s log.</span>
             </div>
             <div className="profile-card">
               <strong>Use cases</strong>
@@ -408,7 +500,7 @@ export default function ContainerManager() {
               </div>
             </div>
           </div>
-          <p className="muted info-version">RunContainer v1.0.0</p>
+          <p className="muted info-version">RunContainer v{appVersion}</p>
         </div>
       )}
 
@@ -431,11 +523,39 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div>
+                <h4>Isolation</h4>
+                <p className="muted">
+                  {selectedApp.isolationEngine === 'profile'
+                    ? 'Unguarded profile mode: this app starts without an isolation engine, so it can reach the rest of Windows.'
+                    : 'Engine: strongest available — Sandboxie-Plus box when installed, otherwise a Windows AppContainer.'}
+                </p>
+                <div className="detail-actions">
+                  {selectedApp.isolationEngine === 'profile'
+                    ? <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'auto')}>Use the isolation engine</button>
+                    : <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'profile')}>Run unguarded instead</button>}
+                </div>
+              </div>
+              <div>
+                <h4>Window</h4>
+                <p className="muted">
+                  {selectedApp.windowHosting === false
+                    ? 'The app opens in its own Windows window.'
+                    : 'RunContainer hosts the app window inside its own window. This is presentation only and adds no isolation; if Windows refuses the re-parent, the app opens in its own window instead.'}
+                </p>
+                <div className="detail-actions">
+                  {selectedApp.windowHosting === false
+                    ? <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, true)}>Show inside RunContainer</button>
+                    : <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, false)}>Open in its own window</button>}
+                </div>
+              </div>
+              <div>
                 <h4>Actions</h4>
                 <div className="detail-actions">
                   <button className="settings-button" onClick={() => handleRun(selectedApp)}>Run</button>
                   <button className="settings-button ghost" onClick={() => handleKill(selectedApp)}>Close</button>
-                  <button className="settings-button ghost" onClick={() => handleDelete(selectedApp)}>Delete</button>
+                  {deletingId === selectedApp.id
+                    ? <button className="settings-button ghost" onClick={() => handleCancelDelete(selectedApp)}>Cancel delete</button>
+                    : <button className="settings-button ghost" onClick={() => handleDelete(selectedApp)}>Delete</button>}
                 </div>
               </div>
             </div>

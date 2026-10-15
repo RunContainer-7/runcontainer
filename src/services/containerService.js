@@ -9,6 +9,7 @@ const ipcRenderer = electronModule?.ipcRenderer || null;
 if (ipcRenderer && !window.electron) {
   window.electron = {
     openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
+    getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   };
 }
 
@@ -66,6 +67,28 @@ export async function runContainer(container) {
 
 export async function killContainer(container) {
   return requireIpc('Stopping apps').invoke('kill-exe', container);
+}
+
+export async function cancelDeleteContainer(container) {
+  return requireIpc('Cancelling deletion').invoke('cancel-delete', container);
+}
+
+export async function setIsolationEngine(container) {
+  return requireIpc('Changing the isolation engine').invoke('set-isolation-engine', container);
+}
+
+export async function setWindowHosting(container) {
+  return requireIpc('Changing window hosting').invoke('set-window-hosting', container);
+}
+
+export async function getAppVersion() {
+  if (!ipcRenderer) return null;
+  try {
+    const result = await ipcRenderer.invoke('get-app-version');
+    return result?.version || null;
+  } catch (error) {
+    return null;
+  }
 }
 
 export async function stopContainer(container) {

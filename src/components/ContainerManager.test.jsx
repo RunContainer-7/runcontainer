@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
-import { onContainerStatus } from "../services/containerService";
+import { onContainerStatus, getAppVersion } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -13,6 +13,10 @@ jest.mock("../services/containerService", () => ({
   duplicateContainer: jest.fn(),
   exportContainer: jest.fn(),
   getAppLogs: jest.fn(),
+  cancelDeleteContainer: jest.fn(),
+  setIsolationEngine: jest.fn(),
+  setWindowHosting: jest.fn(),
+  getAppVersion: jest.fn(async () => "0.5.0"),
   listContainers: jest.fn(async () => []),
   onContainerStatus: jest.fn(() => () => {}),
 }));
@@ -62,7 +66,8 @@ describe("ContainerManager", () => {
   it("shows settings controls in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("App profile");
+    expect(container.textContent).toContain("Isolation engine");
+    expect(container.textContent).toContain("Windows inside RunContainer");
     expect(container.textContent).toContain("App storage");
     expect(container.textContent).not.toContain("Auto-isolate APPDATA");
     act(() => {
@@ -70,10 +75,12 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("explains profile redirection without claiming it is a security boundary", () => {
+  it("names the real isolation engine and keeps unguarded mode clearly labeled", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("No third-party sandbox is required");
+    expect(container.textContent).toContain("Isolation engine");
+    expect(container.textContent).toContain("Windows AppContainer");
+    expect(container.textContent).toContain("Unguarded profile mode");
     expect(container.textContent).toContain("not a Windows security boundary");
     expect(container.textContent).not.toContain("Sandboxie-Plus must be installed");
     act(() => {
@@ -81,10 +88,23 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows the RunContainer version in Info", () => {
+  it("shows the version reported by the main process in Info", async () => {
+    getAppVersion.mockResolvedValue("1.2.3");
     const container = render();
     openTab(container, "Info");
-    expect(container.textContent).toContain("RunContainer v1.0.0");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("RunContainer v1.2.3");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("falls back to the packaged version when the version bridge is unavailable", async () => {
+    // getAppVersion resolves to undefined here, which is what happens outside Electron.
+    const container = render();
+    openTab(container, "Info");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("RunContainer v0.5.0");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
