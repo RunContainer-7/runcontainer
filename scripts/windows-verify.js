@@ -19,6 +19,8 @@ const path = require('path');
 
 const isolation = require('../public/isolation-runtime');
 const launch = require('../public/isolated-launch');
+const hyperv = require('../public/hyperv-runtime');
+const { selectIsolationEngine } = require('../public/engine-select');
 
 const results = [];
 let failed = 0;
@@ -287,6 +289,121 @@ async function checkDeletionCases() {
   return notes.join(', ');
 }
 
+
+// ---------------------------------------------------------------------------
+// 2b. Boundary evidence: token + ACLs prove the container cannot reach outside.
+// The created process carries the container SID (verified above), the sandbox folder
+// grants that SID access, and a file outside the sandbox has no ACE for it.
+// ---------------------------------------------------------------------------
+function checkAppContainerBoundary() {
+  const sandbox = makeSandbox('boundary');
+  const outsideDir = makeSandbox('outside');
+  const secret = path.join(outsideDir, 'secret.txt');
+  fs.writeFileSync(secret, 'outside-secret');
+  const scriptPath = path.join(sandbox, 'launcher.ps1');
+  fs.writeFileSync(scriptPath, isolation.buildAppContainerScript(), 'utf8');
+  const containerName = isolation.appContainerName(`boundary-${Date.now()}`);
+  const target = path.join(sandbox, 'hostapp.exe');
+  fs.copyFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'), target);
+  const sid = isolation.parseAppContainerOutput(powershell(['-File', scriptPath, '-Mode', 'sid', '-Name', containerName])).sid;
+  if (!sid || !sid.startsWith('S-1-15-2-')) throw new Error(`unexpected SID: ${sid}`);
+  run('icacls.exe', isolation.buildAppContainerFolderAclArgs(sandbox, sid));
+  const launchOut = powershell(['-File', scriptPath, '-Mode', 'launch', '-Name', containerName, '-Exe', target, '-Dir', sandbox]);
+  const result = isolation.parseAppContainerOutput(launchOut);
+  try {
+    if (!result.verified || result.processSid !== result.containerSid) throw new Error('container token was not verified');
+    const outsideAcl = run('icacls.exe', [secret]);
+    if (String(outsideAcl).includes(sid)) throw new Error('the outside file unexpectedly grants the container SID access');
+    const sandboxAcl = run('icacls.exe', [sandbox]);
+    if (!String(sandboxAcl).includes(sid)) throw new Error('the sandbox folder does not grant the container SID access');
+    return `token ${result.containerSid} verified; sandbox grants ${sid.slice(0, 18)}…, outside file does not`;
+  } finally {
+    try { run('taskkill.exe', launch.buildTaskkillArgs(result.pid)); } catch (e) {}
+    try { powershell(['-File', scriptPath, '-Mode', 'delete', '-Name', containerName]); } catch (e) {}
+    removeQuietly(sandbox);
+    removeQuietly(outsideDir);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2c. Fail-closed: a bad executable refuses instead of running unguarded.
+// ---------------------------------------------------------------------------
+function checkFailClosed() {
+  const sandbox = makeSandbox('failclosed');
+  const scriptPath = path.join(sandbox, 'launcher.ps1');
+  fs.writeFileSync(scriptPath, isolation.buildAppContainerScript(), 'utf8');
+  const containerName = isolation.appContainerName(`fail-${Date.now()}`);
+  let refused = false;
+  try {
+    const out = powershell(['-File', scriptPath, '-Mode', 'launch', '-Name', containerName, '-Exe', path.join(sandbox, 'missing.exe'), '-Dir', sandbox]);
+    isolation.parseAppContainerOutput(out);
+  } catch (error) {
+    refused = true;
+  }
+  // Engine selection itself must refuse unguarded/sandboxie with no process started.
+  const p1 = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'profile' }, hypervReady: true });
+  const p2 = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'sandboxie' }, hypervReady: true });
+  removeQuietly(sandbox);
+  if (!refused) throw new Error('the launcher reported success for a missing executable');
+  if (p1.engine !== 'refused' || p2.engine !== 'refused') throw new Error('engine selection did not refuse unguarded/sandboxie');
+  return 'bad launch errored with no process; profile/sandboxie selection refused';
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Installer lineage: parent exits, child stays tracked via persisted seeds.
+// ---------------------------------------------------------------------------
+async function checkInstallerLineage() {
+  const sandbox = makeSandbox('lineage');
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Installer-style launcher: starts a long-lived child, then exits immediately.
+  const installer = spawn(
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+    ['/c', `start /min cmd /c ping -n 25 127.0.0.1 > nul`],
+    { cwd: sandbox, detached: true, stdio: 'ignore', windowsHide: true }
+  );
+  installer.unref();
+  const installerPid = installer.pid;
+  await wait(3000);
+  try {
+    const listProcesses = async () => launch.parseProcessTable(powershell(launch.buildProcessTableArgs()));
+    const table = await listProcesses();
+    const installerAlive = table.some((r) => r.pid === installerPid);
+    // The child must be found through the exited parent's PID lineage alone.
+    const found = launch.findAppProcessIds(table, sandbox, [installerPid]);
+    if (found.length === 0) throw new Error(`no child tracked after installer PID ${installerPid} exited (alive: ${installerAlive})`);
+    const remaining = await launch.stopAppProcesses({
+      directory: sandbox, seedPids: [installerPid], listProcesses,
+      terminate: async (pid, { force }) => { run('taskkill.exe', force ? launch.buildTaskkillArgs(pid) : launch.buildGracefulTaskkillArgs(pid)); },
+      wait, attempts: 3, forceAfterGracefulMs: 1500, verifyAfterMs: 500,
+    });
+    if (remaining.length > 0) throw new Error(`lineage PIDs ${remaining.join(', ')} could not be stopped`);
+    return `installer PID ${installerPid} exited=${!installerAlive}; tracked and stopped child PID(s) ${found.join(', ')}`;
+  } finally {
+    try { run('taskkill.exe', ['/PID', String(installerPid), '/T', '/F']); } catch (e) {}
+    removeQuietly(sandbox);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Hyper-V readiness report (informational: CI runners lack nested virt).
+// ---------------------------------------------------------------------------
+function checkHyperVReport() {
+  const work = makeSandbox('hyperv');
+  const script = path.join(work, 'prereq.ps1');
+  fs.writeFileSync(script, hyperv.buildHyperVPrereqScript(), 'utf8');
+  try {
+    const out = powershell(['-File', script]);
+    const detail = hyperv.parseHyperVPrereqOutput(out);
+    const missing = hyperv.hyperVMissingRequirements(detail);
+    removeQuietly(work);
+    if (missing.length === 0) return 'Hyper-V ready on this machine';
+    return `Hyper-V not ready here (expected on CI): ${missing.join(' | ').slice(0, 300)}`;
+  } catch (error) {
+    removeQuietly(work);
+    throw new Error(`Hyper-V check crashed: ${error.message}`);
+  }
+}
+
 async function main() {
   if (process.platform !== 'win32') {
     console.error('This verification must run on Windows (current platform: ' + process.platform + ').');
@@ -295,8 +412,12 @@ async function main() {
 
   check('generated launchers parse', () => checkGeneratedScriptsParse(''));
   check('AppContainer launch + token verification + profile delete', checkAppContainerLaunch);
+  check('AppContainer boundary (token + sandbox grant, no outside grant)', checkAppContainerBoundary);
+  check('fail-closed launch and engine selection', checkFailClosed);
   await checkAsync('process scoping stops the app and spares bystanders', checkProcessScoping);
+  await checkAsync('installer lineage stays tracked after the installer exits', checkInstallerLineage);
   await checkAsync('sandbox deletion (attributes, ACL, long path, lock)', checkDeletionCases);
+  check('Hyper-V readiness report', checkHyperVReport);
 
   console.log(results.join('\n'));
   console.log(failed === 0 ? '\nALL WINDOWS CHECKS PASSED' : `\n${failed} WINDOWS CHECK(S) FAILED`);

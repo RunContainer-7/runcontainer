@@ -50,10 +50,10 @@ export default function ContainerManager() {
   function isolationLabel(app) {
     if (app.status !== 'Running') return null;
     if (app.isolated) {
-      const engine = app.activeEngine === 'sandboxie' ? 'Sandboxie-Plus box' : 'Windows AppContainer';
-      return `Isolated by ${engine}`;
+      if (app.activeEngine === 'hyperv') return `Isolated by Hyper-V VM${app.hypervVm ? ` (${app.hypervVm})` : ''}`;
+      return 'Isolated by Windows AppContainer (token verified)';
     }
-    return 'Running WITHOUT isolation (profile redirection only)';
+    return 'Not isolated — launch was refused (legacy unguarded record)';
   }
 
   const appContainers = useMemo(() => containers.filter((container) => container?.source), [containers]);
@@ -219,18 +219,20 @@ export default function ContainerManager() {
     });
   }
 
-  function handleSetIsolationEngine(container, engine) {
-    setIsolationEngine({ id: container.id, isolationEngine: engine }).then((result) => {
+  function handleSetIsolationEngine(container, engine, requiresVm) {
+    setIsolationEngine({ id: container.id, isolationEngine: engine, requiresVm }).then((result) => {
       if (result?.status === 'Failed') {
         setInstallMessage(`Could not change the engine for ${container.name}: ${result.error}`);
         return;
       }
-      setSelectedApp((current) => current?.id === container.id ? { ...current, isolationEngine: result.isolationEngine } : current);
+      setSelectedApp((current) => current?.id === container.id ? { ...current, isolationEngine: result.isolationEngine, preferVm: result.preferVm } : current);
       updateContainerStatus(container.id, container.status);
       refreshContainers();
-      setInstallMessage(result.isolationEngine === 'profile'
-        ? `${container.name} will now start without isolation when it is launched again.`
-        : `${container.name} will use the strongest available isolation engine when it is launched again.`);
+      setInstallMessage(engine === 'hyperv'
+        ? `${container.name} will run inside a Hyper-V VM (needs Pro/Enterprise/Education + virtualization + a Windows base image).`
+        : engine === 'appcontainer'
+          ? `${container.name} will run inside a Windows AppContainer (compatible apps only; admin installers need a VM).`
+          : `${container.name} will use AppContainer by default, or a Hyper-V VM if marked as needing one.`);
     });
   }
 
@@ -312,7 +314,7 @@ export default function ContainerManager() {
               <h3>Installing into RunContainer</h3>
               <button className="icon-button" onClick={() => setShowInstallWizard(false)}>×</button>
             </div>
-            <p className="wizard-copy">RunContainer is preparing a managed app folder. The executable is copied into it, and Run starts it inside a Windows AppContainer (or in a Sandboxie-Plus box when that is installed) so the process cannot reach the rest of your profile.</p>
+            <p className="wizard-copy">RunContainer prepares a managed environment folder. The installer runs inside that environment (AppContainer for compatible apps, Hyper-V VM for arbitrary software) and the app always runs inside it — never directly on the host without a boundary. If isolation cannot be established, Run refuses to launch.</p>
             <div className="wizard-steps">
               <div className="wizard-step active">1. Validate app</div>
               <div className="wizard-step active">2. Create sandbox</div>
@@ -345,7 +347,7 @@ export default function ContainerManager() {
                 {activeSession.status === 'Running' && (
                   <div className="muted">
                     {activeSession.isolated
-                      ? `Isolation: ${activeSession.activeEngine === 'sandboxie' ? 'Sandboxie-Plus box' : 'Windows AppContainer (token verified)'}.`
+                      ? `Isolation: ${activeSession.activeEngine === 'hyperv' ? `Hyper-V VM ${activeSession.hypervVm || ''} (guest boundary)` : 'Windows AppContainer (token verified)'}.`
                       : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
                   </div>
                 )}
@@ -389,7 +391,7 @@ export default function ContainerManager() {
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
-                        {container.isolationEngine === 'profile' ? ' • Unguarded mode selected' : ''}
+                        {container.preferVm || container.requiresVm || container.isolationEngine === 'hyperv' ? ' • Hyper-V VM' : container.isolationEngine === 'appcontainer' || !container.isolationEngine || container.isolationEngine === 'auto' ? ' • AppContainer' : ''}
                       </div>
                     </div>
                   </div>
@@ -437,12 +439,12 @@ export default function ContainerManager() {
           <p>How RunContainer isolates each app.</p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>Isolation engine</strong>
-              <span>Run launches each app inside a Windows AppContainer, which is built into Windows 10 and 11 and needs no third-party software. RunContainer verifies the launched process carries the container token before it reports the app as isolated. If Sandboxie-Plus is installed, that box is used instead because it also isolates the registry and redirects writes.</span>
+              <strong>Isolation engines (both free, no Sandboxie)</strong>
+              <span>AppContainer (built into Windows 10/11, all editions): verified container token; compatible apps only — no admin rights, drivers, services, or writes outside container locations. Hyper-V VM (Windows 10/11 Pro/Enterprise/Education + virtualization in firmware + a Windows base VHDX): full guest OS per environment for arbitrary installers and desktop software. If neither boundary can be established, Run refuses to launch — it never runs the app unguarded.</span>
             </div>
             <div className="profile-card">
-              <strong>Unguarded profile mode</strong>
-              <span>An app that cannot run inside a container (installers and apps that need administrator rights usually cannot) can be switched to unguarded profile mode in Manage. That mode only redirects APPDATA, LOCALAPPDATA, TEMP and TMP; it is not a Windows security boundary, and RunContainer labels it as not isolated.</span>
+              <strong>No unguarded mode</strong>
+              <span>Profile-only redirection (APPDATA/TEMP) is not a security boundary, so RunContainer no longer offers it as a launch path. Software that cannot run in an AppContainer must use a Hyper-V VM; if the VM is not available, the launch is refused with the exact missing requirement.</span>
             </div>
             <div className="profile-card">
               <strong>Windows inside RunContainer</strong>
@@ -463,15 +465,15 @@ export default function ContainerManager() {
       {activeTab === "Info" && (
         <div className="placeholder-panel info-panel">
           <h3>What RunContainer is</h3>
-          <p>RunContainer is a Windows app launcher that gives each installed EXE its own managed app folder and redirected user-data profile.</p>
+          <p>RunContainer is a VM-style manager for Windows apps: each app gets its own managed environment, its installer runs inside that environment, and the app always runs inside it. Lightweight environments use a verified AppContainer; full environments use a Hyper-V VM.</p>
           <div className="profile-list">
             <div className="profile-card active">
               <strong>How it works</strong>
-              <span>Each app is copied into its own folder and launched with an isolation engine: a Windows AppContainer by default, or a Sandboxie-Plus box when one is installed. The app runs as a separate Windows application — RunContainer never embeds another program’s window — and the container is what keeps it away from the rest of your profile.</span>
+              <span>Each app is copied into its own environment folder. Its installer runs inside that environment and the app always runs inside it: AppContainer (verified token) for compatible apps, Hyper-V guest VM for arbitrary software. Window hosting only re-parents the app window for display (experimental, unverified) and is never the isolation.</span>
             </div>
             <div className="profile-card">
               <strong>What isolation you actually get</strong>
-              <span>With an AppContainer or Sandboxie box, the process runs with a restricted token and cannot reach the rest of your files, registry or processes. Runs that fall back to unguarded profile mode are reported as not isolated, in the app list and in the app’s log.</span>
+              <span>AppContainer: restricted container token (verified before reporting). Hyper-V: separate guest OS per environment. AppContainer cannot run admin installers, drivers, or services — that range needs a VM. Failed isolation refuses the launch; nothing ever runs silently unguarded.</span>
             </div>
             <div className="profile-card">
               <strong>Use cases</strong>
@@ -523,16 +525,16 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div>
-                <h4>Isolation</h4>
+                <h4>Isolation (fail-closed: no unguarded launches)</h4>
                 <p className="muted">
-                  {selectedApp.isolationEngine === 'profile'
-                    ? 'Unguarded profile mode: this app starts without an isolation engine, so it can reach the rest of Windows.'
-                    : 'Engine: strongest available — Sandboxie-Plus box when installed, otherwise a Windows AppContainer.'}
+                  {selectedApp.activeEngine === 'hyperv' || selectedApp.preferVm || selectedApp.requiresVm
+                    ? 'Full VM isolation: the installer and the app run inside a Hyper-V guest VM. Needs Windows 10/11 Pro/Enterprise/Education, virtualization enabled in firmware, and a Windows base image (RUNCONTAINER_HYPERV_BASE_IMAGE).'
+                    : 'Lightweight isolation: Windows AppContainer with a verified container token. Compatible apps only — installers needing administrator rights, drivers, or services cannot run here and must use a Hyper-V VM.'}
                 </p>
                 <div className="detail-actions">
-                  {selectedApp.isolationEngine === 'profile'
-                    ? <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'auto')}>Use the isolation engine</button>
-                    : <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'profile')}>Run unguarded instead</button>}
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'auto')}>Auto</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM</button>
                 </div>
               </div>
               <div>

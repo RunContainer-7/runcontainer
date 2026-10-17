@@ -63,61 +63,85 @@ runcontainer
 5. Click "Run" to start the application inside a container.
 6. To return to the Container Manager, simply terminate the running application.
 
-## How isolation actually works
+## Architecture decision (audited, not assumed)
 
-RunContainer gives every installed app its own folder, and `Run` starts the app inside an
-isolation engine:
+RunContainer must isolate arbitrary Windows installers and desktop apps with VM-like
+management (install into an environment, run/stop inside it, delete the environment),
+with no Sandboxie dependency and no silent unguarded fallback. The committed code was
+audited against three options:
 
-- **Windows AppContainer (default, no extra software).** The app is created with an
-  AppContainer token through `CreateProcessW` and `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`.
-  RunContainer then reads the new process token back and only reports the app as isolated when
-  that token really carries the container SID. The container gets write access to the app's own
-  folder and the `internetClient` capability; it cannot reach the rest of your profile, registry
-  or processes.
-- **Sandboxie-Plus box (used automatically when the tools are on PATH or in `SANDBOXIE_HOME`).**
-  Sandboxie adds registry isolation and write redirection on top of the filesystem isolation.
-- **Unguarded profile mode (opt-in per app, in Manage).** Only `APPDATA`, `LOCALAPPDATA`, `TEMP`
-  and `TMP` are redirected into the app folder. This is **not** a security boundary, and the UI
-  and app log label every launch in this mode as not isolated.
+- **A. Windows AppContainer (kept, lightweight tier).** Genuine OS boundary: the child
+  gets a container token via `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`,
+  and RunContainer reports `isolated` only when the new process token carries
+  `TokenIsAppContainer` (29) **and** the `TokenAppContainerSid` (31) equals the profile
+  SID. Free and built into Windows 10/11 (all editions). Limitation, stated openly:
+  it was designed for packaged apps. Arbitrary installers routinely fail inside it —
+  no administrator rights, no drivers/services, no writes outside container locations,
+  low integrity breaks many Win32 apps. It cannot cover the full "arbitrary software"
+  range, so it is offered only for compatible apps, fail-closed.
+- **B. Hyper-V virtual machine (new, full tier).** The only built-in Windows technology
+  that isolates arbitrary installers/desktop software with a VM boundary: separate
+  guest OS per environment (differencing VHDX off a base image), installer executes in
+  the guest via `Copy-VMFile` + PowerShell Direct `Invoke-Command`, app launches in
+  the guest, host only manages the VM. Requirements (not hidden): Windows 10/11
+  **Pro/Enterprise/Education** (Home has no Hyper-V), virtualization enabled in
+  firmware (Intel VT-x / AMD-V, SLAT), Hyper-V feature + `vmms` running, a sysprepped
+  Windows base VHDX (Generation 2, set `RUNCONTAINER_HYPERV_BASE_IMAGE`), admin rights
+  for VM/switch setup, and disk/RAM per environment (tens of GB + GBs of RAM).
+  If Hyper-V is not ready, Run refuses to launch and names the exact missing piece.
+- **C. Other built-in options (rejected as the boundary).** Windows Sandbox is an
+  ephemeral lightweight VM (no persistent per-app environments, Pro+ only). Windows
+  containers are server-side with no GUI desktop apps. Restricted-token/job-object
+  sandboxes (Chrome-style) are real mitigations but share AppContainer's compatibility
+  ceiling and are not a VM. A normal child process with redirected env vars is **not**
+  isolation and is no longer a launch path. None of these is interchangeable with a
+  full VM, and RunContainer does not pretend otherwise.
 
-The app always runs as its own Windows application; RunContainer does not embed or redirect
-another program's window, and window placement is unrelated to process isolation.
+Conclusion: AppContainer stays for compatible apps; arbitrary software needs the
+Hyper-V tier. Both are free and need no third-party paid feature. Sandboxie is not
+used as a backend (legacy boxes are only best-effort cleaned on Delete); unguarded
+execution was removed entirely.
 
-### Windows inside RunContainer, and what LiveContainer does differently
+## How isolation actually works now
 
-RunContainer also tries to host the app's window inside its own window, so the app appears to run
-"inside" RunContainer. That is **presentation only** and adds no isolation; Windows frequently
-refuses to re-parent a window that belongs to a lower-integrity process, in which case the app
-opens in its own window and the log says so. Turn it off per app in Manage.
+- **AppContainer (compatible apps).** Profile per app (`RunContainer.App.<id>`), folder
+  ACL grants (modify on the environment, read/execute on ancestors inside
+  RunContainer's own root only), `internetClient` capability, verified token before
+  reporting. Failure refuses the launch with the Windows error; admin-requiring apps
+  are directed to Hyper-V instead of any unguarded mode.
+- **Hyper-V VM (arbitrary software).** Per-environment VM (`RunContainer-<appId>`,
+  differencing VHDX under the environment's `hyperv/` folder). Install: the installer
+  is staged into the environment, copied into the guest, and executed in the guest.
+  Run: the app is launched in the guest via PowerShell Direct and the guest process is
+  confirmed. Stop ends the VM (disk kept); Delete stops the VM, removes the VM +
+  VHDX, then removes host files and the AppContainer profile. No host fallback.
+- **Installers run inside the environment.** `install-in-environment` stages the
+  installer into the environment and runs it under the same boundary as the app.
+  Installer-spawned children are persisted (`knownPids` + parent-PID lineage), so a
+  child that outlives its installer stays tracked for Stop/Delete.
+- **Fail-closed everywhere.** Bad paths, missing Hyper-V, token mismatch, and legacy
+  `profile`/`sandboxie` selections all refuse with an actionable error. Nothing is
+  ever launched without a boundary.
 
-iOS apps like LiveContainer can run a guest app inside the host process because they load the
-guest's Mach-O binary as a library. Windows has no supported in-process loader for an arbitrary
-PE executable (only DLLs can be loaded that way), so on Windows "inside RunContainer" is always
-this combination: a real isolated process (AppContainer or Sandboxie) plus optional window
-hosting. RunContainer does not pretend otherwise.
+Window hosting (re-parenting the app window into RunContainer) is **presentation
+only, experimental, and unverified on Windows**: it adds no isolation, Windows often
+refuses it across integrity levels, and it must never be mistaken for the boundary.
+Do not claim it works until `scripts/windows-verify.js` + manual testing prove it.
 
-### Deleting an app
+### Deleting an environment
 
-`Delete` stops only processes RunContainer can tie to that app (an executable running from its
-folder, the recorded launch PIDs, and their descendants). Nothing else is ever terminated, and a
-bystander that merely mentions the folder on its command line is never touched. The app is asked
-to close first and only force-closed if it does not. RunContainer then resets the folder's ACLs
-(root first, because an explicit DENY also denies traversal, then ownership, inherited ACLs and a
-full-control grant), clears read-only attributes and removes the tree through the `\\?\` extended
-path so deep installer folders are reachable. If Windows still refuses, the error names any
-process whose executable or loaded modules come from that folder; for an unrelated holder it
-reports the OS error and asks you to retry. The deletion can be cancelled while it is waiting.
+`Delete` stops only that environment's processes (executables under its folder, the
+persisted launch/installer PIDs, and their descendants — bystanders that merely
+mention the path are never touched), asks to close before forcing, stops/removes the
+Hyper-V VM if present, repairs ACLs (root reset, ownership, inherited ACLs,
+full-control grant) and read-only flags, and removes the tree via the `\\?\`
+extended path. Locked files are reported with the holding process where identifiable;
+an unrelated lock reports the OS error. The record is removed only after the folder
+is confirmed gone; container-profile removal (`DeleteAppContainerProfile`) is
+best-effort after processes stop and its warning is surfaced, never silent.
 
-If the app ran inside an AppContainer, Delete also removes its container profile with
-`DeleteAppContainerProfile` once the processes are confirmed stopped, so the container's
-storage under `%LOCALAPPDATA%\Packages\<container name>` goes with it. Windows returns
-success for a profile that does not exist, but an open handle inside the container can leave
-storage behind; Windows documents that the call should then be retried, so RunContainer logs
-the failure and keeps the app listed until Delete succeeds.
-
-Installers and apps that require administrator rights generally cannot run inside a container.
-Switch those apps to unguarded profile mode in Manage, and remember that mode does not isolate
-them.
+Admin-requiring software cannot run in an AppContainer — use the Hyper-V tier. There
+is no unguarded mode anymore.
 
 ## Versioning
 
@@ -135,12 +159,7 @@ Nothing in the isolation or deletion paths can be verified on Linux. On a Window
 node scripts/windows-verify.js
 ```
 
-It needs no administrator rights and only touches its own temp folder. It checks that the
-generated launchers parse, that an app really is created inside an AppContainer with a verified
-container token, that the profile is removed, that only the app's own processes are stopped while
-a bystander survives, and that sandbox deletion really removes read-only files, a DENY-ACL tree, a
-path longer than `MAX_PATH`, and a tree with an exclusively locked file (which must fail loudly,
-then succeed once released).
+It needs no administrator rights and only touches its own temp folder. It checks: launchers parse; AppContainer launch + verified token + profile delete; boundary evidence (sandbox grants the SID, outside files do not); fail-closed bad launch + refused profile/sandboxie selection; scoping (app stopped, bystander spared); installer lineage tracked after the installer exits; deletion (read-only, DENY-ACL, long path, locked-then-released); and a Hyper-V readiness report (informational on CI, which lacks nested virtualization).
 
 The same checks run in CI on a real Windows runner via
 `.github/workflows/windows-verify.yml` (unit tests, `scripts/windows-verify.js`, production

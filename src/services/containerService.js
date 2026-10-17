@@ -77,6 +77,14 @@ export async function setIsolationEngine(container) {
   return requireIpc('Changing the isolation engine').invoke('set-isolation-engine', container);
 }
 
+export async function runInstallerInEnvironment(container, installerPath, options = {}) {
+  return requireIpc('Running installers').invoke('install-in-environment', container, installerPath, options);
+}
+
+export async function getHyperVStatus() {
+  return requireIpc('Checking Hyper-V').invoke('hyperv-status');
+}
+
 export async function setWindowHosting(container) {
   return requireIpc('Changing window hosting').invoke('set-window-hosting', container);
 }

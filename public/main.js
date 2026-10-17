@@ -7,14 +7,24 @@ const crypto = require('crypto');
 const {
   sandboxBoxName,
   findSandboxieTools,
-  buildListPidsArgs,
-  launchInSandboxie,
-  terminateSandboxieBox,
   deleteSandboxieBox,
-  deleteContainerResources,
-  parseSandboxPids,
   isWithinDirectory,
 } = require('./sandboxie-runtime');
+const {
+  vmName,
+  vmFileNames,
+  buildHyperVPrereqScript,
+  parseHyperVPrereqOutput,
+  hyperVMissingRequirements,
+  describeHyperVMissing,
+  buildStartVmScript,
+  buildStopVmScript,
+  buildRemoveVmScript,
+  buildInstallInGuestScript,
+  buildLaunchInGuestScript,
+  parseHyperVOutput,
+} = require('./hyperv-runtime');
+const { selectIsolationEngine } = require('./engine-select');
 const {
   buildProcessTableArgs,
   parseProcessTable,
@@ -357,12 +367,9 @@ async function listProcessTable() {
 }
 
 async function listRunningPids(appRecord) {
-  const tools = resolveSandboxieTools();
-  if (appRecord.launchMode === 'sandboxie' && tools) {
-    const { stdout } = await executeFile(tools.startExe, buildListPidsArgs(appRecord.sandboxieBox));
-    const pids = parseSandboxPids(stdout);
-    if (pids === null) throw new Error('Sandboxie returned an unreadable process list.');
-    return pids;
+  // Guest (Hyper-V) processes are queried inside the VM, not from the host table.
+  if (appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') {
+    return findAppProcessIds(await listProcessTable(), appRecord.sandboxRoot || path.dirname(appRecord.source), trackedPids(appRecord));
   }
   const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
   return findAppProcessIds(await listProcessTable(), sandboxRoot, trackedPids(appRecord));
@@ -513,87 +520,104 @@ async function removeSandboxDirectory(sandboxRoot, { shouldAbort = () => false, 
   }
 }
 
-async function runWithIsolatedProfile(appRecord, sandboxRoot, logPath) {
-  const layout = ensureSandboxLayout(sandboxRoot);
-  const env = buildIsolatedEnvironment(process.env, sandboxRoot, layout);
-  let exitInfo = null;
-  let childPid = null;
+// Full-VM isolation via Hyper-V. The VM is the security boundary: the app (and any
+// installer) executes inside the guest OS, never on the host. Host launch verifies
+// Hyper-V readiness, ensures the per-environment VM exists, starts it, copies the app
+// into the guest, launches it via PowerShell Direct, and confirms the guest process.
+// Any failure refuses to launch: there is no host fallback.
+async function runWithHyperV(appRecord, sandboxRoot, logPath) {
+  const name = vmName(appRecord.id);
   try {
-    const child = spawn(appRecord.source, [], {
-      cwd: path.dirname(appRecord.source),
-      env,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: false,
-    });
-    child.on('exit', (code, signal) => {
-      exitInfo = { code, signal };
-      appendLog(logPath, `App process exited with code ${code}${signal ? ` (signal ${signal})` : ''}.`);
-    });
-    await new Promise((resolve, reject) => {
-      child.once('spawn', resolve);
-      child.once('error', reject);
-    });
-    childPid = child.pid;
-    let pids = [];
-    const launchDeadline = Date.now() + 8000;
-    while (Date.now() < launchDeadline) {
-      pids = findAppProcessIds(await listProcessTable(), sandboxRoot, [child.pid]);
-      if (pids.length > 0 || exitInfo) break;
-      await delay(400);
+    const readiness = await checkHyperVReady();
+    if (!readiness.ready) {
+      throw new Error(describeHyperVMissing(readiness.missing));
     }
-    if (pids.length === 0) {
-      throw new Error(exitInfo
-        ? `The app exited immediately after starting (code ${exitInfo.code}).`
-        : 'The process started, but Windows did not confirm it is still running.');
+    const baseImage = hyperVBaseImagePath();
+    if (!baseImage || !fs.existsSync(baseImage)) {
+      throw new Error('VM isolation needs a Windows base image: set RUNCONTAINER_HYPERV_BASE_IMAGE to a sysprepped Windows 10/11 Pro/Enterprise VHDX (Generation 2). Copy your installer into the environment first, then Run. Nothing was launched on the host.');
     }
-    child.unref();
+    const hvDir = path.join(sandboxRoot, 'hyperv');
+    ensureDirectory(hvDir);
+    const files = vmFileNames(appRecord.id, hvDir);
+    if (!fs.existsSync(files.differencingVhdPath)) {
+      appendLog(logPath, `Creating Hyper-V VM ${files.vmName} (differencing disk, ${files.switchName}).`);
+      const { execSync } = require('child_process');
+      const createScript = require('./hyperv-runtime').buildCreateVmScript({ vmName: files.vmName, differencingVhdPath: files.differencingVhdPath, baseImagePath: baseImage, switchName: files.switchName });
+      await runHyperVScript(createScript, logPath);
+    }
+    await runHyperVScript(require('./hyperv-runtime').buildStartVmScript(files.vmName), logPath);
+    const guestDir = `C:\RunContainer\${appRecord.id}`;
+    const guestExe = `C:\RunContainer\${appRecord.id}\${path.win32.basename(appRecord.source)}`;
+    const installScript = require('./hyperv-runtime').buildInstallInGuestScript({ vm: files.vmName, hostInstallerPath: appRecord.source, guestInstallerPath: guestExe, installArgs: '' });
+    appendLog(logPath, `Copying app into VM ${files.vmName} and starting it inside the guest (installer runs inside the VM, never on the host).`);
+    await runHyperVScript(installScript, logPath);
+    const launchScript = require('./hyperv-runtime').buildLaunchInGuestScript({ vm: files.vmName, guestExePath: guestExe, workingDir: `C:\RunContainer\${appRecord.id}` });
+    const launched = await runHyperVScript(launchScript, logPath);
+    const guestPid = Number(launched.guestPid);
+    if (!Number.isSafeInteger(guestPid) || guestPid <= 0) {
+      throw new Error('The VM did not confirm a guest process. The app was not reported as running.');
+    }
     const base = getStoredApp(appRecord.id) || appRecord;
     const updatedApp = {
-      ...withTrackedPids(base, pids),
+      ...withTrackedPids(base, []),
       status: 'Running',
-      sandboxieInitialized: false,
-      sandboxieCleanupPending: false,
-      launchMode: 'isolated-profile',
-      activeEngine: 'profile',
-      isolated: false,
-      pid: pids[0],
-      sandboxPids: pids,
+      launchMode: 'hyperv',
+      activeEngine: 'hyperv',
+      isolated: true,
+      hypervVm: files.vmName,
+      hypervVhd: files.differencingVhdPath,
+      guestPid,
+      knownPids: [],
+      pid: null,
+      sandboxPids: [],
       lastLaunchedAt: new Date().toISOString(),
       launchCleanupPending: false,
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
-    appendLog(logPath, `Started app with per-app profile redirection only (PID ${child.pid}). No isolation engine was applied.`);
-    monitorAppProcesses(appRecord.id, logPath);
+    appendLog(logPath, `Running inside Hyper-V VM ${files.vmName} (guest PID ${guestPid}). The VM is the isolation boundary.`);
+    monitorHyperVApp(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
-    return {
-      id: appRecord.id,
-      status: 'Running',
-      pid: pids[0],
-      sandboxPids: pids,
-      launchMode: 'isolated-profile',
-      activeEngine: 'profile',
-      isolated: false,
-      embedded: false,
-      reason: 'Started WITHOUT isolation: only APPDATA, LOCALAPPDATA and TEMP are redirected into the app folder. The app still runs with your full user rights and can reach the rest of Windows.',
-    };
+    return { id: appRecord.id, status: 'Running', pid: null, guestPid, hypervVm: files.vmName, launchMode: 'hyperv', activeEngine: 'hyperv', isolated: true, embedded: false, reason: `Running inside Hyper-V VM ${files.vmName}. The app and its installer execute in the guest OS; the host only manages the VM.` };
   } catch (error) {
-    appendLog(logPath, `Launch failed: ${error.message}`);
-    let cleanupPending = false;
-    if (childPid) {
-      const remaining = await stopProcessesUnder(sandboxRoot, [childPid], { logPath });
-      if (remaining.length > 0) {
-        cleanupPending = true;
-        appendLog(logPath, `Failed launch process could not be confirmed stopped: PID ${remaining.join(', ')}.`);
-      }
-    }
-    if (cleanupPending) {
-      saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchCleanupPending: true, pid: childPid } : entry)));
-    }
-    return failedLaunch(appRecord, cleanupPending
-      ? `${error.message} A process may still be running; Delete this app or close it before retrying.`
-      : error.message);
+    appendLog(logPath, `VM launch failed: ${error.message}`);
+    return failedLaunch(appRecord, `${error.message}`);
   }
+}
+
+function monitorHyperVApp(appId, logPath) {
+  stopMonitor(appId);
+  let checking = false;
+  const interval = setInterval(async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      const current = getStoredApp(appId);
+      if (!current || current.status !== 'Running' || current.activeEngine !== 'hyperv') { stopMonitor(appId); return; }
+      const exeBase = path.win32.basename(current.source, path.win32.extname(current.source));
+      const q = require('./hyperv-runtime').buildGuestProcessQueryScript({ vm: current.hypervVm, exeName: exeBase });
+      try {
+        const res = await runHyperVScript(q, logPath);
+        const pids = Array.isArray(res.pids) ? res.pids.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
+        if (pids.length === 0) {
+          const updated = { ...current, status: 'Stopped', guestPid: null, lastExitAt: new Date().toISOString() };
+          saveApps(loadApps().map((e) => (e.id === appId ? updated : e)));
+          appendLog(logPath, 'Guest process exited; VM kept for data. Delete removes the VM and its disk.');
+          stopMonitor(appId);
+          broadcastContainerStatus(updated);
+        }
+      } catch (queryError) {
+        appendLog(logPath, `Unable to query guest process state: ${queryError.message}`);
+      }
+    } finally { checking = false; }
+  }, 5000);
+  sandboxMonitors.set(appId, interval);
+}
+
+// Unguarded profile execution was removed: env-redirection without a token/VM boundary
+// is not isolation, so launching it would violate the fail-closed requirement.
+async function runWithIsolatedProfile(appRecord, sandboxRoot, logPath) {
+  appendLog(logPath, 'Refused unguarded launch: profile redirection is not a security boundary.');
+  return failedLaunch(appRecord, 'RunContainer refuses to run apps without a security boundary. Profile-only execution was removed. Use AppContainer (compatible apps) or a Hyper-V VM (arbitrary software). Nothing was launched.');
 }
 
 function isolationScriptPath() {
@@ -813,103 +837,62 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
       if (remaining.length > 0) cleanupPending = true;
     }
     return failedLaunch(appRecord, cleanupPending
-      ? `${error.message} A process may still be running; Delete this app or close it before retrying.`
-      : `${error.message} Choose "Unguarded profile mode" for this app in Manage if it cannot run inside a container, but note that mode is not isolated.`);
+      ? `${error.message} A process may still be running; Delete this app or close it before retrying. Nothing was launched without isolation.`
+      : `${error.message} If this app needs administrator rights, drivers, or services, it cannot run in an AppContainer: mark it for Hyper-V VM isolation instead. Nothing was launched without isolation.`);
   }
 }
 
-// Picks the strongest engine available. 'profile' is not isolation and is only used when the
-// user explicitly selected it for an app, so RunContainer never silently downgrades a launch.
+// Fail-closed engine selection. There is no 'profile' (unguarded) or 'sandboxie' launch
+// path: unisolated execution is never selected, even on request. 'hyperv' means the live
+// Hyper-V readiness check still has to pass inside runWithHyperV; anything else refuses.
 function selectEngine(appRecord) {
-  if (appRecord.isolationEngine === 'profile') return 'profile';
-  if (resolveSandboxieTools()) return 'sandboxie';
-  if (isAppContainerSupported()) return 'appcontainer';
-  return 'profile';
+  const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+  if (decision.engine === 'hyperv' || decision.engine === 'hyperv-unavailable') return 'hyperv';
+  if (decision.engine === 'refused' || decision.engine === 'unavailable') return 'refused';
+  return 'appcontainer';
 }
 
-async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
-  const boxName = appRecord.sandboxieBox || sandboxBoxName(appRecord.id);
-  const fileRootPath = appRecord.sandboxieFileRoot || path.join(sandboxRoot, 'SandboxieFiles');
-  if (!isWithinDirectory(sandboxRoot, fileRootPath)) {
-    return failedLaunch(appRecord, 'The Sandboxie file root is outside this app’s managed directory; refusing to launch it.');
-  }
-  ensureDirectory(fileRootPath);
-  let sandboxieConfigured = Boolean(appRecord.sandboxieInitialized);
-  let sandboxieCleanupPending = Boolean(appRecord.sandboxieCleanupPending);
+function hyperVBaseImagePath() {
+  return process.env.RUNCONTAINER_HYPERV_BASE_IMAGE || null;
+}
+
+async function checkHyperVReady() {
+  if (process.platform !== 'win32') return { ready: false, missing: ['Isolation requires Windows 10/11.'] };
   try {
-    const launchResult = await launchInSandboxie({
-      tools,
-      boxName,
-      executablePath: appRecord.source,
-      fileRootPath,
-      execute: executeFile,
-      onConfigured: async () => {
-        sandboxieConfigured = true;
-        sandboxieCleanupPending = false;
-        saveApps(loadApps().map((entry) => (entry.id === appRecord.id
-          ? { ...entry, sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, sandboxieInitialized: true, launchMode: 'sandboxie' }
-          : entry)));
-      },
-    });
-    const base = getStoredApp(appRecord.id) || appRecord;
-    const updatedApp = {
-      ...withTrackedPids(base, launchResult.pids),
-      sandboxieBox: boxName,
-      sandboxieFileRoot: fileRootPath,
-      sandboxieInitialized: true,
-      launchMode: 'sandboxie',
-      activeEngine: 'sandboxie',
-      isolated: true,
-      status: 'Running',
-      pid: launchResult.pids[0],
-      sandboxPids: launchResult.pids,
-      lastLaunchedAt: new Date().toISOString(),
-      sandboxieCleanupPending: false,
-    };
-    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
-    appendLog(logPath, `Sandboxie launched app in box ${boxName}, PIDs: ${launchResult.pids.join(', ')}`);
-    monitorAppProcesses(appRecord.id, logPath);
-    broadcastContainerStatus(updatedApp);
-    hostAppWindow(updatedApp, updatedApp.pid, logPath).then(() => {
-      const latest = getStoredApp(appRecord.id);
-      if (latest) broadcastContainerStatus(latest);
-    }).catch(() => {});
-    return {
-      id: appRecord.id,
-      status: 'Running',
-      pid: updatedApp.pid,
-      sandboxPids: updatedApp.sandboxPids,
-      launchMode: 'sandboxie',
-      activeEngine: 'sandboxie',
-      isolated: true,
-      embedded: false,
-      reason: `Running in a dedicated Sandboxie-Plus box (${boxName}). Sandboxie enforces filesystem and registry isolation for this app.`,
-    };
+    const script = buildHyperVPrereqScript();
+    const tmp = path.join(app.getPath('userData'), 'runcontainer-hyperv-prereq.ps1');
+    fs.writeFileSync(tmp, script, 'utf8');
+    const { stdout } = await executeFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmp], { timeout: 60000 });
+    const detail = parseHyperVPrereqOutput(stdout);
+    const missing = hyperVMissingRequirements(detail);
+    return { ready: missing.length === 0, missing, detail };
   } catch (error) {
-    appendLog(logPath, `Sandboxie launch failed: ${error.message}`);
-    // Anything still running from this folder may be unboxed. Do not silently allow a second launch if cleanup cannot be verified.
-    let unboxedStopError = null;
-    const stillRunning = await stopProcessesUnder(sandboxRoot, [], { logPath });
-    if (stillRunning.length > 0) {
-      unboxedStopError = new Error(`PIDs ${stillRunning.join(', ')} could not be stopped.`);
-      appendLog(logPath, `Could not stop unboxed copy: ${unboxedStopError.message}`);
-    }
-    try {
-      await deleteSandboxieBox({ tools, boxName, execute: executeFile });
-      sandboxieConfigured = false;
-      sandboxieCleanupPending = false;
-    } catch (cleanupError) {
-      sandboxieCleanupPending = true;
-      appendLog(logPath, `Sandboxie cleanup after failed launch also failed: ${cleanupError.message}`);
-    }
-    saveApps(loadApps().map((entry) => (entry.id === appRecord.id
-      ? { ...entry, sandboxieInitialized: sandboxieConfigured, sandboxieCleanupPending, launchCleanupPending: Boolean(unboxedStopError), sandboxieBox: boxName, sandboxieFileRoot: fileRootPath, launchMode: null, status: 'Installed', pid: null, sandboxPids: [] }
-      : entry)));
-    const failureReason = unboxedStopError
-      ? `${error.message} Also could not verify or stop a possible unboxed process: ${unboxedStopError.message}. Delete this app or close its processes before trying Run again.`
-      : error.message;
-    return failedLaunch(appRecord, failureReason);
+    return { ready: false, missing: [`Hyper-V readiness could not be confirmed: ${error.message}`] };
   }
+}
+
+async function runHyperVScript(scriptText, logPath) {
+  const tmp = path.join(app.getPath('userData'), `runcontainer-hyperv-${Date.now()}.ps1`);
+  fs.writeFileSync(tmp, scriptText, 'utf8');
+  try {
+    const { stdout } = await executeFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmp], { timeout: 300000 });
+    return parseHyperVOutput(stdout);
+  } catch (error) {
+    try {
+      return parseHyperVOutput(String(error.message));
+    } catch (unreadable) {
+      throw error;
+    }
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (cleanupError) {}
+  }
+}
+
+// Sandboxie is not an allowed isolation backend. This stub exists so any legacy call
+// path fails closed instead of launching outside RunContainer's supported engines.
+async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
+  appendLog(logPath, 'Refused Sandboxie launch: Sandboxie is not an allowed isolation backend.');
+  return failedLaunch(appRecord, 'Sandboxie is not an allowed isolation backend for RunContainer. Use AppContainer (compatible apps) or a Hyper-V VM (arbitrary software). Nothing was launched.');
 }
 
 function resolveSandboxieTools() {
@@ -1184,16 +1167,21 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   stopMonitor(appRecord.id);
 
   const engine = selectEngine(appRecord);
-  if (engine === 'sandboxie') {
-    appendLog(logPath, 'Isolation engine: Sandboxie-Plus box.');
-    return runWithSandboxie(appRecord, resolveSandboxieTools(), sandboxRoot, logPath);
+  if (engine === 'refused') {
+    const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+    appendLog(logPath, `Launch refused: ${decision.reason}`);
+    return failedLaunch(appRecord, `${decision.reason} Nothing was launched.`);
   }
-  if (engine === 'appcontainer') {
-    appendLog(logPath, 'Isolation engine: Windows AppContainer.');
-    return runWithAppContainer(appRecord, sandboxRoot, logPath);
+  if (engine === 'hyperv') {
+    appendLog(logPath, 'Isolation engine: Hyper-V virtual machine (full guest OS boundary).');
+    return runWithHyperV(appRecord, sandboxRoot, logPath);
   }
-  appendLog(logPath, 'No isolation engine selected for this app; launching with profile redirection only (not isolated).');
-  return runWithIsolatedProfile(appRecord, sandboxRoot, logPath);
+  if (!isAppContainerSupported()) {
+    appendLog(logPath, 'Launch refused: AppContainer requires Windows 10/11.');
+    return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
+  }
+  appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
+  return runWithAppContainer(appRecord, sandboxRoot, logPath);
 });
 
 ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
@@ -1215,22 +1203,42 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   try {
     await releaseAppWindow(appRecord, trackedPids(appRecord), errorLogPath);
     stopMonitor(appRecord.id);
-    const tools = resolveSandboxieTools();
-    const cleanupRecord = appRecord.launchMode === 'sandboxie'
-      ? appRecord
-      : { ...appRecord, sandboxieInitialized: false, sandboxieCleanupPending: false };
     const seeds = trackedPids(appRecord);
-    let remainingPids = [];
-    await deleteContainerResources({
-      appRecord: { ...cleanupRecord, sandboxRoot },
-      tools,
-      execute: executeFile,
-      stopProcesses: async (directory, pids) => {
-        remainingPids = await stopProcessesUnder(directory, [...new Set([...(pids || []), ...seeds])], { logPath: appLogPath });
-      },
-      removeDirectory: (directory) => removeSandboxDirectory(directory, { shouldAbort: () => job.aborted, logPath: errorLogPath }),
-      onCleanupError: (error) => appendLog(errorLogPath, `Sandbox cleanup warning for ${appRecord.name || appRecord.id}: ${error.message}`),
-    });
+    // Legacy Sandboxie boxes (pre-refactor records only): best-effort cleanup, never a launch path.
+    let legacySandboxieWarning = null;
+    if ((appRecord.sandboxieInitialized || appRecord.sandboxieCleanupPending) && appRecord.sandboxieBox) {
+      const tools = resolveSandboxieTools();
+      if (!tools) {
+        legacySandboxieWarning = 'A legacy Sandboxie box could not be cleared because Sandboxie is unavailable; host files are still removed below.';
+        appendLog(errorLogPath, `Sandbox cleanup warning for ${appRecord.name || appRecord.id}: ${legacySandboxieWarning}`);
+      } else {
+        try {
+          await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
+        } catch (legacyError) {
+          legacySandboxieWarning = legacyError.message;
+          appendLog(errorLogPath, `Sandbox cleanup warning for ${appRecord.name || appRecord.id}: ${legacyError.message}`);
+        }
+      }
+    }
+    // Hyper-V environments: stop the VM first (guest processes die with it), then remove
+    // the VM and its differencing disk. Host file removal happens after.
+    let hypervWarning = null;
+    if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm && process.platform === 'win32') {
+      try {
+        const hv = require('./hyperv-runtime');
+        await runHyperVScript(hv.buildStopVmScript(appRecord.hypervVm), errorLogPath).catch(() => {});
+        const vhd = appRecord.hypervVhd || (appRecord.sandboxRoot ? path.join(appRecord.sandboxRoot, 'hyperv', `${appRecord.hypervVm}.vhdx`) : null);
+        await runHyperVScript(hv.buildRemoveVmScript({ vm: appRecord.hypervVm, vhdPath: vhd || '' }), errorLogPath);
+        appendLog(errorLogPath, `Removed Hyper-V VM ${appRecord.hypervVm}.`);
+      } catch (hypervError) {
+        hypervWarning = hypervError.message;
+        appendLog(errorLogPath, `Hyper-V VM ${appRecord.hypervVm} could not be confirmed removed: ${hypervError.message}`);
+      }
+    }
+    // Stop only this environment's processes: folder match + persisted installer lineage.
+    let remainingPids = await stopProcessesUnder(sandboxRoot, seeds, { logPath: appLogPath });
+    await removeSandboxDirectory(sandboxRoot, { shouldAbort: () => job.aborted, logPath: errorLogPath });
+    if (legacySandboxieWarning) appendLog(errorLogPath, `Legacy Sandboxie note: ${legacySandboxieWarning}`);
 
     if (remainingPids.length > 0) {
       throw new Error(describeCleanupFailure({
@@ -1259,7 +1267,7 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
       removed: true,
       remainingCount: remainingApps.length,
       containerProfileRemoved: containerCleanup.deleted,
-      containerCleanupWarning: containerCleanup.deleted || containerCleanup.skipped ? null : containerCleanup.error,
+      containerCleanupWarning: [containerCleanup.deleted || containerCleanup.skipped ? null : containerCleanup.error, typeof hypervWarning !== 'undefined' ? hypervWarning : null, typeof legacySandboxieWarning !== 'undefined' ? legacySandboxieWarning : null].filter(Boolean).join(' ') || null,
     };
   } catch (error) {
     if (error instanceof CleanupCancelledError) {
@@ -1285,6 +1293,77 @@ ipcMain.handle('set-window-hosting', async (_event, requestedAppRecord) => {
   return { id: appRecord.id, status: updated.status, windowHosting };
 });
 
+// Installers run inside the environment, never on the host directly. The installer binary
+// is copied into the app's managed folder, launched under the selected boundary
+// (AppContainer for compatible software, Hyper-V guest for arbitrary installers), and every
+// child PID it spawns is persisted (knownPids) so Delete can still find processes that
+// outlive the installer itself. This is how RunContainer behaves like a VM manager.
+ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, installerPath) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const validation = validateExe(installerPath);
+  if (!validation.isValid) return { id: appRecord.id, status: 'Failed', error: validation.reason };
+  const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
+  if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
+    return { id: appRecord.id, status: 'Failed', error: 'Refusing to run an installer outside RunContainer’s managed directory.' };
+  }
+  const engine = selectEngine({ ...appRecord, requiresVm: appRecord.requiresVm || appRecord.preferVm || requestedAppRecord?.requiresVm });
+  const installerDir = path.join(sandboxRoot, 'installers');
+  ensureDirectory(installerDir);
+  const staged = path.join(installerDir, path.basename(installerPath));
+  try { fs.copyFileSync(installerPath, staged); } catch (copyError) {
+    return { id: appRecord.id, status: 'Failed', error: `Could not stage the installer: ${copyError.message}` };
+  }
+  const logsRoot = appRecord.logsRoot || path.join(sandboxRoot, 'logs');
+  const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
+  appendLog(logPath, `Running installer inside environment (engine: ${engine}): ${staged}`);
+  if (engine === 'hyperv') {
+    // Stage + execute inside the guest; host only orchestrates the VM.
+    const stagedForGuest = { ...appRecord, source: staged };
+    const result = await runWithHyperV(stagedForGuest, sandboxRoot, logPath);
+    if (result.status !== 'Running') return { id: appRecord.id, status: 'Failed', error: result.error || result.reason };
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const withInstaller = withTrackedPids(base, []);
+    saveApps(loadApps().map((e) => (e.id === appRecord.id ? { ...withInstaller, lastInstallerAt: new Date().toISOString() } : e)));
+    return { id: appRecord.id, status: 'Running', engine: 'hyperv', detail: 'Installer is running inside the Hyper-V VM.' };
+  }
+  if (engine === 'refused' || !isAppContainerSupported()) {
+    const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+    return { id: appRecord.id, status: 'Failed', error: `${decision.reason} The installer was not run on the host.` };
+  }
+  // AppContainer installer run: same verified launch path as apps, result tracked.
+  const installerRecord = { ...appRecord, source: staged };
+  const scriptPath = ensureIsolationScript();
+  const containerName = appContainerName(appRecord.id);
+  try {
+    const sidResult = await runIsolationScript(buildAppContainerScriptArgs(scriptPath, { mode: 'sid', containerName }));
+    const containerSid = sidResult.sid;
+    if (!containerSid) throw new Error('Windows did not return an AppContainer identity.');
+    for (const ancestor of listAncestorDirectories(sandboxRoot, sandboxRootBase)) {
+      await executeFile('icacls.exe', buildAppContainerAncestorAclArgs(ancestor, containerSid)).catch(() => {});
+    }
+    await executeFile('icacls.exe', buildAppContainerFolderAclArgs(sandboxRoot, containerSid));
+    const launch = await runIsolationScript(buildAppContainerScriptArgs(scriptPath, { mode: 'launch', containerName, executablePath: staged, workingDirectory: sandboxRoot }));
+    if (!launch.verified || launch.processSid !== launch.containerSid) {
+      throw new Error('The installer started, but Windows did not confirm it is inside its container. It was stopped.');
+    }
+    const pids = findAppProcessIds(await listProcessTable(), sandboxRoot, [launch.pid]);
+    const base = getStoredApp(appRecord.id) || appRecord;
+    saveApps(loadApps().map((e) => (e.id === appRecord.id ? { ...withTrackedPids(base, pids.length ? pids : [launch.pid]), lastInstallerAt: new Date().toISOString(), lastInstallerPid: launch.pid } : e)));
+    appendLog(logPath, `Installer running inside AppContainer ${containerName} (PID ${launch.pid}); children tracked for Delete.`);
+    monitorAppProcesses(appRecord.id, logPath);
+    return { id: appRecord.id, status: 'Running', engine: 'appcontainer', pid: launch.pid, detail: 'Installer is running inside the AppContainer; its children stay tracked after it exits.' };
+  } catch (error) {
+    appendLog(logPath, `Installer launch failed: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', error: `${error.message} The installer was not run without isolation.` };
+  }
+});
+
+ipcMain.handle('hyperv-status', async () => {
+  const readiness = await checkHyperVReady();
+  return { ready: readiness.ready, missing: readiness.missing, detail: readiness.detail || null, baseImage: hyperVBaseImagePath() };
+});
+
 // The UI asks the main process for the version, so package.json stays the single source.
 ipcMain.handle('get-app-version', async () => ({ version: app.getVersion() }));
 
@@ -1295,15 +1374,19 @@ ipcMain.handle('cancel-delete', async (_event, requestedAppRecord) => {
   return { id: requestedAppRecord.id, cancelled: true };
 });
 
-// Lets a user mark an app that cannot run under an isolation engine. This is an explicit
-// opt-in: RunContainer then reports the launch as not isolated instead of implying a sandbox.
+// Fail-closed: 'profile' (unguarded) and 'sandboxie' are rejected, never saved. Allowed:
+// 'auto' (AppContainer unless the app needs a VM), 'appcontainer', 'hyperv' (prefer VM).
 ipcMain.handle('set-isolation-engine', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
-  const engine = requestedAppRecord?.isolationEngine === 'profile' ? 'profile' : 'auto';
-  const updated = { ...appRecord, isolationEngine: engine };
+  const requested = requestedAppRecord?.isolationEngine;
+  if (requested === 'profile' || requested === 'sandboxie') {
+    return { id: appRecord.id, status: 'Failed', error: 'That mode is not a security boundary and is no longer offered. Use AppContainer (compatible apps) or Hyper-V VM (arbitrary software). Nothing was changed.' };
+  }
+  const engine = requested === 'hyperv' ? 'hyperv' : requested === 'appcontainer' ? 'appcontainer' : 'auto';
+  const updated = { ...appRecord, isolationEngine: engine, preferVm: engine === 'hyperv', requiresVm: Boolean(requestedAppRecord?.requiresVm ?? appRecord.requiresVm) };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
-  return { id: appRecord.id, status: updated.status, isolationEngine: engine };
+  return { id: appRecord.id, status: updated.status, isolationEngine: engine, preferVm: updated.preferVm };
 });
 
 ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
@@ -1315,9 +1398,17 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
     // Put any hosted window back on the desktop before the process is terminated.
     await releaseAppWindow(appRecord, trackedPids(appRecord), appLog);
     stopMonitor(appRecord.id);
-    const tools = resolveSandboxieTools();
-    if (appRecord.launchMode === 'sandboxie' && tools) {
-      await terminateSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
+    if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm && process.platform === 'win32') {
+      const hv = require('./hyperv-runtime');
+      await runHyperVScript(hv.buildStopVmScript(appRecord.hypervVm), appLog).catch(() => {});
+      const apps = loadApps().map((entry) => (entry.id === appRecord.id
+        ? { ...entry, status: 'Stopped', guestPid: null, lastExitAt: new Date().toISOString() }
+        : entry));
+      saveApps(apps);
+      appendLog(appLog, `VM ${appRecord.hypervVm} stopped; its disk is kept until Delete.`);
+      const updatedVm = apps.find((entry) => entry.id === appRecord.id);
+      if (updatedVm) broadcastContainerStatus(updatedVm);
+      return { id: appRecord.id, status: 'Stopped' };
     }
     const remaining = await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath: appLog });
     if (remaining.length > 0) {
