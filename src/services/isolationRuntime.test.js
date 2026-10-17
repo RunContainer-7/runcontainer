@@ -135,3 +135,26 @@ describe("isolation launcher results", () => {
     expect(() => parseAppContainerOutput(`${RESULT_PREFIX}not-json`)).toThrow("unreadable");
   });
 });
+
+describe("per-app capabilities and launch args", () => {
+  const {
+    buildAppContainerScript: buildScript,
+    buildAppContainerScriptArgs: buildArgs,
+  } = require("../../public/isolation-runtime");
+  it("passes capabilities and args as launch parameters, never for sid/delete", () => {
+    const launch = buildArgs("C:\\s.ps1", { mode: "launch", containerName: "N", executablePath: "C:\\a\\b.exe", workingDirectory: "C:\\a", capabilities: [], appArgs: "--safe" });
+    expect(launch).toContain("-Caps");
+    expect(launch[launch.indexOf("-Caps") + 1]).toBe("");
+    expect(launch).toContain("-Args");
+    expect(launch).toContain("--safe");
+    const sid = buildArgs("C:\\s.ps1", { mode: "sid", containerName: "N" });
+    expect(sid).not.toContain("-Caps");
+    expect(sid).not.toContain("-Args");
+    expect(sid).not.toContain("-Exe");
+  });
+  it("rejects unknown capability names inside the guest launcher", () => {
+    expect(buildScript()).toContain("Unknown AppContainer capability");
+    expect(buildScript()).toContain("$Args");
+    expect(buildScript()).toContain("$Caps");
+  });
+});

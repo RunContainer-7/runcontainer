@@ -101,13 +101,25 @@ function isHyperVSupported(platform = process.platform) {
   return platform === 'win32';
 }
 
-function buildHyperVPrereqScript() {
+// Validates host readiness AND operator capacity: Hyper-V feature, vmms,
+// hypervisor, edition, elevated admin (VM create/start needs it), and free disk
+// on the drive that holds the environments (base copy + differencing growth).
+function buildHyperVPrereqScript({ dataDir = '', requiredFreeGB = 40 } = {}) {
+  const eDir = String(dataDir).replace(/'/g, "''");
+  const needGB = Math.max(1, Number(requiredFreeGB) || 40);
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$feat = (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State",
     "$svc = (Get-Service vmms -ErrorAction SilentlyContinue).Status",
     "$cs = Get-ComputerInfo -Property HyperHypervisorPresent, HyperVRequirementVirtualizationFirmwareEnabled, WindowsProductName -ErrorAction SilentlyContinue",
-    "$out = @{ feature = $feat; service = \"$svc\"; hypervisorPresent = [bool]$cs.HyperHypervisorPresent; firmwareOk = [bool]$cs.HyperVRequirementVirtualizationFirmwareEnabled; product = \"$($cs.WindowsProductName)\" }",
+    "$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+    ...(eDir
+      ? [
+          `$drv = (Split-Path -Qualifier '${eDir}')`,
+          `$freeGB = 0; try { $freeGB = [math]::Round((Get-PSDrive ($drv.TrimEnd(':')) -ErrorAction Stop).Free / 1GB, 1) } catch {}`,
+        ]
+      : [`$freeGB = 0`]),
+    `$out = @{ feature = $feat; service = "$svc"; hypervisorPresent = [bool]$cs.HyperHypervisorPresent; firmwareOk = [bool]$cs.HyperVRequirementVirtualizationFirmwareEnabled; product = "$($cs.WindowsProductName)"; isAdmin = [bool]$admin; freeGB = $freeGB; requiredFreeGB = ${needGB} }`,
     `Write-Output ('${RESULT_PREFIX}' + ($out | ConvertTo-Json -Compress))`,
   ].join('\n');
 }
@@ -131,6 +143,10 @@ function hyperVMissingRequirements(prereq) {
   if (String(prereq.service) !== 'Running' && String(prereq.service) !== 'Running ') missing.push('Start the Hyper-V Virtual Machine Management service (vmms).');
   const product = String(prereq.product || '');
   if (/home/i.test(product)) missing.push(`This Windows edition (${product}) does not include Hyper-V; upgrade to Pro/Enterprise/Education for VM isolation.`);
+  if (prereq.isAdmin === false) missing.push('RunContainer is not elevated: creating, starting, and deleting VMs requires Administrator. Restart RunContainer as administrator.');
+  if (typeof prereq.freeGB === 'number' && typeof prereq.requiredFreeGB === 'number' && prereq.freeGB > 0 && prereq.freeGB < prereq.requiredFreeGB) {
+    missing.push(`Only ${prereq.freeGB} GB free where environments live; at least ${prereq.requiredFreeGB} GB is required for the base copy and differencing-disk growth. Free disk space first.`);
+  }
   return missing;
 }
 
@@ -289,19 +305,21 @@ function buildInstallInGuestScript({ vm, credFile = '', hostInstallerPath, guest
 
 // Launches the app INSIDE the guest. $guestPid is used because $pid is a
 // read-only automatic PowerShell variable and assignment to it fails.
-function buildLaunchInGuestScript({ vm, credFile = '', guestExePath, workingDir = '' }) {
+// appArgs is a single validated argument string (may be empty).
+function buildLaunchInGuestScript({ vm, credFile = '', guestExePath, workingDir = '', appArgs = '' }) {
   const eVm = String(vm).replace(/'/g, "''");
   const eExe = String(guestExePath).replace(/'/g, "''");
   const eDir = String(workingDir).replace(/'/g, "''");
+  const eArgs = String(appArgs || '').replace(/'/g, "''");
   const eCred = String(credFile).replace(/'/g, "''");
   const credDecl = eCred ? `$cred = Import-Clixml -Path '${eCred}' -ErrorAction Stop; ` : '';
   const credArg = eCred ? '-Credential $cred ' : '';
   return [
     "$ErrorActionPreference = 'Stop'",
     ...(workingDir
-      ? [`$sb = { param($e, $d) $p = Start-Process -FilePath $e -WorkingDirectory $d -PassThru; $p.Id }`]
-      : [`$sb = { param($e, $d) $p = Start-Process -FilePath $e -PassThru; $p.Id }`]),
-    `${credDecl}$guestPid = Invoke-Command -VMName '${eVm}' ${credArg}-ScriptBlock $sb -ArgumentList '${eExe}', '${eDir}' -ErrorAction Stop`,
+      ? [`$sb = { param($e, $d, $a) $p = Start-Process -FilePath $e -WorkingDirectory $d -ArgumentList $a -PassThru; $p.Id }`]
+      : [`$sb = { param($e, $d, $a) $p = Start-Process -FilePath $e -ArgumentList $a -PassThru; $p.Id }`]),
+    `${credDecl}$guestPid = Invoke-Command -VMName '${eVm}' ${credArg}-ScriptBlock $sb -ArgumentList '${eExe}', '${eDir}', '${eArgs}' -ErrorAction Stop`,
     `if (-not $guestPid -or [int]$guestPid -le 0) { throw 'The guest did not confirm a process id.' }`,
     `Write-Output ('${RESULT_PREFIX}' + (@{ guestPid = [int]$guestPid; vm = '${eVm}' } | ConvertTo-Json -Compress))`,
   ].join('\n');
@@ -444,6 +462,62 @@ function deletionPlan({ vm, vhdValid }) {
   return steps;
 }
 
+// Applies CPU/memory to a VM that is Off/Saved (Hyper-V rejects these while running).
+function buildSetVmResourcesScript({ vm, memoryMB, cpuCount }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const mem = Math.max(512, Math.min(32768, Number(memoryMB) || DEFAULT_MEMORY_MB));
+  const cpu = Math.max(1, Math.min(16, Number(cpuCount) || DEFAULT_CPU_COUNT));
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eVm}')`,
+    `$state = (Get-VM -Name $Name -ErrorAction Stop).State`,
+    `if ($state -ne 'Off' -and $state -ne 'Saved') { throw "VM '$Name' must be Off to change CPU/memory (state: $state). Stop it first." }`,
+    `Set-VM -Name $Name -MemoryStartupBytes (${mem}MB) -ProcessorCount ${cpu} -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ resources = $true; memoryMB = ${mem}; cpuCount = ${cpu} } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Removes all virtual NICs: the guest goes offline (least privilege default for
+// locked profiles). Re-attaching needs buildAttachNetworkScript while Off.
+function buildDetachNetworkScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Get-VMNetworkAdapter -VMName '${esc}' -ErrorAction Stop | Remove-VMNetworkAdapter -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ offline = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildAttachNetworkScript({ vm, switchName = DEFAULT_SWITCH_NAME }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eSw = String(switchName).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eVm}')`,
+    `$state = (Get-VM -Name $Name -ErrorAction Stop).State`,
+    `if ($state -ne 'Off') { throw "VM '$Name' must be Off to attach networking (state: $state)." }`,
+    `Add-VMNetworkAdapter -VMName $Name -SwitchName '${eSw}' -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ online = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildNetworkStateScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$nics = @(Get-VMNetworkAdapter -VMName '${esc}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SwitchName)`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ adapters = @($nics) } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Passing more than 0 args? No: single validated argument string.
+function validateLaunchArgs(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, args: '' };
+  if (typeof value !== 'string') return { ok: false, reason: 'Launch arguments must be text.' };
+  if (value.length > 2048) return { ok: false, reason: 'Launch arguments are too long (max 2048 characters).' };
+  return { ok: true, args: value };
+}
+
 function guestExePathForApp(vmDriveRoot, appId, exeBaseName) {
   return path.win32.join(vmDriveRoot, vmName(appId), exeBaseName);
 }
@@ -485,6 +559,11 @@ module.exports = {
   buildPowerOffScript,
   buildStopVmScript,
   buildRemoveVmConfigScript,
+  buildSetVmResourcesScript,
+  buildDetachNetworkScript,
+  buildAttachNetworkScript,
+  buildNetworkStateScript,
+  validateLaunchArgs,
   buildRemoveVmScript,
   parseHyperVOutput,
   deletionPlan,

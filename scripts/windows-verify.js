@@ -406,6 +406,10 @@ function checkHyperVReport() {
     if (!script.includes('-Credential') || !script.includes('Import-Clixml')) throw new Error('in-guest script missing guest credential wiring');
   }
   if (hyperv.buildGracefulShutdownScript({ vm: 'V' }).includes('-TurnOff')) throw new Error('graceful shutdown must not power off');
+  if (!hyperv.buildHyperVPrereqScript({}).includes('isAdmin')) throw new Error('readiness must check elevation');
+  if (hyperv.validateLaunchArgs('x'.repeat(2049)).ok) throw new Error('oversize launch args must be rejected');
+  if (!hyperv.buildLaunchInGuestScript({ vm: 'V', credFile: 'C:\\c.xml', guestExePath: 'C:\\g\\a.exe', appArgs: '--t' }).includes('--t')) throw new Error('launch args must reach the guest');
+  if (!hyperv.buildSetVmResourcesScript({ vm: 'V', memoryMB: 1, cpuCount: 99 }).includes('512MB')) throw new Error('resources must be clamped server-side');
   const plan = hyperv.deletionPlan({ vm: 'V', vhdValid: true });
   if (plan.indexOf('remove-env-vhd') < plan.indexOf('verify-vm-absent')) throw new Error('disk must only be removed after the VM is verified absent');
   const selDefault = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false });

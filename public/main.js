@@ -66,6 +66,17 @@ const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json'
 const sandboxMonitors = new Map();
 // One live deletion job per app, so a long retry loop can be cancelled from the UI.
 const deleteJobs = new Map();
+// One in-flight run/install/delete/reset operation per app. Concurrent operations on
+// the same environment are refused instead of corrupting it.
+const opLocks = new Map();
+async function withOpLock(appId, op, fn) {
+  if (opLocks.has(appId)) {
+    throw new Error(`Another operation (${opLocks.get(appId)}) is already running for this environment. Wait for it to finish and try again.`);
+  }
+  opLocks.set(appId, op);
+  try { return await fn(); }
+  finally { opLocks.delete(appId); }
+}
 const sandboxRootBase = path.join(app.getPath('userData'), 'sandboxes');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -94,7 +105,21 @@ function saveApps(apps) {
 
 function getStoredApp(appId) {
   if (!appId) return null;
-  return loadApps().find((entry) => entry.id === appId) || null;
+  const found = loadApps().find((entry) => entry.id === appId) || null;
+  return found ? withVmDefaults(found) : null;
+}
+
+// Defaults for fields added after earlier releases; normalization keeps old
+// records working without trusting stale state as proof of anything.
+function withVmDefaults(record) {
+  const normalized = { ...record };
+  if (typeof normalized.launchArgs !== 'string') normalized.launchArgs = '';
+  if (!Number.isSafeInteger(normalized.vmMemoryMB)) normalized.vmMemoryMB = require('./hyperv-runtime').DEFAULT_MEMORY_MB;
+  if (!Number.isSafeInteger(normalized.vmCpuCount)) normalized.vmCpuCount = require('./hyperv-runtime').DEFAULT_CPU_COUNT;
+  if (typeof normalized.networkEnabled !== 'boolean') normalized.networkEnabled = true;
+  if (typeof normalized.profile !== 'string') normalized.profile = 'default';
+  if (!Array.isArray(normalized.appContainerCapabilities)) normalized.appContainerCapabilities = ['internetClient'];
+  return normalized;
 }
 
 function removeAppRecord(appRecord) {
@@ -556,6 +581,30 @@ async function ensureHyperVGuestReady(appRecord, sandboxRoot, logPath) {
     vmInfo = await runHyperVScript(hv.buildGetVmScript(files.vmName), logPath);
     if (!vmInfo.exists) throw new Error(`Hyper-V did not confirm VM ${files.vmName} exists after creation.`);
   }
+  // Apply CPU/memory and network attachment while the VM is Off. A running VM
+  // keeps its current settings; differences are logged and take effect at Reset.
+  if (vmInfo.state !== 'Running') {
+    try {
+      await runHyperVScript(hv.buildSetVmResourcesScript({ vm: files.vmName, memoryMB: appRecord.vmMemoryMB, cpuCount: appRecord.vmCpuCount }), logPath);
+    } catch (resError) {
+      appendLog(logPath, `VM resources kept as-is: ${resError.message}`);
+    }
+    const wantOnline = appRecord.networkEnabled !== false;
+    try {
+      const nicState = await runHyperVScript(hv.buildNetworkStateScript(files.vmName), logPath).catch(() => ({ adapters: [] }));
+      const hasNic = Array.isArray(nicState.adapters) && nicState.adapters.length > 0;
+      if (wantOnline && !hasNic) {
+        await runHyperVScript(hv.buildAttachNetworkScript({ vm: files.vmName, switchName: files.switchName }), logPath);
+        appendLog(logPath, 'Network adapter attached (profile allows networking).');
+      } else if (!wantOnline && hasNic) {
+        await runHyperVScript(hv.buildDetachNetworkScript(files.vmName), logPath);
+        appendLog(logPath, 'Network adapters removed: this environment is offline (locked profile).');
+      }
+    } catch (netError) {
+      appendLog(logPath, `Network state kept as-is: ${netError.message}`);
+    }
+    vmInfo = await runHyperVScript(hv.buildGetVmScript(files.vmName), logPath);
+  }
   if (vmInfo.state !== 'Running') {
     appendLog(logPath, `Starting VM ${files.vmName} (state: ${vmInfo.state || 'unknown'}).`);
     await runHyperVScript(hv.buildStartVmScript(files.vmName), logPath);
@@ -594,8 +643,10 @@ async function runWithHyperV(appRecord, sandboxRoot, logPath) {
     const existsInGuest = await runHyperVScript(hv.buildGuestFileExistsScript({ vm: files.vmName, credFile, guestPath: guestExe }), logPath);
     if (!existsInGuest.exists) throw new Error(`The guest did not confirm ${guestExe} after copy. Nothing was started.`);
 
-    appendLog(logPath, `Launching inside the guest (never on the host): ${guestExe}`);
-    const launched = await runHyperVScript(hv.buildLaunchInGuestScript({ vm: files.vmName, credFile, guestExePath: guestExe, workingDir: guestDir }), logPath);
+    const argsCheck = hv.validateLaunchArgs(appRecord.launchArgs);
+    if (!argsCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argsCheck.reason} Clear them in Tweaks and try again. Nothing was launched.`);
+    appendLog(logPath, `Launching inside the guest (never on the host): ${guestExe}${argsCheck.args ? ` (args: ${argsCheck.args})` : ''}`);
+    const launched = await runHyperVScript(hv.buildLaunchInGuestScript({ vm: files.vmName, credFile, guestExePath: guestExe, workingDir: guestDir, appArgs: argsCheck.args }), logPath);
     const guestPid = Number(launched.guestPid);
     if (!Number.isSafeInteger(guestPid) || guestPid <= 0) throw new Error('The guest did not confirm a process id. The app was not reported as running.');
 
@@ -650,6 +701,7 @@ async function runWithHyperV(appRecord, sandboxRoot, logPath) {
 function monitorHyperVApp(appId, logPath) {
   stopMonitor(appId);
   let checking = false;
+  let failures = 0;
   const interval = setInterval(async () => {
     if (checking) return;
     checking = true;
@@ -662,6 +714,7 @@ function monitorHyperVApp(appId, logPath) {
       try {
         const res = await runHyperVScript(q, logPath);
         const pids = Array.isArray(res.pids) ? res.pids.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
+        failures = 0;
         if (pids.length === 0) {
           const updated = { ...current, status: 'Stopped', guestPid: null, lastExitAt: new Date().toISOString() };
           saveApps(loadApps().map((e) => (e.id === appId ? updated : e)));
@@ -670,7 +723,17 @@ function monitorHyperVApp(appId, logPath) {
           broadcastContainerStatus(updated);
         }
       } catch (queryError) {
-        appendLog(logPath, `Unable to query guest process state: ${queryError.message}`);
+        failures += 1;
+        appendLog(logPath, `Unable to query guest process state (${failures}/3): ${queryError.message}`);
+        if (failures >= 3) {
+          const current = getStoredApp(appId);
+          if (current && current.status === 'Running') {
+            const updated = { ...current, status: 'Unknown', statusNote: 'The guest stopped answering queries. The app may still run in the VM; Run reconciles, Stop attempts a clean stop, Reset reboots the guest.' };
+            saveApps(loadApps().map((e) => (e.id === appId ? updated : e)));
+            broadcastContainerStatus(updated);
+          }
+          stopMonitor(appId);
+        }
       }
     } finally { checking = false; }
   }, 5000);
@@ -836,11 +899,16 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
     }
     await executeFile('icacls.exe', buildAppContainerFolderAclArgs(sandboxRoot, containerSid));
 
+    const caps = Array.isArray(appRecord.appContainerCapabilities) ? appRecord.appContainerCapabilities : ['internetClient'];
+    const argCheck = require('./hyperv-runtime').validateLaunchArgs(appRecord.launchArgs);
+    if (!argCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argCheck.reason} Nothing was launched.`);
     const launch = await runIsolationScript(buildAppContainerScriptArgs(scriptPath, {
       mode: 'launch',
       containerName,
       executablePath: appRecord.source,
       workingDirectory: sandboxRoot,
+      capabilities: caps,
+      appArgs: argCheck.args || undefined,
     }));
 
     if (!launch.verified || launch.processSid !== launch.containerSid) {
@@ -930,7 +998,7 @@ function hyperVBaseImagePath() {
 async function checkHyperVReady() {
   if (process.platform !== 'win32') return { ready: false, missing: ['Isolation requires Windows 10/11.'] };
   try {
-    const script = buildHyperVPrereqScript();
+    const script = buildHyperVPrereqScript({ dataDir: app.getPath('userData'), requiredFreeGB: 40 });
     const tmp = path.join(app.getPath('userData'), 'runcontainer-hyperv-prereq.ps1');
     fs.writeFileSync(tmp, script, 'utf8');
     const { stdout } = await executeFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmp], { timeout: 60000 });
@@ -1032,7 +1100,23 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  try {
+    const apps = loadApps();
+    let changed = false;
+    const reconciled = apps.map((entry) => {
+      if (entry.status === 'Running') {
+        changed = true;
+        return { ...entry, status: 'Unknown', statusNote: 'RunContainer restarted while this app was marked Running. Its live state is unknown: Run reconciles and resumes, Stop attempts a clean stop.' };
+      }
+      return entry;
+    });
+    if (changed) saveApps(reconciled);
+  } catch (error) {
+    // A corrupt store must not prevent startup; list-apps surfaces it per record.
+  }
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -1068,10 +1152,19 @@ ipcMain.handle('list-apps', async () => {
       // Keep the persisted state if the process query is temporarily unavailable.
     }
   }));
-  if (updatesById.size === 0) return loadApps();
+  const reconciled = loadApps().map((entry) => {
+    const root = entry.sandboxRoot || (entry.source ? path.dirname(entry.source) : '');
+    return {
+      ...entry,
+      envDirPresent: root ? fs.existsSync(root) : false,
+      sourcePresent: entry.source ? fs.existsSync(entry.source) : false,
+      diskPresent: entry.hypervVhd ? fs.existsSync(entry.hypervVhd) : null,
+    };
+  });
+  if (updatesById.size === 0) return reconciled;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
-  const current = mergeStatusUpdates(loadApps(), updatesById);
-  saveApps(current);
+  const current = mergeStatusUpdates(reconciled, updatesById);
+  saveApps(current.map(({ envDirPresent, sourcePresent, diskPresent, ...rest }) => rest));
   return current;
 });
 
@@ -1149,6 +1242,20 @@ ipcMain.handle('duplicate-container', async (_event, appRecord) => {
     ? path.join(sandboxRoot, path.basename(appRecord.iconPath))
     : null;
   if (iconPath) fs.copyFileSync(appRecord.iconPath, iconPath);
+  const hv = require('./hyperv-runtime');
+  let clonedVhd = null;
+  let cloneWarning = null;
+  if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVhd && fs.existsSync(appRecord.hypervVhd)) {
+    try {
+      const newHvDir = path.join(sandboxRoot, 'hyperv');
+      ensureDirectory(newHvDir);
+      clonedVhd = path.join(newHvDir, `${hv.vmName(appId)}.vhdx`);
+      fs.copyFileSync(appRecord.hypervVhd, clonedVhd);
+    } catch (cloneError) {
+      cloneWarning = `The VM disk could not be cloned (${cloneError.message}); the copy starts without guest data and reinstalls on first Run.`;
+      clonedVhd = null;
+    }
+  }
   const duplicate = {
     ...appRecord,
     id: appId,
@@ -1169,6 +1276,12 @@ ipcMain.handle('duplicate-container', async (_event, appRecord) => {
     sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
     sandboxieInitialized: false,
     createdAt: new Date().toISOString(),
+    hypervVm: hv.vmName(appId),
+    hypervVhd: clonedVhd,
+    guestPid: null,
+    guestPids: [],
+    installedNeedsReboot: false,
+    cloneWarning: cloneWarning || undefined,
   };
   const cleanCopy = resetLaunchState(duplicate);
   saveApps([...loadApps(), cleanCopy]);
@@ -1262,22 +1375,23 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   appendLog(logPath, `Using container ${sandboxRoot}`);
   stopMonitor(appRecord.id);
 
-  const engine = selectEngine(appRecord);
-  if (engine === 'refused') {
-    const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
-    appendLog(logPath, `Launch refused: ${decision.reason}`);
-    return failedLaunch(appRecord, `${decision.reason} Nothing was launched.`);
-  }
-  if (engine === 'hyperv') {
-    appendLog(logPath, 'Isolation engine: Hyper-V virtual machine (full guest OS boundary).');
-    return runWithHyperV(appRecord, sandboxRoot, logPath);
-  }
-  if (!isAppContainerSupported()) {
-    appendLog(logPath, 'Launch refused: AppContainer requires Windows 10/11.');
-    return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
-  }
-  appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
-  return runWithAppContainer(appRecord, sandboxRoot, logPath);
+  appendLog(logPath, 'Launch requested; dispatching the selected engine under an operation lock.');
+  return withOpLock(appRecord.id, 'run', async () => {
+    const lockedEngine = selectEngine(getStoredApp(appRecord.id) || appRecord);
+    if (lockedEngine === 'refused') {
+      const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+      return failedLaunch(appRecord, `${decision.reason} Nothing was launched.`);
+    }
+    if (lockedEngine === 'hyperv') {
+      appendLog(logPath, 'Isolation engine: Hyper-V virtual machine (full guest OS boundary).');
+      return runWithHyperV(appRecord, sandboxRoot, logPath);
+    }
+    if (!isAppContainerSupported()) {
+      return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
+    }
+    appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
+    return runWithAppContainer(appRecord, sandboxRoot, logPath);
+  });
 });
 
 ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
@@ -1296,6 +1410,7 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   // A deletion can be cancelled from the UI while it is waiting for Windows to release files.
   const job = { appId: appRecord.id, aborted: false };
   deleteJobs.set(appRecord.id, job);
+  return withOpLock(appRecord.id, 'delete', async () => {
   try {
     await releaseAppWindow(appRecord, trackedPids(appRecord), errorLogPath);
     stopMonitor(appRecord.id);
@@ -1421,6 +1536,7 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
   } finally {
     deleteJobs.delete(appRecord.id);
   }
+  });
 });
 
 ipcMain.handle('set-window-hosting', async (_event, requestedAppRecord) => {
@@ -1449,6 +1565,7 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
   if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
     return { id: appRecord.id, status: 'Failed', error: 'Refusing to run an installer outside RunContainer’s managed directory.' };
   }
+  return withOpLock(appRecord.id, 'install', async () => {
   const engine = selectEngine({ ...appRecord, requiresVm: appRecord.requiresVm || appRecord.preferVm || requestedAppRecord?.requiresVm });
   const installerDir = path.join(sandboxRoot, 'installers');
   ensureDirectory(installerDir);
@@ -1475,6 +1592,11 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
       const done = await runHyperVScript(hv.buildRunInstallerInGuestScript({ vm: files.vmName, credFile, guestInstallerPath: guestInstaller, installArgs, timeoutSec: 1800 }), logPath);
       const code = Number(done.exitCode);
       appendLog(logPath, `Installer exited in-guest with code ${code}.`);
+      if (code === 3010 || code === 1641) {
+        const base = getStoredApp(appRecord.id) || appRecord;
+        saveApps(loadApps().map((e) => (e.id === appRecord.id ? { ...withTrackedPids(base, []), installedNeedsReboot: true, lastInstallerAt: new Date().toISOString(), lastInstallerExitCode: code } : e)));
+        return { id: appRecord.id, status: 'InstalledNeedsReboot', engine: 'hyperv', detail: `The installer finished but the guest needs a reboot (exit code ${code}). Use Reset to reboot the guest, then Run the app. Nothing was executed on the host.` };
+      }
       if (!Number.isSafeInteger(code) || code !== 0) {
         throw new Error(`The installer failed inside the guest (exit code ${done.exitCode}). Check the installer arguments and guest requirements; nothing was installed.`);
       }
@@ -1531,6 +1653,7 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
     appendLog(logPath, `Installer launch failed: ${error.message}`);
     return { id: appRecord.id, status: 'Failed', error: `${error.message} The installer was not run without isolation.` };
   }
+  });
 });
 
 ipcMain.handle('hyperv-status', async () => {
@@ -1552,6 +1675,153 @@ ipcMain.handle('hyperv-provision-credential', async () => {
     return { provisioned: true, credFile };
   } catch (error) {
     return { provisioned: false, error: error.message };
+  }
+});
+
+// Profiles assign real, enforced settings. locked = offline VM + container with no
+// capabilities; relaxed = online + wider container capabilities; default = online +
+// internetClient. Changing network attachment needs the VM Off, so a running VM
+// keeps its NICs until Reset and the change is reported, not silently dropped.
+ipcMain.handle('set-app-profile', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const profile = requestedAppRecord?.profile;
+  if (!['default', 'relaxed', 'locked'].includes(profile)) {
+    return { id: appRecord.id, status: 'Failed', error: 'Unknown profile. Choose default, relaxed, or locked.' };
+  }
+  const sandboxProfile = getSandboxProfile(profile);
+  const updated = {
+    ...appRecord,
+    profile,
+    permissions: { network: sandboxProfile.network, filesystem: sandboxProfile.filesystem, registry: sandboxProfile.registry },
+    networkEnabled: profile !== 'locked',
+    appContainerCapabilities: profile === 'locked' ? [] : profile === 'relaxed' ? ['internetClient', 'privateNetworkClientServer'] : ['internetClient'],
+  };
+  saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
+  return { id: appRecord.id, status: updated.status, profile, networkEnabled: updated.networkEnabled };
+});
+
+// Tweaks: launch arguments, VM CPU/memory, networking. All validated; bad values
+// are rejected with the reason, never stored.
+ipcMain.handle('set-app-config', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const hv = require('./hyperv-runtime');
+  const patch = {};
+  if (requestedAppRecord?.launchArgs !== undefined) {
+    const checked = hv.validateLaunchArgs(requestedAppRecord.launchArgs);
+    if (!checked.ok) return { id: appRecord.id, status: 'Failed', error: checked.reason };
+    patch.launchArgs = checked.args;
+  }
+  if (requestedAppRecord?.vmMemoryMB !== undefined) {
+    const mem = Number(requestedAppRecord.vmMemoryMB);
+    if (!Number.isSafeInteger(mem) || mem < 512 || mem > 32768) {
+      return { id: appRecord.id, status: 'Failed', error: 'Memory must be 512–32768 MB.' };
+    }
+    patch.vmMemoryMB = mem;
+  }
+  if (requestedAppRecord?.vmCpuCount !== undefined) {
+    const cpu = Number(requestedAppRecord.vmCpuCount);
+    if (!Number.isSafeInteger(cpu) || cpu < 1 || cpu > 16) {
+      return { id: appRecord.id, status: 'Failed', error: 'CPU count must be 1–16.' };
+    }
+    patch.vmCpuCount = cpu;
+  }
+  if (requestedAppRecord?.networkEnabled !== undefined) {
+    patch.networkEnabled = requestedAppRecord.networkEnabled !== false;
+  }
+  if (Object.keys(patch).length === 0) return { id: appRecord.id, status: 'Failed', error: 'No tweak values were provided.' };
+  const updated = { ...appRecord, ...patch };
+  saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
+  return { id: appRecord.id, status: updated.status, ...patch };
+});
+
+// Reset (distinct from Delete): stop the guest app, reboot the guest OS fresh,
+// verify readiness, keep the disk, installed apps and data. Clears crashed or
+// wedged guest runtime state without touching the base image or other envs.
+ipcMain.handle('reset-environment', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  if (appRecord.launchMode !== 'hyperv' && appRecord.activeEngine !== 'hyperv' && !appRecord.hypervVm) {
+    // AppContainer mode: fresh container state = stop processes + drop the profile.
+    const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source || '');
+    const appLog = path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
+    try {
+      return await withOpLock(appRecord.id, 'reset', async () => {
+        await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath: appLog });
+        await deleteAppContainerProfile(appRecord, appLog).catch(() => ({}));
+        const apps = loadApps().map((entry) => (entry.id === appRecord.id
+          ? { ...withTrackedPids(entry, []), status: 'Stopped', pid: null, sandboxPids: [], lastResetAt: new Date().toISOString() }
+          : entry));
+        saveApps(apps);
+        appendLog(appLog, 'Environment reset: processes stopped, container profile dropped (recreated on next Run).');
+        return { id: appRecord.id, status: 'Stopped', reset: true };
+      });
+    } catch (error) {
+      return { id: appRecord.id, status: 'Failed', error: error.message };
+    }
+  }
+  const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source || '');
+  const appLog = path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
+  try {
+    return await withOpLock(appRecord.id, 'reset', async () => {
+      const hv = require('./hyperv-runtime');
+      stopMonitor(appRecord.id);
+      const guestExe = appRecord.installedExeGuestPath || appRecord.source;
+      const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+      try {
+        await runHyperVScript(hv.buildStopGuestAppScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), exeName: exeBase, gracefulTimeoutSec: 15 }), appLog);
+      } catch (appStopError) {
+        appendLog(appLog, `Reset: guest app did not exit cleanly, continuing to reboot: ${appStopError.message}`);
+      }
+      try {
+        await runHyperVScript(hv.buildGracefulShutdownScript({ vm: appRecord.hypervVm, timeoutSec: 120 }), appLog);
+      } catch (gracefulError) {
+        appendLog(appLog, `Reset: graceful shutdown timed out, powering off (data loss inside the VM is possible): ${gracefulError.message}`);
+        await runHyperVScript(hv.buildPowerOffScript(appRecord.hypervVm), appLog);
+      }
+      await runHyperVScript(hv.buildStartVmScript(appRecord.hypervVm), appLog);
+      await runHyperVScript(hv.buildWaitForGuestReadyScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), timeoutSec: 300 }), appLog);
+      const apps = loadApps().map((entry) => (entry.id === appRecord.id
+        ? { ...entry, status: 'Stopped', guestPid: null, guestPids: [], installedNeedsReboot: false, lastResetAt: new Date().toISOString() }
+        : entry));
+      saveApps(apps);
+      appendLog(appLog, `Environment reset: guest OS rebooted fresh, disk and installed apps kept.`);
+      const updated = apps.find((entry) => entry.id === appRecord.id);
+      if (updated) broadcastContainerStatus(updated);
+      return { id: appRecord.id, status: 'Stopped', reset: true };
+    });
+  } catch (error) {
+    appendLog(appLog, `Reset failed: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', error: error.message };
+  }
+});
+
+// Guest display: opens the supported VM console (VMConnect) for this
+// environment's VM. This is a separate display window, not embedding, and is
+// never presented as isolation.
+ipcMain.handle('open-guest-display', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  if (!appRecord.hypervVm) return { id: appRecord.id, status: 'Failed', error: 'Guest display needs a Hyper-V environment (this app has no VM yet — Run it once first).' };
+  if (process.platform !== 'win32') return { id: appRecord.id, status: 'Failed', error: 'Guest display requires Windows.' };
+  try {
+    const hv = require('./hyperv-runtime');
+    const vmInfo = await runHyperVScript(hv.buildGetVmScript(appRecord.hypervVm), path.join(app.getPath('userData'), 'runcontainer-error.log'));
+    if (!vmInfo.exists) throw new Error(`VM ${appRecord.hypervVm} does not exist. Run the app to recreate it from its disk.`);
+    if (vmInfo.state !== 'Running') {
+      await runHyperVScript(hv.buildStartVmScript(appRecord.hypervVm), path.join(app.getPath('userData'), 'runcontainer-error.log'));
+      await runHyperVScript(hv.buildWaitForGuestReadyScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), timeoutSec: 300 }), path.join(app.getPath('userData'), 'runcontainer-error.log'));
+    }
+    const child = spawn('vmconnect.exe', ['localhost', appRecord.hypervVm], { detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref();
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    return { id: appRecord.id, status: 'Displaying', vm: appRecord.hypervVm };
+  } catch (error) {
+    return { id: appRecord.id, status: 'Failed', error: `Could not open the guest display: ${error.message}` };
   }
 });
 
@@ -1583,6 +1853,9 @@ ipcMain.handle('set-isolation-engine', async (_event, requestedAppRecord) => {
 ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  if (opLocks.has(appRecord.id)) {
+    return { id: appRecord.id, status: 'Failed', error: `Cannot stop while ${opLocks.get(appRecord.id)} is running for this environment. Wait for it to finish, or Delete the environment if the operation is wedged.` };
+  }
   const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
   const appLog = path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
   try {
@@ -1592,6 +1865,17 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
     if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm && process.platform === 'win32') {
       const hv = require('./hyperv-runtime');
       try {
+        const vmInfo = await runHyperVScript(hv.buildGetVmScript(appRecord.hypervVm), appLog);
+        if (!vmInfo.exists) {
+          appendLog(appLog, `VM ${appRecord.hypervVm} no longer exists; marking the app Stopped. Its disk (if present) is kept for re-attach on next Run.`);
+          const gone = loadApps().map((entry) => (entry.id === appRecord.id
+            ? { ...entry, status: 'Stopped', guestPid: null, guestPids: [], statusNote: 'The VM was already gone; nothing was running.' }
+            : entry));
+          saveApps(gone);
+          const stoppedGone = gone.find((entry) => entry.id === appRecord.id);
+          if (stoppedGone) broadcastContainerStatus(stoppedGone);
+          return { id: appRecord.id, status: 'Stopped', note: 'The VM was already gone.' };
+        }
         const guestExe = appRecord.installedExeGuestPath || appRecord.source;
         const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
         appendLog(appLog, `Stopping guest app ${exeBase} inside VM ${appRecord.hypervVm} (graceful close first, force after 15s). The VM itself keeps running.`);

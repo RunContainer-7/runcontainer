@@ -235,7 +235,7 @@ public static class RunContainerAppContainer
 
     // Launches the executable inside the named AppContainer and returns
     // "<pid>|<containerSid>|<verifiedSidOrEmpty>".
-    public static string Launch(string name, string executablePath, string workingDirectory, string[] capabilityNames)
+    public static string Launch(string name, string executablePath, string workingDirectory, string[] capabilityNames, string arguments)
     {
         IntPtr containerSid = EnsureAppContainerSid(name);
         string containerSidText = SidToString(containerSid);
@@ -280,7 +280,7 @@ public static class RunContainerAppContainer
             startupInfo.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOEX));
             startupInfo.lpAttributeList = attributeList;
 
-            StringBuilder commandLine = new StringBuilder("\\"" + executablePath + "\\"");
+            StringBuilder commandLine = new StringBuilder("\\"" + executablePath + "\\"" + (string.IsNullOrEmpty(arguments) ? "" : " " + arguments));
             bool created = CreateProcess(
                 executablePath,
                 commandLine,
@@ -351,12 +351,13 @@ public static class RunContainerAppContainer
 `;
 }
 
-function buildAppContainerScript({ capabilities = ['internetClient'] } = {}) {
-  const capabilitiesLiteral = buildAppContainerCapabilities(capabilities)
-    .map((name) => `'${name.replace(/'/g, "''")}'`)
-    .join(', ');
+// Per-app capabilities and launch args travel as script parameters so one shared
+// launcher serves every environment. $Caps is a comma list filtered against the
+// documented names (empty = locked, no capabilities); $Args is a single argument
+// string appended to the sandboxed command line (empty = none).
+function buildAppContainerScript() {
   return [
-    'param([string]$Mode, [string]$Name, [string]$Exe, [string]$Dir)',
+    'param([string]$Mode, [string]$Name, [string]$Exe, [string]$Dir, [string]$Caps = \'internetClient\', [string]$Args = \'\')',
     "$ErrorActionPreference = 'Stop'",
     // The C# has to live in a literal here-string. Raw C# emitted as bare script lines is
     // not valid PowerShell, and the script would fail to parse before Add-Type ever ran.
@@ -364,7 +365,11 @@ function buildAppContainerScript({ capabilities = ['internetClient'] } = {}) {
     buildAppContainerCSharp(),
     "'@",
     'Add-Type -TypeDefinition $source -Language CSharp',
-    `$capabilities = @(${capabilitiesLiteral})`,
+    `$names = @($Caps.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })`,
+    `$allowed = @('internetClient', 'internetClientServer', 'privateNetworkClientServer')`,
+    `$unknown = @($names | Where-Object { $allowed -notcontains $_ })`,
+    'if ($unknown.Count -gt 0) { throw ("Unknown AppContainer capability: " + ($unknown -join ", ")) }',
+    '$capabilities = @($names | Where-Object { $allowed -contains $_ })',
     'try {',
     "  if ($Mode -eq 'sid') {",
     '    $sid = [RunContainerAppContainer]::SidToString([RunContainerAppContainer]::EnsureAppContainerSid($Name))',
@@ -373,7 +378,7 @@ function buildAppContainerScript({ capabilities = ['internetClient'] } = {}) {
     '    [RunContainerAppContainer]::DeleteProfile($Name)',
     `    Write-Output ('${RESULT_PREFIX}' + (@{ deleted = $true } | ConvertTo-Json -Compress))`,
     '  } else {',
-    '    $result = [RunContainerAppContainer]::Launch($Name, $Exe, $Dir, $capabilities)',
+    '    $result = [RunContainerAppContainer]::Launch($Name, $Exe, $Dir, $capabilities, $Args)',
     '    $parts = $result.Split("|")',
     '    $output = @{ pid = [int]$parts[0]; containerSid = $parts[1]; processSid = $parts[2]; verified = ($parts[1] -eq $parts[2]) }',
     `    Write-Output ('${RESULT_PREFIX}' + ($output | ConvertTo-Json -Compress))`,
@@ -385,12 +390,16 @@ function buildAppContainerScript({ capabilities = ['internetClient'] } = {}) {
   ].join('\n');
 }
 
-function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executablePath, workingDirectory }) {
+function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executablePath, workingDirectory, capabilities, appArgs }) {
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Mode', mode, '-Name', containerName];
-  // Only a launch needs the executable and working directory; the sid and delete modes
-  // must not receive them, so a delete can never accidentally start the app.
+  // Only a launch needs the executable, working directory, capabilities and args;
+  // the sid and delete modes must not receive them, so a delete can never
+  // accidentally start the app.
   if (mode === 'launch') {
     args.push('-Exe', executablePath, '-Dir', workingDirectory);
+    // An explicit empty list means locked (no capabilities); undefined keeps the script default.
+    if (capabilities !== undefined) args.push('-Caps', capabilities.length ? buildAppContainerCapabilities(capabilities).join(',') : '');
+    if (appArgs) args.push('-Args', String(appArgs));
   }
   return args;
 }

@@ -18,6 +18,11 @@ const {
   buildGracefulShutdownScript,
   buildPowerOffScript,
   buildRemoveVmConfigScript,
+  buildSetVmResourcesScript,
+  buildDetachNetworkScript,
+  buildAttachNetworkScript,
+  buildNetworkStateScript,
+  validateLaunchArgs,
   deletionPlan,
   buildHyperVPrereqScript,
   parseHyperVPrereqOutput,
@@ -161,5 +166,42 @@ describe("hyper-v lifecycle scripts", () => {
   it("reads hyper-v results and rejects missing lines", () => {
     expect(parseHyperVOutput(`${RESULT_PREFIX}{"started":true}`)).toMatchObject({ started: true });
     expect(() => parseHyperVOutput("nothing")).toThrow("did not return");
+  });
+});
+
+describe("tweak enforcement builders", () => {
+  it("validates launch arguments", () => {
+    expect(validateLaunchArgs("")).toEqual({ ok: true, args: "" });
+    expect(validateLaunchArgs("--safe-mode").ok).toBe(true);
+    expect(validateLaunchArgs(42).ok).toBe(false);
+    expect(validateLaunchArgs("x".repeat(2049)).ok).toBe(false);
+  });
+  it("passes launch args into the guest command", () => {
+    const script = buildLaunchInGuestScript({ vm: "V", credFile: "C:\\c.xml", guestExePath: "C:\\g\\a.exe", appArgs: "--safe-mode" });
+    expect(script).toContain("--safe-mode");
+    expect(script).toContain("-ArgumentList");
+  });
+  it("applies CPU/memory only while the VM is Off", () => {
+    const script = buildSetVmResourcesScript({ vm: "V", memoryMB: 8192, cpuCount: 4 });
+    expect(script).toContain("8192MB");
+    expect(script).toContain("ProcessorCount 4");
+    expect(script).toContain("must be Off");
+    const clamped = buildSetVmResourcesScript({ vm: "V", memoryMB: 1, cpuCount: 99 });
+    expect(clamped).toContain("512MB");
+    expect(clamped).toContain("ProcessorCount 16");
+  });
+  it("detaches all NICs for offline mode and re-attaches while Off", () => {
+    expect(buildDetachNetworkScript("V")).toContain("Remove-VMNetworkAdapter");
+    const attach = buildAttachNetworkScript({ vm: "V", switchName: "S" });
+    expect(attach).toContain("Add-VMNetworkAdapter");
+    expect(attach).toContain("must be Off");
+    expect(buildNetworkStateScript("V")).toContain("Get-VMNetworkAdapter");
+  });
+  it("requires admin-capable readiness data (isAdmin, disk space)", () => {
+    const out = `${RESULT_PREFIX}{"feature":"Enabled","service":"Running","hypervisorPresent":true,"product":"Windows 11 Pro","isAdmin":false,"freeGB":500,"requiredFreeGB":40}`;
+    const missing = hyperVMissingRequirements(parseHyperVPrereqOutput(out));
+    expect(missing.join(" ")).toContain("Administrator");
+    const full = `${RESULT_PREFIX}{"feature":"Enabled","service":"Running","hypervisorPresent":true,"product":"Windows 11 Pro","isAdmin":true,"freeGB":5,"requiredFreeGB":40}`;
+    expect(hyperVMissingRequirements(parseHyperVPrereqOutput(full)).join(" ")).toContain("5 GB free");
   });
 });

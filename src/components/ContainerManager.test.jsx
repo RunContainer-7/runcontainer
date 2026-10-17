@@ -16,6 +16,12 @@ jest.mock("../services/containerService", () => ({
   cancelDeleteContainer: jest.fn(),
   setIsolationEngine: jest.fn(),
   setWindowHosting: jest.fn(),
+  setAppConfig: jest.fn(),
+  setAppProfile: jest.fn(),
+  resetEnvironment: jest.fn(),
+  openGuestDisplay: jest.fn(),
+  getHyperVStatus: jest.fn(async () => null),
+  provisionGuestCredential: jest.fn(),
   getAppVersion: jest.fn(async () => "0.5.0"),
   listContainers: jest.fn(async () => []),
   onContainerStatus: jest.fn(() => () => {}),
@@ -117,6 +123,22 @@ describe("ContainerManager", () => {
     expect(container.textContent).toContain("Completely free");
     expect(container.textContent).toContain("Free forever");
     expect(container.textContent).toContain("Open source");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("restores all six tabs including Tweaks and Profiles", () => {
+    const container = render();
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info"]) {
+      expect(container.textContent).toContain(tab);
+    }
+    openTab(container, "Tweaks");
+    expect(container.textContent).toContain("Launch arguments");
+    expect(container.textContent).toContain("Save tweaks");
+    openTab(container, "Profiles");
+    expect(container.textContent).toContain("locked");
+    expect(container.textContent).toContain("Isolation presets");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

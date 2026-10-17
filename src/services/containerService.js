@@ -89,6 +89,22 @@ export async function provisionGuestCredential() {
   return requireIpc('Provisioning guest credential').invoke('hyperv-provision-credential');
 }
 
+export async function setAppConfig(container) {
+  return requireIpc('Changing app tweaks').invoke('set-app-config', container);
+}
+
+export async function setAppProfile(container) {
+  return requireIpc('Changing app profile').invoke('set-app-profile', container);
+}
+
+export async function resetEnvironment(container) {
+  return requireIpc('Resetting environments').invoke('reset-environment', container);
+}
+
+export async function openGuestDisplay(container) {
+  return requireIpc('Opening guest display').invoke('open-guest-display', container);
+}
+
 export async function setWindowHosting(container) {
   return requireIpc('Changing window hosting').invoke('set-window-hosting', container);
 }

@@ -133,8 +133,13 @@ Do not claim it works until `scripts/windows-verify.js` + manual testing prove i
 
 ### Deleting an environment
 
+`Reset` and `Delete` are separate. Reset stops the guest app and reboots the guest OS
+fresh (verified ready afterwards), keeping the disk, installed apps, and data; for
+AppContainer mode it stops processes and drops the container profile. Use Reset after
+changing CPU/memory/network tweaks or when the guest is wedged.
+
 `Delete` on a VM environment is ordered and verified: launches blocked
-(`deleteJobs` guard) → guest app stopped in-guest (graceful close, 15s, then
+(`deleteJobs` guard + per-environment operation lock) → guest app stopped in-guest (graceful close, 15s, then
 force) → graceful guest shutdown with 120s wait for Hyper-V `Off` → power-off
 escalation ONLY after timeout (and re-verified `Off` before touching disks) →
 `Remove-VM` config with absence verification → remove ONLY this environment's
@@ -211,6 +216,19 @@ on host), deletes one environment in order (VM absent, env disk absent, sibling
    session file sharing is created by these scripts).
 6. **Per environment:** ~20–40 GB disk for the differencing VHDX growth +
    4 GB RAM default. Delete removes the VM config + env VHDX only.
+
+Six bottom tabs are back: Sources, Apps, Tweaks, Settings, Profiles, Info. Tweaks
+(launch arguments, VM memory/CPU, guest networking — all validated server-side) and
+Profiles (default/relaxed/locked: real network-attachment and capability settings,
+enforced at next boot/Reset) were removed by an earlier cleanup and are restored as
+backed features, not placeholders. The guest display opens in VMConnect (a separate
+supported console window); guest windows are never claimed to be embedded.
+
+App states are Running, Stopped, Failed, and Unknown (RunContainer restarted, or the
+guest stopped answering — Run reconciles, Stop attempts a clean stop, Reset reboots).
+One run/install/delete/reset operation per environment at a time; concurrent attempts
+are refused with a message instead of corrupting state. Installers reporting reboot
+codes (3010/1641) record `InstalledNeedsReboot` and direct you to Reset before Run.
 
 No promise is made that an arbitrary installer works unmodified in the guest —
 it runs a real Windows, so most do, but guest requirements (drivers,

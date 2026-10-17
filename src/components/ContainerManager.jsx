@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -14,11 +14,13 @@ function useBootAnimation() {
 }
 // Used only until the main process reports the version from package.json.
 const APP_VERSION_FALLBACK = "0.5.0";
-const tabs = ["Sources", "Apps", "Settings", "Info"];
+const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
+  Tweaks: "✧",
   Settings: "⚙",
+  Profiles: "◧",
   Info: "◌",
 };
 
@@ -35,6 +37,12 @@ export default function ContainerManager() {
   const [deletingId, setDeletingId] = useState(null);
   const [activeSession, setActiveSession] = useState(null);
   const [appVersion, setAppVersion] = useState(APP_VERSION_FALLBACK);
+  const [hypervStatus, setHypervStatus] = useState(null);
+  const [tweakAppId, setTweakAppId] = useState(null);
+  const [tweakArgs, setTweakArgs] = useState("");
+  const [tweakMemory, setTweakMemory] = useState("4096");
+  const [tweakCpu, setTweakCpu] = useState("2");
+  const [tweakNetwork, setTweakNetwork] = useState(true);
   const booting = useBootAnimation();
 
   useEffect(() => {
@@ -137,16 +145,115 @@ export default function ContainerManager() {
   }
 
   function handleDuplicate(container) {
-    duplicateContainer(container).then((duplicateApp) => {
-      addContainer(duplicateApp);
-      setInstallMessage(`Duplicated ${duplicateApp.name}`);
-    });
+    duplicateContainer(container)
+      .then((duplicateApp) => {
+        addContainer(duplicateApp);
+        setInstallMessage(duplicateApp?.cloneWarning ? `Duplicated ${duplicateApp.name}, but ${duplicateApp.cloneWarning}` : `Duplicated ${duplicateApp.name} (VM disk cloned where present).`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not duplicate ${container.name}: ${error?.message || 'Unknown error.'}`);
+      });
   }
 
   function handleExport(container) {
-    exportContainer(container).then((result) => {
-      setInstallMessage(`Exported to ${result.path}`);
-    });
+    exportContainer(container)
+      .then((result) => {
+        setInstallMessage(`Exported app metadata (not the VM disk) to ${result.path}.`);
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not export ${container.name}: ${error?.message || 'Unknown error.'}`);
+      });
+  }
+
+  function handleReset(container) {
+    setInstallMessage(`Resetting ${container.name} (reboots its guest, keeps data)...`);
+    resetEnvironment(container)
+      .then((result) => {
+        if (!result?.reset) {
+          setInstallMessage(`Could not reset ${container.name}: ${result?.error || 'Reset was not confirmed.'}`);
+          return;
+        }
+        updateContainerStatus(container.id, 'Stopped');
+        setActiveSession((current) => current?.id === container.id ? { ...current, ...result, status: 'Stopped' } : current);
+        setSelectedApp((current) => current?.id === container.id ? { ...current, status: 'Stopped' } : current);
+        setInstallMessage(`${container.name} reset: guest rebooted fresh, data kept.`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not reset ${container.name}: ${error?.message || 'Unknown error.'}`);
+      });
+  }
+
+  function handleOpenDisplay(container) {
+    setInstallMessage(`Opening the guest display for ${container.name}...`);
+    openGuestDisplay(container)
+      .then((result) => {
+        if (result?.status !== 'Displaying') {
+          setInstallMessage(`Could not open the guest display: ${result?.error || 'Unknown error.'}`);
+          return;
+        }
+        setInstallMessage(`Guest display open for VM ${result.vm} (separate VM console window, not embedding).`);
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not open the guest display: ${error?.message || 'Unknown error.'}`);
+      });
+  }
+
+  function handleProvisionCredential() {
+    setInstallMessage('Opening the Windows credential dialog for the guest administrator...');
+    provisionGuestCredential()
+      .then((result) => {
+        if (!result?.provisioned) {
+          setInstallMessage(`Guest credential was not provisioned: ${result?.error || 'Unknown error.'}`);
+          return;
+        }
+        setInstallMessage('Guest credential provisioned (encrypted for this user on this host).');
+        refreshHypervStatus();
+      })
+      .catch((error) => {
+        setInstallMessage(`Guest credential was not provisioned: ${error?.message || 'Unknown error.'}`);
+      });
+  }
+
+  function refreshHypervStatus() {
+    Promise.resolve(getHyperVStatus())
+      .then((status) => { if (status) setHypervStatus(status); })
+      .catch(() => {});
+  }
+
+  function handleSaveTweaks(container) {
+    if (!container) return;
+    setAppConfig({ id: container.id, launchArgs: tweakArgs, vmMemoryMB: Number(tweakMemory), vmCpuCount: Number(tweakCpu), networkEnabled: tweakNetwork })
+      .then((result) => {
+        if (result?.status === 'Failed') {
+          setInstallMessage(`Could not save tweaks: ${result.error}`);
+          return;
+        }
+        setInstallMessage(`Tweaks saved for ${container.name}. CPU/memory and network changes apply when its VM is Off (use Reset).`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not save tweaks: ${error?.message || 'Unknown error.'}`);
+      });
+  }
+
+  function handleSetProfile(container, profile) {
+    setAppProfile({ id: container.id, profile })
+      .then((result) => {
+        if (result?.status === 'Failed') {
+          setInstallMessage(`Could not set profile: ${result.error}`);
+          return;
+        }
+        setSelectedApp((current) => current?.id === container.id ? { ...current, profile: result.profile, networkEnabled: result.networkEnabled } : current);
+        setInstallMessage(profile === 'locked'
+          ? `${container.name} uses the locked profile: offline VM, container without capabilities. Takes effect at Reset.`
+          : `${container.name} uses the ${profile} profile.`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setInstallMessage(`Could not set profile: ${error?.message || 'Unknown error.'}`);
+      });
   }
 
   function handleViewLogs(container) {
@@ -162,7 +269,7 @@ export default function ContainerManager() {
 
     runContainer(container)
       .then(async (result) => {
-        if (!result || result.status !== 'Running' || !result.pid) {
+        if (!result || result.status !== 'Running' || (!result.pid && !result.guestPid)) {
           setActiveSession(null);
           const reason = result?.error || result?.reason || 'RunContainer did not confirm that an app process started.';
           setInstallMessage(`${container.name} was not launched: ${reason}`);
@@ -173,7 +280,7 @@ export default function ContainerManager() {
 
         updateContainerStatus(container.id, result.status);
         setActiveSession({ ...container, ...result, status: 'Running', embedded: false });
-        setInstallMessage(container && result?.guestPid ? `${container.name} is running inside its VM (guest PID ${result.guestPid}). ${result.reason || ''}` : `${container.name} is running (PID ${result.pid}). ${result.reason || ''}`);
+        setInstallMessage(result?.guestPid ? `${container.name} is running inside its VM (guest PID ${result.guestPid}). ${result.reason || ''}` : `${container.name} is running (PID ${result.pid}). ${result.reason || ''}`);
         refreshContainers();
       })
       .catch((error) => {
@@ -326,7 +433,7 @@ export default function ContainerManager() {
         <div className="apps-panel session-shell">
           <div className="panel-title-row">
             <div>
-              <h2>{activeSession.status === 'Launching' ? 'Starting app' : activeSession.status === 'Running' ? (activeSession.isolated ? 'App running isolated' : 'App running') : 'App stopped'}</h2>
+              <h2>{activeSession.status === 'Launching' ? 'Starting app' : activeSession.status === 'Running' ? (activeSession.isolated ? 'App running isolated' : 'App running') : activeSession.status === 'Unknown' ? 'App state unknown' : 'App stopped'}</h2>
               <span className="muted">{activeSession.name} • {isolationLabel(activeSession) || 'RunContainer app profile'}</span>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
@@ -339,19 +446,23 @@ export default function ContainerManager() {
                   {activeSession.status === 'Launching'
                     ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
-                      ? `Running${activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. ${activeSession.windowHosted ? 'Shown inside RunContainer (visual only).' : 'The app opens in its own Windows window.'}`
+                      ? `Running${activeSession.guestPid ? ` • guest PID ${activeSession.guestPid} in VM ${activeSession.hypervVm || ''}` : activeSession.pid ? ` • PID ${activeSession.pid}` : ''}. ${activeSession.windowHosted ? 'Shown inside RunContainer (visual only, experimental).' : (activeSession.hypervVm ? 'View it through the guest display button.' : 'The app opens in its own Windows window.')}`
                       : 'All processes for this app have exited.'}
                 </div>
-                {activeSession.status === 'Running' && (
+                {(activeSession.status === 'Running' || activeSession.status === 'Unknown') && (
                   <div className="muted">
-                    {activeSession.isolated
-                      ? `Isolation: ${activeSession.activeEngine === 'hyperv' || activeSession.isolationLevel === 'vm' ? `VM ${activeSession.hypervVm || ''} (guest PID ${activeSession.guestPid ?? '—'}, verified in-guest)` : 'AppContainer mode (NOT a VM)'}.`
-                      : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
+                    {activeSession.status === 'Unknown'
+                      ? `State unknown${activeSession.statusNote ? `: ${activeSession.statusNote}` : '. Run reconciles, Stop attempts a clean stop, Reset reboots the guest.'}`
+                      : activeSession.isolated
+                        ? `Isolation: ${activeSession.activeEngine === 'hyperv' || activeSession.isolationLevel === 'vm' ? `VM ${activeSession.hypervVm || ''} (guest PID ${activeSession.guestPid ?? '—'}, verified in-guest)` : 'AppContainer mode (NOT a VM)'}.`
+                        : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
                   </div>
                 )}
               </div>
               <div className="detail-actions">
                 {activeSession.status === 'Running' && <button className="settings-button ghost" onClick={() => handleKill(activeSession)}>Stop app</button>}
+                {(activeSession.status === 'Running' || activeSession.status === 'Unknown') && <button className="settings-button ghost" onClick={() => handleReset(activeSession)}>Reset</button>}
+                {(activeSession.hypervVm || activeSession.activeEngine === 'hyperv') && <button className="settings-button ghost" onClick={() => handleOpenDisplay(activeSession)}>Guest display</button>}
                 <button className="settings-button" onClick={() => setActiveSession(null)}>Back to app list</button>
                 {deletingId === activeSession.id
                   ? <button className="settings-button ghost" onClick={() => handleCancelDelete(activeSession)}>Cancel delete</button>
@@ -387,7 +498,8 @@ export default function ContainerManager() {
                       <div className="container-name">{container.name || container.metadata?.title || container.metadata?.originalName || 'Installed app'}</div>
                       <div className="container-status">
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
-                        {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}
+                        {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
+                        {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • VM disk missing' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
                         {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : ' • Hyper-V VM (required)'}
                       </div>
@@ -398,11 +510,12 @@ export default function ContainerManager() {
                     <button className="settings-button" onClick={() => setSelectedApp(container)}>Manage</button>
                     <button className="settings-button" onClick={() => handleRun(container)}>Run</button>
                     <button className="settings-button ghost" onClick={() => handleKill(container)}>Close</button>
+                    <button className="settings-button ghost" onClick={() => handleReset(container)}>Reset</button>
                     {deletingId === container.id
                       ? <button className="settings-button ghost" onClick={() => handleCancelDelete(container)}>Cancel delete</button>
                       : <button className="settings-button ghost" onClick={() => handleDelete(container)}>Delete</button>}
                     <button className="settings-button ghost" onClick={() => handleDuplicate(container)}>Duplicate</button>
-                    <button className="settings-button ghost" onClick={() => handleExport(container)}>Export</button>
+                    <button className="settings-button ghost" onClick={() => handleExport(container)}>Export info</button>
                     <button className="settings-button ghost" onClick={() => handleViewLogs(container)}>Logs</button>
                   </div>
                 </div>
@@ -431,10 +544,100 @@ export default function ContainerManager() {
         </div>
       )}
 
+      {activeTab === "Tweaks" && (
+        <div className="placeholder-panel">
+          <h3>Tweaks</h3>
+          <p>Per-app launch arguments and VM resources. Everything here is enforced by the backend; invalid values are rejected, never stored.</p>
+          <div className="source-form">
+            <label className="muted" htmlFor="tweak-app">App</label>
+            <select
+              id="tweak-app"
+              value={tweakAppId || ""}
+              onChange={(event) => {
+                const id = event.target.value || null;
+                setTweakAppId(id);
+                const picked = appContainers.find((entry) => entry.id === id);
+                if (picked) {
+                  setTweakArgs(picked.launchArgs || "");
+                  setTweakMemory(String(picked.vmMemoryMB || 4096));
+                  setTweakCpu(String(picked.vmCpuCount || 2));
+                  setTweakNetwork(picked.networkEnabled !== false);
+                }
+              }}
+            >
+              <option value="">Select an app…</option>
+              {appContainers.map((entry) => (
+                <option key={entry.id} value={entry.id}>{entry.name || entry.id}</option>
+              ))}
+            </select>
+            <label className="muted" htmlFor="tweak-args">Launch arguments (passed to the app inside its VM)</label>
+            <input id="tweak-args" type="text" placeholder="e.g. --safe-mode" value={tweakArgs} onChange={(event) => setTweakArgs(event.target.value)} />
+            <label className="muted" htmlFor="tweak-memory">VM memory (MB, 512–32768)</label>
+            <input id="tweak-memory" type="number" min="512" max="32768" value={tweakMemory} onChange={(event) => setTweakMemory(event.target.value)} />
+            <label className="muted" htmlFor="tweak-cpu">VM CPUs (1–16)</label>
+            <input id="tweak-cpu" type="number" min="1" max="16" value={tweakCpu} onChange={(event) => setTweakCpu(event.target.value)} />
+            <label className="muted"><input type="checkbox" checked={tweakNetwork} onChange={(event) => setTweakNetwork(event.target.checked)} /> Guest networking (off = offline VM)</label>
+            <div className="detail-actions">
+              <button className="settings-button" onClick={() => handleSaveTweaks(appContainers.find((entry) => entry.id === tweakAppId))} disabled={!tweakAppId}>Save tweaks</button>
+            </div>
+            <p className="muted">CPU, memory, and network changes apply when the VM is Off — use Reset afterwards.</p>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "Profiles" && (
+        <div className="placeholder-panel">
+          <h3>Profiles</h3>
+          <p>Isolation presets with real, enforced settings. Assign one per app below.</p>
+          <div className="profile-list">
+            <div className="profile-card"><strong>default</strong><span>Online VM (network adapter attached) • AppContainer gets internetClient.</span></div>
+            <div className="profile-card"><strong>relaxed</strong><span>Online VM • wider container capabilities (internetClient + privateNetworkClientServer).</span></div>
+            <div className="profile-card"><strong>locked</strong><span>Offline VM (adapters removed) • container without capabilities. Needs Reset to take effect on a running VM.</span></div>
+          </div>
+          <div className="container-list">
+            {appContainers.length === 0 ? (
+              <div className="empty-state">No apps installed yet.</div>
+            ) : (
+              appContainers.map((container) => (
+                <div key={container.id} className="container-item">
+                  <div className="container-info">
+                    <div>
+                      <div className="container-name">{container.name || 'Installed app'}</div>
+                      <div className="container-status">Profile: {container.profile || 'default'}{container.networkEnabled === false ? ' • offline' : ''}</div>
+                    </div>
+                  </div>
+                  <div className="container-actions">
+                    {['default', 'relaxed', 'locked'].map((option) => (
+                      <button key={option} className={`settings-button ${(container.profile || 'default') === option ? '' : 'ghost'}`} onClick={() => handleSetProfile(container, option)}>{option}</button>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {activeTab === "Settings" && (
         <div className="placeholder-panel">
           <h3>Settings</h3>
           <p>How RunContainer isolates each app.</p>
+          <div className="detail-actions">
+            <button className="settings-button" onClick={refreshHypervStatus}>Check Hyper-V readiness</button>
+            <button className="settings-button ghost" onClick={handleProvisionCredential}>Provision guest credential</button>
+          </div>
+          {hypervStatus && (
+            <div className="profile-list">
+              <div className={`profile-card ${hypervStatus.ready ? 'active' : ''}`}>
+                <strong>Hyper-V readiness: {hypervStatus.ready ? 'ready' : 'not ready'}</strong>
+                <span>
+                  {hypervStatus.ready
+                    ? `VMs can be provisioned. Base image: ${hypervStatus.baseImage || '(RUNCONTAINER_HYPERV_BASE_IMAGE not set)'}.`
+                    : `Missing: ${(hypervStatus.missing || []).join(' ')}`}
+                </span>
+              </div>
+            </div>
+          )}
           <div className="profile-list">
             <div className="profile-card active">
               <strong>VM isolation (required, free, no Sandboxie)</strong>
@@ -533,25 +736,41 @@ export default function ContainerManager() {
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM (required)</button>
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer (optional, not a VM)</button>
                 </div>
+                <p className="muted">Profile: {selectedApp.profile || 'default'}. Change it in the Profiles tab.</p>
               </div>
               <div>
-                <h4>Window</h4>
-                <p className="muted">
-                  {selectedApp.windowHosting === false
-                    ? 'The app opens in its own Windows window.'
-                    : 'RunContainer hosts the app window inside its own window. This is presentation only and adds no isolation; if Windows refuses the re-parent, the app opens in its own window instead.'}
-                </p>
-                <div className="detail-actions">
-                  {selectedApp.windowHosting === false
-                    ? <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, true)}>Show inside RunContainer</button>
-                    : <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, false)}>Open in its own window</button>}
-                </div>
+                <h4>Display</h4>
+                {(selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv' || selectedApp.isolationEngine !== 'appcontainer') ? (
+                  <div>
+                    <p className="muted">VM apps are viewed through the supported guest console (VMConnect): a separate display window, not embedding. Guest windows cannot appear inside RunContainer&apos;s window.</p>
+                    <div className="detail-actions">
+                      <button className="settings-button ghost" onClick={() => handleOpenDisplay(selectedApp)}>Open guest display</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="muted">
+                      {selectedApp.windowHosting === false
+                        ? 'The app opens in its own Windows window (experimental hosting is off).'
+                        : 'Experimental: RunContainer tries to host the app window inside its own window. Presentation only, adds no isolation, often refused by Windows.'}
+                    </p>
+                    <div className="detail-actions">
+                      {selectedApp.windowHosting === false
+                        ? <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, true)}>Try experimental hosting</button>
+                        : <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, false)}>Open in its own window</button>}
+                    </div>
+                  </div>
+                )}
               </div>
               <div>
                 <h4>Actions</h4>
                 <div className="detail-actions">
                   <button className="settings-button" onClick={() => handleRun(selectedApp)}>Run</button>
                   <button className="settings-button ghost" onClick={() => handleKill(selectedApp)}>Close</button>
+                  <button className="settings-button ghost" onClick={() => handleReset(selectedApp)}>Reset (reboot guest, keep data)</button>
+                  {(selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv') && (
+                    <button className="settings-button ghost" onClick={() => handleOpenDisplay(selectedApp)}>Open guest display</button>
+                  )}
                   {deletingId === selectedApp.id
                     ? <button className="settings-button ghost" onClick={() => handleCancelDelete(selectedApp)}>Cancel delete</button>
                     : <button className="settings-button ghost" onClick={() => handleDelete(selectedApp)}>Delete</button>}
