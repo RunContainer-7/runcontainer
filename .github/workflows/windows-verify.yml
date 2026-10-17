@@ -1,10 +1,12 @@
 name: Windows verification
 
 # The development VM is Linux, so Windows behaviour cannot be checked there. This workflow
-# runs the same checks on a real Windows runner: the unit tests, plus
-# scripts/windows-verify.js, which creates a real AppContainer, verifies the container token,
-# removes the profile, and exercises the sandbox deletion path (read-only files, a DENY ACL,
-# a path longer than MAX_PATH and an exclusive file lock).
+# runs on a real Windows runner: unit tests, plus scripts/windows-verify.js
+# (AppContainer token checks, host deletion cases, and a Hyper-V PROBE that is
+# read-only plus static builder audits). windows-latest has NO nested
+# virtualization, so this workflow NEVER creates a Hyper-V VM and a green run
+# does NOT prove live-VM behavior. Live-VM proof is scripts/windows-hyperv-full.js,
+# run manually on a capable host (see README provisioning).
 
 on:
   push:
@@ -29,7 +31,7 @@ jobs:
       - name: Unit tests
         run: npm test -- --watchAll=false
 
-      - name: Isolation and deletion checks on real Windows
+      - name: Isolation and deletion checks on real Windows (no VM creation on CI)
         run: node scripts/windows-verify.js
 
       - name: Production build

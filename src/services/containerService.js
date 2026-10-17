@@ -85,6 +85,10 @@ export async function getHyperVStatus() {
   return requireIpc('Checking Hyper-V').invoke('hyperv-status');
 }
 
+export async function provisionGuestCredential() {
+  return requireIpc('Provisioning guest credential').invoke('hyperv-provision-credential');
+}
+
 export async function setWindowHosting(container) {
   return requireIpc('Changing window hosting').invoke('set-window-hosting', container);
 }

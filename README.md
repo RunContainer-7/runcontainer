@@ -97,24 +97,27 @@ audited against three options:
   isolation and is no longer a launch path. None of these is interchangeable with a
   full VM, and RunContainer does not pretend otherwise.
 
-Conclusion: AppContainer stays for compatible apps; arbitrary software needs the
-Hyper-V tier. Both are free and need no third-party paid feature. Sandboxie is not
-used as a backend (legacy boxes are only best-effort cleaned on Delete); unguarded
+Required path: the Hyper-V VM. AppContainer stays ONLY as an explicit per-app
+opt-in for compatible apps, labeled as NOT a VM and never used as a fallback.
+Both are free with no third-party paid feature. Sandboxie is not used as a
+backend (legacy boxes are only best-effort cleaned on Delete); unguarded
 execution was removed entirely.
 
 ## How isolation actually works now
 
-- **AppContainer (compatible apps).** Profile per app (`RunContainer.App.<id>`), folder
-  ACL grants (modify on the environment, read/execute on ancestors inside
-  RunContainer's own root only), `internetClient` capability, verified token before
-  reporting. Failure refuses the launch with the Windows error; admin-requiring apps
-  are directed to Hyper-V instead of any unguarded mode.
-- **Hyper-V VM (arbitrary software).** Per-environment VM (`RunContainer-<appId>`,
-  differencing VHDX under the environment's `hyperv/` folder). Install: the installer
-  is staged into the environment, copied into the guest, and executed in the guest.
-  Run: the app is launched in the guest via PowerShell Direct and the guest process is
-  confirmed. Stop ends the VM (disk kept); Delete stops the VM, removes the VM +
-  VHDX, then removes host files and the AppContainer profile. No host fallback.
+- **Hyper-V VM (REQUIRED path).** Per-environment VM (`RunContainer-<appId>`,
+  differencing VHDX under the environment's `hyperv/` folder, shared base image
+  never modified). Install: the installer is staged, copied into the guest
+  (`Copy-VMFile`, Guest Service Interface), executed in the guest via PowerShell
+  Direct with the provisioned guest credential, and its REAL exit code is waited
+  on; the installed guest path is recorded. Run: the app launches in the guest,
+  the guest PID is verified in the guest process list, AND the host process table
+  is checked for strays (any host execution fails the launch closed). Stop ends
+  the guest app (VM kept running for fast relaunch); Delete does the ordered
+  lifecycle below. Any VM failure refuses — never AppContainer, never host.
+- **AppContainer (OPTIONAL, not a VM, explicit opt-in only).** Profile per app,
+  verified token before reporting. Compatible apps only; never selected when VM
+  isolation is required and never a fallback.
 - **Installers run inside the environment.** `install-in-environment` stages the
   installer into the environment and runs it under the same boundary as the app.
   Installer-spawned children are persisted (`knownPids` + parent-PID lineage), so a
@@ -130,18 +133,21 @@ Do not claim it works until `scripts/windows-verify.js` + manual testing prove i
 
 ### Deleting an environment
 
-`Delete` stops only that environment's processes (executables under its folder, the
-persisted launch/installer PIDs, and their descendants — bystanders that merely
-mention the path are never touched), asks to close before forcing, stops/removes the
-Hyper-V VM if present, repairs ACLs (root reset, ownership, inherited ACLs,
-full-control grant) and read-only flags, and removes the tree via the `\\?\`
-extended path. Locked files are reported with the holding process where identifiable;
-an unrelated lock reports the OS error. The record is removed only after the folder
-is confirmed gone; container-profile removal (`DeleteAppContainerProfile`) is
-best-effort after processes stop and its warning is surfaced, never silent.
+`Delete` on a VM environment is ordered and verified: launches blocked
+(`deleteJobs` guard) → guest app stopped in-guest (graceful close, 15s, then
+force) → graceful guest shutdown with 120s wait for Hyper-V `Off` → power-off
+escalation ONLY after timeout (and re-verified `Off` before touching disks) →
+`Remove-VM` config with absence verification → remove ONLY this environment's
+differencing VHDX (exact-name + inside-env + not-the-base-image validation, 5
+unlink retries for the vmms handle window, absence verified) → host files via
+`\\?\` extended path → record removed. Success is reported only when the VM
+is absent AND the intended files are absent; the base image and sibling envs are
+re-verified intact. A leftover lock reports the exact path, error, and recovery
+(close antivirus/backup/indexer, run Delete again) — this is why deletion no
+longer "locks up Windows": the VM is off and its disk detached before any file
+is removed, instead of deleting a live VHDX out from under vmms.
 
-Admin-requiring software cannot run in an AppContainer — use the Hyper-V tier. There
-is no unguarded mode anymore.
+There is no unguarded mode. There is no Sandboxie path.
 
 ## Versioning
 
@@ -159,11 +165,58 @@ Nothing in the isolation or deletion paths can be verified on Linux. On a Window
 node scripts/windows-verify.js
 ```
 
-It needs no administrator rights and only touches its own temp folder. It checks: launchers parse; AppContainer launch + verified token + profile delete; boundary evidence (sandbox grants the SID, outside files do not); fail-closed bad launch + refused profile/sandboxie selection; scoping (app stopped, bystander spared); installer lineage tracked after the installer exits; deletion (read-only, DENY-ACL, long path, locked-then-released); and a Hyper-V readiness report (informational on CI, which lacks nested virtualization).
+`scripts/windows-verify.js` needs no administrator rights and only touches its own
+temp folder: launchers parse; AppContainer launch + verified token + profile
+delete; boundary evidence; fail-closed selection; scoping; installer lineage;
+host deletion cases; and a Hyper-V PROBE (read-only capability report + static
+audits that builders are credential-wired, never assign `$pid`, shut down
+graceful-first, select VM-first). CI (`windows-latest`) has no nested
+virtualization, so it CANNOT create VMs — the probe passing there proves the
+contract statically, not a live VM.
 
-The same checks run in CI on a real Windows runner via
-`.github/workflows/windows-verify.yml` (unit tests, `scripts/windows-verify.js`, production
-build).
+Live-VM proof runs on a capable host only:
+
+```
+# elevated PowerShell, base image + credential provisioned (see below)
+node scripts/windows-hyperv-full.js
+```
+
+It creates two VMs from the base image, proves in-guest installer execution
+(guest-written marker) and in-guest launch (guest PID in-guest, payload absent
+on host), deletes one environment in order (VM absent, env disk absent, sibling
++ base intact), exercises a locked host file, and cleans up.
+
+## Provisioning a host for VM isolation (do this on your Windows PC)
+
+1. **Host OS:** Windows 10/11 Pro, Enterprise, or Education (Home has no
+   Hyper-V). Firmware virtualization on (Intel VT-x / AMD-V, SLAT).
+2. **Enable Hyper-V** (elevated): `DISM /Online /Enable-Feature /All
+   /FeatureName:Microsoft-Hyper-V`, reboot, ensure `vmms` is Running.
+3. **Base image:** build a reference VM (Gen 2, Windows 10/11 Pro/Enterprise),
+   install guest Windows + updates + Hyper-V Integration Services, create the
+   local admin account the guest credential will use, `sysprep /generalize
+   /oobe /shutdown`, then copy its VHDX aside as the read-only base, e.g.
+   `C:\VMs\base\win11-sysprepped.vhdx`. Set
+   `RUNCONTAINER_HYPERV_BASE_IMAGE` to that path. Keep one licensed guest per
+   base image: each environment is a differencing child of it, and guest
+   Windows licensing follows your Microsoft license terms (check them for
+   virtualization use).
+4. **Guest credential:** RunContainer Settings → provision (or the
+   `hyperv-provision-credential` IPC): shows `Get-Credential` once and stores
+   it DPAPI-encrypted at `%APPDATA%\RunContainer\hyperv-guest-cred.xml`
+   (same user, same host only). PowerShell Direct requires it.
+5. **Network:** RunContainer ensures an Internal switch (`RunContainer-NAT`)
+   idempotently; guest file copy and PowerShell Direct do not need a NAT, and
+   no host folder sharing is configured (verify: no `New-SmbShare`/enhanced
+   session file sharing is created by these scripts).
+6. **Per environment:** ~20–40 GB disk for the differencing VHDX growth +
+   4 GB RAM default. Delete removes the VM config + env VHDX only.
+
+No promise is made that an arbitrary installer works unmodified in the guest —
+it runs a real Windows, so most do, but guest requirements (drivers,
+antivirus, licensing) are the app's own. Window hosting (re-parenting guest
+app windows into Electron) is NOT implemented as guest UI integration and is
+not claimed; the app's windows appear via the VM's normal display path.
 
 ## Contributing
 

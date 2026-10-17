@@ -66,7 +66,7 @@ describe("ContainerManager", () => {
   it("shows settings controls in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Isolation engines");
+    expect(container.textContent).toContain("VM isolation");
     expect(container.textContent).toContain("Windows inside RunContainer");
     expect(container.textContent).toContain("App storage");
     expect(container.textContent).not.toContain("Auto-isolate APPDATA");
@@ -75,14 +75,12 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("names both real isolation engines and refuses unguarded mode", () => {
+  it("requires the VM path and marks AppContainer as not a VM", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Isolation engines");
-    expect(container.textContent).toContain("AppContainer");
-    expect(container.textContent).toContain("Hyper-V VM");
-    expect(container.textContent).toContain("No unguarded mode");
-    expect(container.textContent).toContain("never runs the app unguarded");
+    expect(container.textContent).toContain("VM isolation");
+    expect(container.textContent).toContain("Hyper-V");
+    expect(container.textContent).toContain("NOT a VM");
     expect(container.textContent).toContain("no Sandboxie");
     expect(container.textContent).not.toContain("Sandboxie-Plus box");
     expect(container.textContent).not.toContain("Run unguarded instead");

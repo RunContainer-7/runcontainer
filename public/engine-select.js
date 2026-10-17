@@ -1,45 +1,42 @@
-// Fail-closed engine selection. Pure function so it can be unit tested.
-// Engines: 'appcontainer' (lightweight, compatible apps only), 'hyperv' (full VM
-// for arbitrary installers). There is deliberately no 'profile' or 'sandboxie'
-// launch path: unisolated execution is never selected, even on request.
+// VM-first engine selection. Pure function so it can be unit tested.
+//
+// Required path: 'hyperv' — a real guest VM. AppContainer remains ONLY as an
+// explicitly chosen optional mode ('appcontainer') and is labeled as NOT a VM.
+// There is no 'profile' or 'sandboxie' path: unisolated execution is never
+// selected, even on request. A VM request with Hyper-V not ready yields
+// 'hyperv-unavailable' (fail closed), never a silent AppContainer fallback.
 function selectIsolationEngine({ platform = process.platform, appRecord = {}, hypervReady = false } = {}) {
   if (platform !== 'win32') {
     return { engine: 'unavailable', reason: 'Isolation requires Windows 10/11.' };
   }
-  // Explicit legacy opt-out must not silently downgrade: refuse instead.
   if (appRecord.isolationEngine === 'profile') {
     return {
       engine: 'refused',
-      reason: 'This app is marked "unguarded profile mode", which is not a security boundary. RunContainer refuses to launch it unisolated. Clear that setting to use AppContainer, or use a Hyper-V VM for software that cannot run in a container.',
+      reason: 'This app is marked "unguarded profile mode", which is not a security boundary. RunContainer refuses to launch it unisolated. Choose Hyper-V VM isolation, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
     };
   }
   if (appRecord.isolationEngine === 'sandboxie' || appRecord.launchMode === 'sandboxie') {
     return {
       engine: 'refused',
-      reason: 'Sandboxie is not an allowed isolation backend for RunContainer. Choose AppContainer (compatible apps) or a Hyper-V VM (arbitrary software) instead.',
+      reason: 'Sandboxie is not an allowed isolation backend for RunContainer. Choose Hyper-V VM isolation, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
     };
   }
-  // Apps flagged as needing a full VM (admin installers, drivers/services).
-  if (appRecord.requiresVm) {
-    if (!hypervReady) {
-      return {
-        engine: 'hyperv-unavailable',
-        reason: 'This app needs a full virtual machine (administrator installer, driver, or service), but Hyper-V is not ready. Enable Hyper-V on Windows 10/11 Pro/Enterprise/Education with virtualization enabled in firmware. RunContainer did not launch anything.',
-      };
-    }
-    return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V.' };
+  // Explicit opt-in to the lightweight, non-VM mode. Labeled accurately below.
+  if (appRecord.isolationEngine === 'appcontainer' && !appRecord.requiresVm && !appRecord.preferVm) {
+    return { engine: 'appcontainer', reason: 'Optional lightweight mode: Windows AppContainer with verified container token. This is NOT a virtual machine and cannot run administrator installers, drivers, or services.' };
   }
-  // Default: AppContainer for compatible apps; Hyper-V when explicitly preferred.
-  if (appRecord.preferVm) {
-    if (!hypervReady) {
-      return {
-        engine: 'hyperv-unavailable',
-        reason: 'Hyper-V VM was requested but Hyper-V is not ready. Enable Hyper-V (Pro/Enterprise/Education + virtualization in firmware) or clear the VM preference to try AppContainer for compatible apps.',
-      };
-    }
-    return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (explicitly preferred).' };
+  // Default and every VM-needing/preferring record: the VM path. Fail closed
+  // when Hyper-V is not ready — never fall back to AppContainer silently.
+  if (!hypervReady) {
+    const why = appRecord.requiresVm || appRecord.preferVm || appRecord.isolationEngine === 'hyperv'
+      ? 'Hyper-V VM isolation was requested'
+      : 'VM isolation is the required execution path';
+    return {
+      engine: 'hyperv-unavailable',
+      reason: `${why}, but Hyper-V is not ready. Enable Hyper-V on Windows 10/11 Pro/Enterprise/Education with virtualization enabled in firmware, provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.`,
+    };
   }
-  return { engine: 'appcontainer', reason: 'Windows AppContainer with verified container token.' };
+  return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (guest OS boundary).' };
 }
 
 module.exports = { selectIsolationEngine };

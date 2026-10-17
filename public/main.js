@@ -520,43 +520,103 @@ async function removeSandboxDirectory(sandboxRoot, { shouldAbort = () => false, 
   }
 }
 
-// Full-VM isolation via Hyper-V. The VM is the security boundary: the app (and any
-// installer) executes inside the guest OS, never on the host. Host launch verifies
-// Hyper-V readiness, ensures the per-environment VM exists, starts it, copies the app
-// into the guest, launches it via PowerShell Direct, and confirms the guest process.
-// Any failure refuses to launch: there is no host fallback.
-async function runWithHyperV(appRecord, sandboxRoot, logPath) {
-  const name = vmName(appRecord.id);
+// Shared VM readiness: prereqs, base image, guest credential, reconcile VM
+// existence via Get-VM, ensure switch, create or re-attach, start, wait for
+// PowerShell Direct readiness, enable file-copy service. Returns { hv, files,
+// credFile, baseImage }. Throws fail-closed on any problem.
+async function ensureHyperVGuestReady(appRecord, sandboxRoot, logPath) {
+  const hv = require('./hyperv-runtime');
+  const readiness = await checkHyperVReady();
+  if (!readiness.ready) throw new Error(describeHyperVMissing(readiness.missing));
+  const baseImage = hyperVBaseImagePath();
+  if (!baseImage || !fs.existsSync(baseImage)) {
+    throw new Error('VM isolation needs a provisioned Windows base image: set RUNCONTAINER_HYPERV_BASE_IMAGE to a sysprepped Windows 10/11 Pro/Enterprise VHDX (Generation 2) and provision the guest credential (see Settings). Nothing was launched on the host.');
+  }
+  const credFile = guestCredentialFile();
+  if (!fs.existsSync(credFile)) {
+    throw new Error(`The guest credential is not provisioned (missing ${credFile}). Provision it once from Settings: it runs Get-Credential for the guest local administrator and stores it DPAPI-encrypted. PowerShell Direct requires guest credentials; without them nothing is launched.`);
+  }
+  const hvDir = path.join(sandboxRoot, 'hyperv');
+  ensureDirectory(hvDir);
+  const files = hv.vmFileNames(appRecord.id, hvDir);
+  const vhdCheck = hv.validateDeletionTarget({ candidate: files.differencingVhdPath, envDir: hvDir, baseImagePath: baseImage });
+  if (!vhdCheck.ok) throw new Error(`Unsafe environment disk location: ${vhdCheck.reason}`);
+  let vmInfo = await runHyperVScript(hv.buildGetVmScript(files.vmName), logPath);
+  const vhdExists = fs.existsSync(files.differencingVhdPath);
+  if (!vmInfo.exists && vhdExists) {
+    appendLog(logPath, `VM config for ${files.vmName} is missing but its disk exists; re-attaching the disk without touching its data.`);
+    await runHyperVScript(hv.buildEnsureSwitchScript({ switchName: files.switchName }), logPath);
+    await runHyperVScript(hv.buildCreateVmFromExistingVhdScript({ vmName: files.vmName, existingVhdPath: files.differencingVhdPath, switchName: files.switchName }), logPath);
+    vmInfo = await runHyperVScript(hv.buildGetVmScript(files.vmName), logPath);
+  }
+  if (!vmInfo.exists) {
+    appendLog(logPath, `Creating Hyper-V VM ${files.vmName} (differencing disk off the shared base image; base image is never modified).`);
+    await runHyperVScript(hv.buildEnsureSwitchScript({ switchName: files.switchName }), logPath);
+    await runHyperVScript(hv.buildCreateVmScript({ vmName: files.vmName, differencingVhdPath: files.differencingVhdPath, baseImagePath: baseImage, switchName: files.switchName }), logPath);
+    vmInfo = await runHyperVScript(hv.buildGetVmScript(files.vmName), logPath);
+    if (!vmInfo.exists) throw new Error(`Hyper-V did not confirm VM ${files.vmName} exists after creation.`);
+  }
+  if (vmInfo.state !== 'Running') {
+    appendLog(logPath, `Starting VM ${files.vmName} (state: ${vmInfo.state || 'unknown'}).`);
+    await runHyperVScript(hv.buildStartVmScript(files.vmName), logPath);
+  } else {
+    appendLog(logPath, `VM ${files.vmName} is already running; reusing it (no reboot).`);
+  }
+  appendLog(logPath, 'Waiting for the guest OS to accept PowerShell Direct commands (this proves boot, not just VM state).');
+  await runHyperVScript(hv.buildWaitForGuestReadyScript({ vm: files.vmName, credFile, timeoutSec: 300 }), logPath);
   try {
-    const readiness = await checkHyperVReady();
-    if (!readiness.ready) {
-      throw new Error(describeHyperVMissing(readiness.missing));
-    }
-    const baseImage = hyperVBaseImagePath();
-    if (!baseImage || !fs.existsSync(baseImage)) {
-      throw new Error('VM isolation needs a Windows base image: set RUNCONTAINER_HYPERV_BASE_IMAGE to a sysprepped Windows 10/11 Pro/Enterprise VHDX (Generation 2). Copy your installer into the environment first, then Run. Nothing was launched on the host.');
-    }
-    const hvDir = path.join(sandboxRoot, 'hyperv');
-    ensureDirectory(hvDir);
-    const files = vmFileNames(appRecord.id, hvDir);
-    if (!fs.existsSync(files.differencingVhdPath)) {
-      appendLog(logPath, `Creating Hyper-V VM ${files.vmName} (differencing disk, ${files.switchName}).`);
-      const { execSync } = require('child_process');
-      const createScript = require('./hyperv-runtime').buildCreateVmScript({ vmName: files.vmName, differencingVhdPath: files.differencingVhdPath, baseImagePath: baseImage, switchName: files.switchName });
-      await runHyperVScript(createScript, logPath);
-    }
-    await runHyperVScript(require('./hyperv-runtime').buildStartVmScript(files.vmName), logPath);
+    await runHyperVScript(hv.buildEnableGuestServicesScript(files.vmName), logPath);
+  } catch (svcError) {
+    appendLog(logPath, `Guest file-copy service could not be confirmed: ${svcError.message}`);
+  }
+  return { hv, files, credFile, baseImage };
+}
+
+// Full-VM isolation via Hyper-V. Ordered lifecycle, every step verified:
+// prereqs -> base image -> guest credential -> reconcile VM existence (Get-VM is
+// the source of truth, not the filesystem) -> ensure switch -> create (or
+// re-attach orphaned disk) -> start -> wait for PowerShell Direct readiness ->
+// enable file-copy service -> copy into guest -> launch in guest -> verify the
+// guest process AND that nothing runs on the host. Any failure refuses: no
+// AppContainer fallback, no host process, ever.
+async function runWithHyperV(appRecord, sandboxRoot, logPath) {
+  const hv = require('./hyperv-runtime');
+  if (deleteJobs.has(appRecord.id)) {
+    return failedLaunch(appRecord, 'Deletion is in progress for this environment; launches are blocked until it finishes. Nothing was launched.');
+  }
+  try {
+    const { files, credFile } = await ensureHyperVGuestReady(appRecord, sandboxRoot, logPath);
+
     const guestDir = `C:\RunContainer\${appRecord.id}`;
-    const guestExe = `C:\RunContainer\${appRecord.id}\${path.win32.basename(appRecord.source)}`;
-    const installScript = require('./hyperv-runtime').buildInstallInGuestScript({ vm: files.vmName, hostInstallerPath: appRecord.source, guestInstallerPath: guestExe, installArgs: '' });
-    appendLog(logPath, `Copying app into VM ${files.vmName} and starting it inside the guest (installer runs inside the VM, never on the host).`);
-    await runHyperVScript(installScript, logPath);
-    const launchScript = require('./hyperv-runtime').buildLaunchInGuestScript({ vm: files.vmName, guestExePath: guestExe, workingDir: `C:\RunContainer\${appRecord.id}` });
-    const launched = await runHyperVScript(launchScript, logPath);
+    const guestExe = appRecord.installedExeGuestPath || `C:\RunContainer\${appRecord.id}\${path.win32.basename(appRecord.source)}`;
+    appendLog(logPath, `Copying ${path.basename(appRecord.source)} into the guest at ${guestExe} (host-to-guest file copy; the binary never executes on the host).`);
+    await runHyperVScript(hv.buildCopyToGuestScript({ vm: files.vmName, hostPath: appRecord.source, guestPath: guestExe }), logPath);
+    const existsInGuest = await runHyperVScript(hv.buildGuestFileExistsScript({ vm: files.vmName, credFile, guestPath: guestExe }), logPath);
+    if (!existsInGuest.exists) throw new Error(`The guest did not confirm ${guestExe} after copy. Nothing was started.`);
+
+    appendLog(logPath, `Launching inside the guest (never on the host): ${guestExe}`);
+    const launched = await runHyperVScript(hv.buildLaunchInGuestScript({ vm: files.vmName, credFile, guestExePath: guestExe, workingDir: guestDir }), logPath);
     const guestPid = Number(launched.guestPid);
-    if (!Number.isSafeInteger(guestPid) || guestPid <= 0) {
-      throw new Error('The VM did not confirm a guest process. The app was not reported as running.');
+    if (!Number.isSafeInteger(guestPid) || guestPid <= 0) throw new Error('The guest did not confirm a process id. The app was not reported as running.');
+
+    // Independent guest-state evidence: the exe name is alive in the guest...
+    const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+    const query = await runHyperVScript(hv.buildGuestProcessQueryScript({ vm: files.vmName, credFile, exeName: exeBase }), logPath);
+    const guestPids = Array.isArray(query.pids) ? query.pids.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
+    if (!guestPids.includes(guestPid)) throw new Error(`Guest PID ${guestPid} is not visible in the guest process list (${guestPids.join(', ') || 'empty'}). The launch is not reported as running.`);
+    // ...and nothing from this environment runs on the HOST.
+    let hostStrays = [];
+    try {
+      hostStrays = findAppProcessIds(await listProcessTable(), sandboxRoot, []);
+    } catch (tableError) {
+      appendLog(logPath, `Host process table could not be read after guest launch: ${tableError.message}`);
     }
+    if (hostStrays.length > 0) {
+      appendLog(logPath, `Unisolated host strays detected (PIDs ${hostStrays.join(', ')}); stopping them and refusing the launch.`);
+      await stopProcessesUnder(sandboxRoot, hostStrays, { logPath });
+      throw new Error(`Processes from this environment were found on the host (PIDs ${hostStrays.join(', ')}). They were stopped; the guest launch was refused so nothing runs unisolated.`);
+    }
+
     const base = getStoredApp(appRecord.id) || appRecord;
     const updatedApp = {
       ...withTrackedPids(base, []),
@@ -564,9 +624,12 @@ async function runWithHyperV(appRecord, sandboxRoot, logPath) {
       launchMode: 'hyperv',
       activeEngine: 'hyperv',
       isolated: true,
+      isolationLevel: 'vm',
       hypervVm: files.vmName,
       hypervVhd: files.differencingVhdPath,
+      installedExeGuestPath: guestExe,
       guestPid,
+      guestPids,
       knownPids: [],
       pid: null,
       sandboxPids: [],
@@ -574,10 +637,10 @@ async function runWithHyperV(appRecord, sandboxRoot, logPath) {
       launchCleanupPending: false,
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
-    appendLog(logPath, `Running inside Hyper-V VM ${files.vmName} (guest PID ${guestPid}). The VM is the isolation boundary.`);
+    appendLog(logPath, `Running inside Hyper-V VM ${files.vmName}: guest PID ${guestPid} confirmed in-guest (guest list: ${guestPids.join(', ')}), zero host processes from this environment.`);
     monitorHyperVApp(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
-    return { id: appRecord.id, status: 'Running', pid: null, guestPid, hypervVm: files.vmName, launchMode: 'hyperv', activeEngine: 'hyperv', isolated: true, embedded: false, reason: `Running inside Hyper-V VM ${files.vmName}. The app and its installer execute in the guest OS; the host only manages the VM.` };
+    return { id: appRecord.id, status: 'Running', pid: null, guestPid, guestPids, hypervVm: files.vmName, launchMode: 'hyperv', activeEngine: 'hyperv', isolationLevel: 'vm', isolated: true, embedded: false, reason: `Running inside Hyper-V VM ${files.vmName} (guest PID ${guestPid}, verified in-guest, nothing on the host).` };
   } catch (error) {
     appendLog(logPath, `VM launch failed: ${error.message}`);
     return failedLaunch(appRecord, `${error.message}`);
@@ -593,8 +656,9 @@ function monitorHyperVApp(appId, logPath) {
     try {
       const current = getStoredApp(appId);
       if (!current || current.status !== 'Running' || current.activeEngine !== 'hyperv') { stopMonitor(appId); return; }
-      const exeBase = path.win32.basename(current.source, path.win32.extname(current.source));
-      const q = require('./hyperv-runtime').buildGuestProcessQueryScript({ vm: current.hypervVm, exeName: exeBase });
+      const guestExe = current.installedExeGuestPath || current.source;
+      const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+      const q = require('./hyperv-runtime').buildGuestProcessQueryScript({ vm: current.hypervVm, credFile: guestCredentialFile(), exeName: exeBase });
       try {
         const res = await runHyperVScript(q, logPath);
         const pids = Array.isArray(res.pids) ? res.pids.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
@@ -846,10 +910,17 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
 // path: unisolated execution is never selected, even on request. 'hyperv' means the live
 // Hyper-V readiness check still has to pass inside runWithHyperV; anything else refuses.
 function selectEngine(appRecord) {
+  // hypervReady:true here marks VM eligibility; the LIVE readiness + credential
+  // checks run inside runWithHyperV and fail closed (never fall back).
   const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+  if (decision.engine === 'appcontainer') return 'appcontainer';
   if (decision.engine === 'hyperv' || decision.engine === 'hyperv-unavailable') return 'hyperv';
-  if (decision.engine === 'refused' || decision.engine === 'unavailable') return 'refused';
-  return 'appcontainer';
+  return 'refused';
+}
+
+function guestCredentialFile() {
+  const hv = require('./hyperv-runtime');
+  return hv.guestCredentialFilePath(app.getPath('userData'));
 }
 
 function hyperVBaseImagePath() {
@@ -1128,8 +1199,33 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   }
 
   const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source);
+  if (deleteJobs.has(appRecord.id)) {
+    return failedLaunch(appRecord, 'Deletion is in progress for this environment; launches are blocked until it finishes. Nothing was launched.');
+  }
   if (!isWithinDirectory(sandboxRootBase, sandboxRoot)) {
     return failedLaunch(appRecord, 'The app container path is outside RunContainer’s managed directory; refusing to launch it.');
+  }
+  // VM environments track state in the GUEST, not the host table: probe the guest
+  // before deciding the app is already running or needs a fresh launch.
+  if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.status === 'Running' && appRecord.hypervVm && process.platform === 'win32') {
+    try {
+      const hv = require('./hyperv-runtime');
+      const guestExe = appRecord.installedExeGuestPath || appRecord.source;
+      const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+      const probe = await runHyperVScript(hv.buildGuestProcessQueryScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), exeName: exeBase }), path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), 'probe.log'));
+      const gpids = Array.isArray(probe.pids) ? probe.pids.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
+      if (gpids.length > 0) {
+        const already = { ...(getStoredApp(appRecord.id) || appRecord), status: 'Running', guestPids: gpids, guestPid: gpids[0] };
+        saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? already : entry)));
+        monitorHyperVApp(appRecord.id, path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`));
+        broadcastContainerStatus(already);
+        return { id: appRecord.id, status: 'Running', guestPid: gpids[0], guestPids: gpids, hypervVm: appRecord.hypervVm, launchMode: 'hyperv', activeEngine: 'hyperv', isolationLevel: 'vm', isolated: true, embedded: false, reason: 'This app is already running inside its VM, so RunContainer did not start a second copy.' };
+      }
+      const stopped = { ...(getStoredApp(appRecord.id) || appRecord), status: 'Stopped', guestPid: null, guestPids: [], lastExitAt: new Date().toISOString() };
+      saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? stopped : entry)));
+    } catch (probeError) {
+      appendLog(path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`), `Guest state probe: ${probeError.message}; proceeding to ensured launch.`);
+    }
   }
   if (appRecord.launchCleanupPending) {
     return failedLaunch(appRecord, 'A previous launch could not be confirmed stopped. Delete this app or close its processes before trying Run again.');
@@ -1220,20 +1316,66 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
         }
       }
     }
-    // Hyper-V environments: stop the VM first (guest processes die with it), then remove
-    // the VM and its differencing disk. Host file removal happens after.
+    // Ordered VM deletion: guest app -> graceful shutdown (wait Off) -> power-off
+    // escalation only after timeout -> remove VM config (verify absent) -> remove
+    // ONLY this environment's differencing VHD (validated, base image never
+    // touched, verify absent) -> host files. Launches are blocked throughout
+    // (deleteJobs entry); success is reported only when everything is confirmed.
     let hypervWarning = null;
-    if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm && process.platform === 'win32') {
+    const isHyperVEnv = (appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm;
+    if (isHyperVEnv && process.platform === 'win32') {
+      const hv = require('./hyperv-runtime');
+      const baseImage = hyperVBaseImagePath();
       try {
-        const hv = require('./hyperv-runtime');
-        await runHyperVScript(hv.buildStopVmScript(appRecord.hypervVm), errorLogPath).catch(() => {});
+        const guestExe = appRecord.installedExeGuestPath || appRecord.source;
+        const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+        appendLog(errorLogPath, `Delete step stop-guest-app: closing ${exeBase} inside ${appRecord.hypervVm}.`);
+        try {
+          await runHyperVScript(hv.buildStopGuestAppScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), exeName: exeBase, gracefulTimeoutSec: 15 }), errorLogPath);
+        } catch (appStopError) {
+          appendLog(errorLogPath, `Guest app did not exit cleanly, continuing to shutdown: ${appStopError.message}`);
+        }
+        appendLog(errorLogPath, 'Delete step graceful-shutdown: shutting down the guest OS (120s timeout).');
+        try {
+          await runHyperVScript(hv.buildGracefulShutdownScript({ vm: appRecord.hypervVm, timeoutSec: 120 }), errorLogPath);
+        } catch (gracefulError) {
+          appendLog(errorLogPath, `Graceful shutdown timed out (${gracefulError.message}); escalating to power-off. Guest data loss inside the deleted VM is expected.`);
+          await runHyperVScript(hv.buildPowerOffScript(appRecord.hypervVm), errorLogPath);
+          const offInfo = await runHyperVScript(hv.buildGetVmScript(appRecord.hypervVm), errorLogPath).catch(() => ({ exists: false }));
+          if (offInfo.exists && offInfo.state !== 'Off') throw new Error(`VM ${appRecord.hypervVm} is still ${offInfo.state} after power-off; refusing to detach its disk.`);
+        }
+        appendLog(errorLogPath, 'Delete step remove-vm-config.');
+        await runHyperVScript(hv.buildRemoveVmConfigScript(appRecord.hypervVm), errorLogPath);
         const vhd = appRecord.hypervVhd || (appRecord.sandboxRoot ? path.join(appRecord.sandboxRoot, 'hyperv', `${appRecord.hypervVm}.vhdx`) : null);
-        await runHyperVScript(hv.buildRemoveVmScript({ vm: appRecord.hypervVm, vhdPath: vhd || '' }), errorLogPath);
-        appendLog(errorLogPath, `Removed Hyper-V VM ${appRecord.hypervVm}.`);
+        const hvDir = appRecord.sandboxRoot ? path.join(appRecord.sandboxRoot, 'hyperv') : null;
+        const targetCheck = hv.validateDeletionTarget({ candidate: vhd || '', envDir: hvDir || '', baseImagePath: baseImage || '' });
+        const exactCheck = vhd && hvDir ? hv.isEnvVhdPath(vhd, hvDir, appRecord.id) : false;
+        if (!targetCheck.ok || !exactCheck) {
+          throw new Error(`Refusing to delete an unsafe disk path (${vhd || 'empty'}): ${targetCheck.reason || 'not this environment\'s differencing disk'}. The VM config was removed; delete the disk manually after verifying it.`);
+        }
+        appendLog(errorLogPath, `Delete step remove-env-vhd: ${vhd} (this environment's differencing disk only; base image untouched).`);
+        let diskRemoved = false;
+        let diskError = null;
+        for (let attempt = 0; attempt < 5 && !diskRemoved; attempt += 1) {
+          try {
+            fs.unlinkSync(vhd);
+            diskRemoved = !fs.existsSync(vhd);
+          } catch (retryError) {
+            diskError = retryError;
+            await delay(2000);
+          }
+        }
+        if (!diskRemoved) {
+          throw new Error(`Could not remove the environment disk ${vhd}: ${diskError ? diskError.message : 'still present'}. The VM config is gone so Hyper-V no longer holds it; close anything else holding the file (antivirus/backup/indexer) and run Delete again. Exact path above.`);
+        }
+        appendLog(errorLogPath, `Removed Hyper-V VM ${appRecord.hypervVm} and its disk. Base image preserved.`);
       } catch (hypervError) {
         hypervWarning = hypervError.message;
-        appendLog(errorLogPath, `Hyper-V VM ${appRecord.hypervVm} could not be confirmed removed: ${hypervError.message}`);
+        appendLog(errorLogPath, `Hyper-V deletion failed: ${hypervError.message} Nothing is reported as deleted.`);
+        throw new Error(`Delete stopped during VM removal: ${hypervError.message}`);
       }
+    } else if (isHyperVEnv && process.platform !== 'win32') {
+      throw new Error('This environment is a Hyper-V VM and can only be deleted on Windows. Nothing was removed.');
     }
     // Stop only this environment's processes: folder match + persisted installer lineage.
     let remainingPids = await stopProcessesUnder(sandboxRoot, seeds, { logPath: appLogPath });
@@ -1318,14 +1460,46 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   appendLog(logPath, `Running installer inside environment (engine: ${engine}): ${staged}`);
   if (engine === 'hyperv') {
-    // Stage + execute inside the guest; host only orchestrates the VM.
-    const stagedForGuest = { ...appRecord, source: staged };
-    const result = await runWithHyperV(stagedForGuest, sandboxRoot, logPath);
-    if (result.status !== 'Running') return { id: appRecord.id, status: 'Failed', error: result.error || result.reason };
-    const base = getStoredApp(appRecord.id) || appRecord;
-    const withInstaller = withTrackedPids(base, []);
-    saveApps(loadApps().map((e) => (e.id === appRecord.id ? { ...withInstaller, lastInstallerAt: new Date().toISOString() } : e)));
-    return { id: appRecord.id, status: 'Running', engine: 'hyperv', detail: 'Installer is running inside the Hyper-V VM.' };
+    // Real installer flow INSIDE the guest: ensure VM+guest ready, copy the
+    // installer in, execute it there with the caller's args, wait for its ACTUAL
+    // exit code, then record the installed app path for later launches.
+    const hv = require('./hyperv-runtime');
+    const installArgs = String(requestedAppRecord?.installArgs || '');
+    const installedGuestPath = String(requestedAppRecord?.installedExeGuestPath || '').trim();
+    try {
+      const { files, credFile } = await ensureHyperVGuestReady(appRecord, sandboxRoot, logPath);
+      const guestInstaller = `C:\\RunContainer\\${appRecord.id}\\installers\\${path.win32.basename(staged)}`;
+      appendLog(logPath, `Copying installer into the guest: ${guestInstaller}`);
+      await runHyperVScript(hv.buildCopyToGuestScript({ vm: files.vmName, hostPath: staged, guestPath: guestInstaller }), logPath);
+      appendLog(logPath, `Executing installer INSIDE the guest (args: ${installArgs || '(none)'}); waiting for its real result.`);
+      const done = await runHyperVScript(hv.buildRunInstallerInGuestScript({ vm: files.vmName, credFile, guestInstallerPath: guestInstaller, installArgs, timeoutSec: 1800 }), logPath);
+      const code = Number(done.exitCode);
+      appendLog(logPath, `Installer exited in-guest with code ${code}.`);
+      if (!Number.isSafeInteger(code) || code !== 0) {
+        throw new Error(`The installer failed inside the guest (exit code ${done.exitCode}). Check the installer arguments and guest requirements; nothing was installed.`);
+      }
+      // Record the installed application path: explicit caller path wins,
+      // otherwise verify the conventional per-app location in the guest.
+      const candidates = [installedGuestPath, `C:\\RunContainer\\${appRecord.id}\\${path.win32.basename(appRecord.source, path.win32.extname(appRecord.source))}.exe`].filter(Boolean);
+      let confirmed = null;
+      for (const cand of candidates) {
+        try {
+          const chk = await runHyperVScript(hv.buildGuestFileExistsScript({ vm: files.vmName, credFile, guestPath: cand }), logPath);
+          if (chk.exists) { confirmed = cand; break; }
+        } catch (checkError) { appendLog(logPath, `Guest path check for ${cand}: ${checkError.message}`); }
+      }
+      const base = getStoredApp(appRecord.id) || appRecord;
+      const updated = { ...withTrackedPids(base, []), installedExeGuestPath: confirmed || installedGuestPath || null, lastInstallerAt: new Date().toISOString(), lastInstallerExitCode: code };
+      saveApps(loadApps().map((e) => (e.id === appRecord.id ? updated : e)));
+      if (!confirmed) {
+        return { id: appRecord.id, status: 'Installed', engine: 'hyperv', detail: `Installer succeeded (exit 0) but no installed EXE could be confirmed in the guest. Set the installed app path before running. Tried: ${candidates.join(', ')}` };
+      }
+      appendLog(logPath, `Recorded installed app path in guest: ${confirmed}`);
+      return { id: appRecord.id, status: 'Installed', engine: 'hyperv', installedExeGuestPath: confirmed, detail: `Installer finished inside the guest (exit 0); installed app recorded at ${confirmed}.` };
+    } catch (error) {
+      appendLog(logPath, `In-guest install failed: ${error.message}`);
+      return { id: appRecord.id, status: 'Failed', error: `${error.message} The installer was never executed on the host.` };
+    }
   }
   if (engine === 'refused' || !isAppContainerSupported()) {
     const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
@@ -1364,6 +1538,23 @@ ipcMain.handle('hyperv-status', async () => {
   return { ready: readiness.ready, missing: readiness.missing, detail: readiness.detail || null, baseImage: hyperVBaseImagePath() };
 });
 
+// One-time provisioning: shows the Windows credential dialog for the guest local
+// administrator and stores it DPAPI-encrypted (same user, same host). PowerShell
+// Direct cannot run non-interactively without it.
+ipcMain.handle('hyperv-provision-credential', async () => {
+  if (process.platform !== 'win32') return { provisioned: false, error: 'Guest credential provisioning requires Windows.' };
+  const hv = require('./hyperv-runtime');
+  const credFile = guestCredentialFile();
+  ensureDirectory(path.dirname(credFile));
+  try {
+    await executeFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (() => { const t = path.join(app.getPath('userData'), 'runcontainer-hyperv-cred-provision.ps1'); fs.writeFileSync(t, hv.buildProvisionCredentialScript(credFile), 'utf8'); return t; })()], { timeout: 300000 });
+    if (!fs.existsSync(credFile)) throw new Error('The credential file was not created (dialog may have been cancelled).');
+    return { provisioned: true, credFile };
+  } catch (error) {
+    return { provisioned: false, error: error.message };
+  }
+});
+
 // The UI asks the main process for the version, so package.json stays the single source.
 ipcMain.handle('get-app-version', async () => ({ version: app.getVersion() }));
 
@@ -1400,12 +1591,22 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
     stopMonitor(appRecord.id);
     if ((appRecord.launchMode === 'hyperv' || appRecord.activeEngine === 'hyperv') && appRecord.hypervVm && process.platform === 'win32') {
       const hv = require('./hyperv-runtime');
-      await runHyperVScript(hv.buildStopVmScript(appRecord.hypervVm), appLog).catch(() => {});
+      try {
+        const guestExe = appRecord.installedExeGuestPath || appRecord.source;
+        const exeBase = path.win32.basename(guestExe, path.win32.extname(guestExe));
+        appendLog(appLog, `Stopping guest app ${exeBase} inside VM ${appRecord.hypervVm} (graceful close first, force after 15s). The VM itself keeps running.`);
+        const stopped = await runHyperVScript(hv.buildStopGuestAppScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), exeName: exeBase, gracefulTimeoutSec: 15 }), appLog);
+        const leftovers = Array.isArray(stopped.remaining) ? stopped.remaining.filter((n) => Number.isSafeInteger(n) && n > 0) : [];
+        if (leftovers.length > 0) throw new Error(`Guest PIDs ${leftovers.join(', ')} did not exit inside the VM.`);
+      } catch (guestError) {
+        appendLog(appLog, `Guest app stop failed: ${guestError.message}`);
+        return { id: appRecord.id, status: 'Failed', error: `The guest app could not be confirmed stopped: ${guestError.message} The VM was left running; retry Stop or use Delete (graceful shutdown, then power-off escalation).` };
+      }
       const apps = loadApps().map((entry) => (entry.id === appRecord.id
-        ? { ...entry, status: 'Stopped', guestPid: null, lastExitAt: new Date().toISOString() }
+        ? { ...entry, status: 'Stopped', guestPid: null, guestPids: [], lastExitAt: new Date().toISOString() }
         : entry));
       saveApps(apps);
-      appendLog(appLog, `VM ${appRecord.hypervVm} stopped; its disk is kept until Delete.`);
+      appendLog(appLog, `Guest app stopped; VM ${appRecord.hypervVm} kept running with its disk for fast relaunch.`);
       const updatedVm = apps.find((entry) => entry.id === appRecord.id);
       if (updatedVm) broadcastContainerStatus(updatedVm);
       return { id: appRecord.id, status: 'Stopped' };

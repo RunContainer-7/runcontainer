@@ -387,21 +387,47 @@ async function checkInstallerLineage() {
 // ---------------------------------------------------------------------------
 // 5. Hyper-V readiness report (informational: CI runners lack nested virt).
 // ---------------------------------------------------------------------------
+// Hyper-V PROBE ONLY (safe on CI): read-only host capability report plus static
+// builder audits. windows-latest has no nested virtualization, so this never
+// creates a VM here. Real create/boot/install/launch/delete runs in
+// scripts/windows-hyperv-full.js on a capable host.
 function checkHyperVReport() {
   const work = makeSandbox('hyperv');
-  const script = path.join(work, 'prereq.ps1');
-  fs.writeFileSync(script, hyperv.buildHyperVPrereqScript(), 'utf8');
-  try {
-    const out = powershell(['-File', script]);
-    const detail = hyperv.parseHyperVPrereqOutput(out);
-    const missing = hyperv.hyperVMissingRequirements(detail);
-    removeQuietly(work);
-    if (missing.length === 0) return 'Hyper-V ready on this machine';
-    return `Hyper-V not ready here (expected on CI): ${missing.join(' | ').slice(0, 300)}`;
-  } catch (error) {
-    removeQuietly(work);
-    throw new Error(`Hyper-V check crashed: ${error.message}`);
+  // Static audits prove the fail-closed contract without a hypervisor.
+  const launch = hyperv.buildLaunchInGuestScript({ vm: 'V', credFile: 'C:\\c.xml', guestExePath: 'C:\\g\\a.exe', workingDir: 'C:\\g' });
+  if (/\$pid\s*=/.test(launch)) throw new Error('guest launcher assigns to automatic $pid');
+  if (!launch.includes('$guestPid') || !launch.includes('-Credential')) throw new Error('guest launcher must use $guestPid with -Credential');
+  for (const script of [
+    hyperv.buildGuestProcessQueryScript({ vm: 'V', credFile: 'C:\\c.xml', exeName: 'a' }),
+    hyperv.buildRunInstallerInGuestScript({ vm: 'V', credFile: 'C:\\c.xml', guestInstallerPath: 'C:\\g\\s.exe' }),
+    hyperv.buildStopGuestAppScript({ vm: 'V', credFile: 'C:\\c.xml', exeName: 'a' }),
+    hyperv.buildWaitForGuestReadyScript({ vm: 'V', credFile: 'C:\\c.xml', timeoutSec: 5 }),
+  ]) {
+    if (!script.includes('-Credential') || !script.includes('Import-Clixml')) throw new Error('in-guest script missing guest credential wiring');
   }
+  if (hyperv.buildGracefulShutdownScript({ vm: 'V' }).includes('-TurnOff')) throw new Error('graceful shutdown must not power off');
+  const plan = hyperv.deletionPlan({ vm: 'V', vhdValid: true });
+  if (plan.indexOf('remove-env-vhd') < plan.indexOf('verify-vm-absent')) throw new Error('disk must only be removed after the VM is verified absent');
+  const selDefault = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false });
+  const selReady = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: true });
+  if (selDefault.engine !== 'hyperv-unavailable') throw new Error('default without Hyper-V must fail closed, not pick AppContainer');
+  if (selReady.engine !== 'hyperv') throw new Error('default with Hyper-V ready must select the VM path');
+  // Read-only host probe (never creates anything).
+  let probe = 'Hyper-V PowerShell module not present here (expected on CI)';
+  try {
+    const out = powershell(['-Command', "(Get-Command Get-VM -ErrorAction SilentlyContinue) ? 'PRESENT' : 'ABSENT'"]);
+    if (String(out).includes('PRESENT')) {
+      const script = path.join(work, 'prereq.ps1');
+      fs.writeFileSync(script, hyperv.buildHyperVPrereqScript(), 'utf8');
+      const detail = hyperv.parseHyperVPrereqOutput(powershell(['-File', script]));
+      const missing = hyperv.hyperVMissingRequirements(detail);
+      probe = missing.length === 0 ? 'Hyper-V ready on this machine' : `Hyper-V not ready here: ${missing.join(' | ').slice(0, 300)}`;
+    }
+  } catch (error) {
+    probe = `host probe skipped: ${String(error.message).slice(0, 160)}`;
+  }
+  removeQuietly(work);
+  return `builders audited (cred-wired, no $pid, graceful-first, VM-first selection); ${probe}. Full VM lifecycle: run scripts/windows-hyperv-full.js on a capable host.`;
 }
 
 async function main() {

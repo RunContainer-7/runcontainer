@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -49,10 +49,10 @@ export default function ContainerManager() {
 
   function isolationLabel(app) {
     if (app.status !== 'Running') return null;
-    if (app.isolated) {
-      if (app.activeEngine === 'hyperv') return `Isolated by Hyper-V VM${app.hypervVm ? ` (${app.hypervVm})` : ''}`;
-      return 'Isolated by Windows AppContainer (token verified)';
+    if (app.isolated && (app.activeEngine === 'hyperv' || app.isolationLevel === 'vm')) {
+      return `Isolated in VM${app.hypervVm ? ` ${app.hypervVm}` : ''}${app.guestPid ? ` (guest PID ${app.guestPid})` : ''}`;
     }
+    if (app.isolated) return 'AppContainer mode (NOT a VM — lightweight token boundary only)';
     return 'Not isolated — launch was refused (legacy unguarded record)';
   }
 
@@ -173,7 +173,7 @@ export default function ContainerManager() {
 
         updateContainerStatus(container.id, result.status);
         setActiveSession({ ...container, ...result, status: 'Running', embedded: false });
-        setInstallMessage(`${container.name} is running (PID ${result.pid}). ${result.reason || ''}`);
+        setInstallMessage(container && result?.guestPid ? `${container.name} is running inside its VM (guest PID ${result.guestPid}). ${result.reason || ''}` : `${container.name} is running (PID ${result.pid}). ${result.reason || ''}`);
         refreshContainers();
       })
       .catch((error) => {
@@ -228,11 +228,9 @@ export default function ContainerManager() {
       setSelectedApp((current) => current?.id === container.id ? { ...current, isolationEngine: result.isolationEngine, preferVm: result.preferVm } : current);
       updateContainerStatus(container.id, container.status);
       refreshContainers();
-      setInstallMessage(engine === 'hyperv'
-        ? `${container.name} will run inside a Hyper-V VM (needs Pro/Enterprise/Education + virtualization + a Windows base image).`
-        : engine === 'appcontainer'
-          ? `${container.name} will run inside a Windows AppContainer (compatible apps only; admin installers need a VM).`
-          : `${container.name} will use AppContainer by default, or a Hyper-V VM if marked as needing one.`);
+      setInstallMessage(engine === 'hyperv' || engine === 'auto'
+        ? `${container.name} will run inside its Hyper-V VM (required path; needs Pro/Enterprise/Education + virtualization + base image + guest credential).`
+        : `${container.name} opted into AppContainer mode: lightweight token boundary, NOT a VM, compatible apps only.`);
     });
   }
 
@@ -347,7 +345,7 @@ export default function ContainerManager() {
                 {activeSession.status === 'Running' && (
                   <div className="muted">
                     {activeSession.isolated
-                      ? `Isolation: ${activeSession.activeEngine === 'hyperv' ? `Hyper-V VM ${activeSession.hypervVm || ''} (guest boundary)` : 'Windows AppContainer (token verified)'}.`
+                      ? `Isolation: ${activeSession.activeEngine === 'hyperv' || activeSession.isolationLevel === 'vm' ? `VM ${activeSession.hypervVm || ''} (guest PID ${activeSession.guestPid ?? '—'}, verified in-guest)` : 'AppContainer mode (NOT a VM)'}.`
                       : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
                   </div>
                 )}
@@ -391,7 +389,7 @@ export default function ContainerManager() {
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
-                        {container.preferVm || container.requiresVm || container.isolationEngine === 'hyperv' ? ' • Hyper-V VM' : container.isolationEngine === 'appcontainer' || !container.isolationEngine || container.isolationEngine === 'auto' ? ' • AppContainer' : ''}
+                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : ' • Hyper-V VM (required)'}
                       </div>
                     </div>
                   </div>
@@ -439,12 +437,12 @@ export default function ContainerManager() {
           <p>How RunContainer isolates each app.</p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>Isolation engines (both free, no Sandboxie)</strong>
-              <span>AppContainer (built into Windows 10/11, all editions): verified container token; compatible apps only — no admin rights, drivers, services, or writes outside container locations. Hyper-V VM (Windows 10/11 Pro/Enterprise/Education + virtualization in firmware + a Windows base VHDX): full guest OS per environment for arbitrary installers and desktop software. If neither boundary can be established, Run refuses to launch — it never runs the app unguarded.</span>
+              <strong>VM isolation (required, free, no Sandboxie)</strong>
+              <span>Every app runs inside its own Hyper-V guest VM: installer executes in the guest, app launches in the guest, guest PID verified in-guest with zero host processes. Needs Windows 10/11 Pro/Enterprise/Education, firmware virtualization, Hyper-V enabled, a provisioned base VHDX (RUNCONTAINER_HYPERV_BASE_IMAGE), and a provisioned guest credential. Failures refuse the launch — never AppContainer, never host.</span>
             </div>
             <div className="profile-card">
-              <strong>No unguarded mode</strong>
-              <span>Profile-only redirection (APPDATA/TEMP) is not a security boundary, so RunContainer no longer offers it as a launch path. Software that cannot run in an AppContainer must use a Hyper-V VM; if the VM is not available, the launch is refused with the exact missing requirement.</span>
+              <strong>Optional AppContainer mode (NOT a VM)</strong>
+              <span>A lighter token-boundary mode stays available only by explicit per-app opt-in, for compatible apps that do not need admin rights, drivers, or services. It is never selected when VM isolation is required and never used as a fallback. There is no unguarded mode at all.</span>
             </div>
             <div className="profile-card">
               <strong>Windows inside RunContainer</strong>
@@ -525,16 +523,15 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div>
-                <h4>Isolation (fail-closed: no unguarded launches)</h4>
+                <h4>Isolation: VM required (fail-closed)</h4>
                 <p className="muted">
-                  {selectedApp.activeEngine === 'hyperv' || selectedApp.preferVm || selectedApp.requiresVm
-                    ? 'Full VM isolation: the installer and the app run inside a Hyper-V guest VM. Needs Windows 10/11 Pro/Enterprise/Education, virtualization enabled in firmware, and a Windows base image (RUNCONTAINER_HYPERV_BASE_IMAGE).'
-                    : 'Lightweight isolation: Windows AppContainer with a verified container token. Compatible apps only — installers needing administrator rights, drivers, or services cannot run here and must use a Hyper-V VM.'}
+                  {selectedApp.isolationEngine === 'appcontainer'
+                    ? 'OPTIONAL AppContainer mode: verified token boundary only — NOT a virtual machine. Compatible apps only; admin installers, drivers, and services cannot run here.'
+                    : 'Hyper-V VM (required path): installer and app run inside this environment\'s own guest VM. Needs Pro/Enterprise/Education + firmware virtualization + provisioned base image + guest credential.'}
                 </p>
                 <div className="detail-actions">
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'auto')}>Auto</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM (required)</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer (optional, not a VM)</button>
                 </div>
               </div>
               <div>

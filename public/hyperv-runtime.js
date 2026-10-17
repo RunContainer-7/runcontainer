@@ -1,14 +1,28 @@
 // Hyper-V virtual-machine isolation backend.
-// Architecture: AppContainer is a real token boundary but cannot run arbitrary
-// installers. Full VM isolation is required for arbitrary desktop software.
-// This module only builds and parses text so it can be unit tested off Windows.
+//
+// Genuine VM isolation: each environment gets its own guest VM with a
+// differencing VHDX backed by a shared base image. The installer and the app
+// execute inside the guest OS via PowerShell Direct; the host only manages
+// the VM. This module only builds and parses text so it can be unit tested
+// off Windows.
+//
+// Corrected against Microsoft docs:
+// - New-VM -SwitchName requires an EXISTING switch (see buildEnsureSwitchScript).
+// - Copy-VMFile needs the 'Guest Service Interface' integration service.
+// - Invoke-Command -VMName (PowerShell Direct) needs guest -Credential,
+//   loaded from a DPAPI-encrypted file created at provisioning time.
+// - Never assign to $pid (automatic read-only); guest PID uses $guestPid.
+// - Stop-VM alone = graceful shutdown; -TurnOff = power cut (escalation only).
+// - Remove-VM deletes config only, never disks; VHDX removal is separate and
+//   verified, and the shared base image is never a deletion target.
 const path = require('path');
-const crypto = require('crypto');
 
 const RESULT_PREFIX = 'RCHYPERV ';
 const DEFAULT_SWITCH_NAME = 'RunContainer-NAT';
+const DEFAULT_SWITCH_TYPE = 'Internal';
 const DEFAULT_MEMORY_MB = 4096;
 const DEFAULT_CPU_COUNT = 2;
+const GUEST_FILE_COPY_SERVICE = 'Guest Service Interface';
 
 function sanitizeVmNamePart(value) {
   return String(value || 'app').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40) || 'app';
@@ -27,17 +41,72 @@ function vmFileNames(appId, baseDir) {
   };
 }
 
+// Differencing disk for this environment. The ONLY disk Delete may remove.
+function envVhdPathForApp(envDir, appId) {
+  return path.win32.join(path.win32.resolve(envDir), `${vmName(appId)}.vhdx`);
+}
+
+// True only when candidate is exactly this environment's differencing disk.
+// Everything else (base image, other envs, bare drive roots) is refused.
+function isEnvVhdPath(candidate, envDir, appId) {
+  if (!candidate || !envDir || !appId) return false;
+  try {
+    const resolved = path.win32.resolve(candidate);
+    const expected = path.win32.resolve(envVhdPathForApp(envDir, appId));
+    if (resolved.toLowerCase() !== expected.toLowerCase()) return false;
+    if (!resolved.toLowerCase().endsWith('.vhdx')) return false;
+    return path.win32.basename(resolved).toLowerCase() === `${vmName(appId).toLowerCase()}.vhdx`;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Refuse to delete the shared base image or anything outside the environment.
+function validateDeletionTarget({ candidate, envDir, baseImagePath }) {
+  if (!candidate) return { ok: false, reason: 'No path was provided for deletion.' };
+  try {
+    const resolved = path.win32.resolve(candidate).toLowerCase();
+    if (baseImagePath && resolved === path.win32.resolve(baseImagePath).toLowerCase()) {
+      return { ok: false, reason: 'Refusing to delete the shared base image. Only per-environment differencing disks may be removed.' };
+    }
+    if (envDir) {
+      const scope = `${path.win32.resolve(envDir).toLowerCase()}${path.win32.sep}`;
+      if (resolved !== scope.slice(0, -1) && !resolved.startsWith(scope)) {
+        return { ok: false, reason: 'Refusing to delete a path outside the target environment.' };
+      }
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, reason: `Could not validate the deletion target: ${error.message}` };
+  }
+}
+
+function guestCredentialFilePath(hostDataDir) {
+  return path.win32.join(path.win32.resolve(hostDataDir), 'hyperv-guest-cred.xml');
+}
+
+// Interactive, run once on the host during base-image provisioning. Stores the
+// guest local-admin credential DPAPI-encrypted (same user, same host only).
+function buildProvisionCredentialScript(credFile) {
+  const esc = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$cred = Get-Credential -Message 'Guest Windows local administrator for RunContainer VMs'`,
+    `Export-Clixml -InputObject $cred -Path '${esc}'`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ provisioned = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
 function isHyperVSupported(platform = process.platform) {
   return platform === 'win32';
 }
 
-// Reports host readiness. Runs on Windows via powershell; parsing is pure.
 function buildHyperVPrereqScript() {
   return [
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$feat = (Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State",
     "$svc = (Get-Service vmms -ErrorAction SilentlyContinue).Status",
-    "$cs = Get-ComputerInfo -Property HyperHypervisorPresent, HyperVRequirementVirtualizationFirmwareEnabled, WindowsProductName, OsHardwareAbstractionLayer -ErrorAction SilentlyContinue",
+    "$cs = Get-ComputerInfo -Property HyperHypervisorPresent, HyperVRequirementVirtualizationFirmwareEnabled, WindowsProductName -ErrorAction SilentlyContinue",
     "$out = @{ feature = $feat; service = \"$svc\"; hypervisorPresent = [bool]$cs.HyperHypervisorPresent; firmwareOk = [bool]$cs.HyperVRequirementVirtualizationFirmwareEnabled; product = \"$($cs.WindowsProductName)\" }",
     `Write-Output ('${RESULT_PREFIX}' + ($out | ConvertTo-Json -Compress))`,
   ].join('\n');
@@ -69,7 +138,46 @@ function describeHyperVMissing(missing) {
   return `VM isolation requires Hyper-V, which is not ready: ${missing.join(' ')} Nothing was launched. Your data was not touched.`;
 }
 
-// PowerShell scripts for VM lifecycle. Host executes these; builders are pure.
+// Idempotent: reuses the existing switch after validating its type.
+function buildEnsureSwitchScript({ switchName = DEFAULT_SWITCH_NAME, switchType = DEFAULT_SWITCH_TYPE } = {}) {
+  const eName = String(switchName).replace(/'/g, "''");
+  const eType = String(switchType).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eName}', [string]$Type = '${eType}')`,
+    "$sw = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue",
+    "if (-not $sw) { $sw = New-VMSwitch -Name $Name -SwitchType $Type }",
+    "elseif ($sw.SwitchType -ne $Type) { throw \"Switch '$Name' exists with type '$($sw.SwitchType)', expected '$Type'.\" }",
+    `Write-Output ('${RESULT_PREFIX}' + (@{ switch = $sw.Name; type = "$($sw.SwitchType)" } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Source of truth for whether the VM exists (filesystem checks are not).
+function buildGetVmScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${esc}')`,
+    "$vm = Get-VM -Name $Name -ErrorAction SilentlyContinue",
+    "if (-not $vm) {",
+    `  Write-Output ('${RESULT_PREFIX}' + (@{ exists = $false } | ConvertTo-Json -Compress))`,
+    "} else {",
+    `  Write-Output ('${RESULT_PREFIX}' + (@{ exists = $true; state = "$($vm.State)"; status = "$($vm.Status)" } | ConvertTo-Json -Compress))`,
+    "}",
+  ].join('\n');
+}
+
+function buildEnableGuestServicesScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${esc}')`,
+    `$vm = Get-VM -Name $Name -ErrorAction Stop`,
+    `Enable-VMIntegrationService -VM $vm -Name '${GUEST_FILE_COPY_SERVICE}' -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ fileCopyEnabled = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
 function buildCreateVmScript({ vmName: name, differencingVhdPath, baseImagePath, switchName, memoryMB = DEFAULT_MEMORY_MB, cpuCount = DEFAULT_CPU_COUNT }) {
   const esc = (s) => String(s).replace(/'/g, "''");
   return [
@@ -77,7 +185,21 @@ function buildCreateVmScript({ vmName: name, differencingVhdPath, baseImagePath,
     `New-VHD -ParentPath '${esc(baseImagePath)}' -Path '${esc(differencingVhdPath)}' -Differencing | Out-Null`,
     `New-VM -Name '${esc(name)}' -MemoryStartupBytes (${memoryMB}MB) -VHDPath '${esc(differencingVhdPath)}' -SwitchName '${esc(switchName)}' -Generation 2 | Out-Null`,
     `Set-VM -Name '${esc(name)}' -ProcessorCount ${cpuCount} -AutomaticCheckpointsEnabled $false | Out-Null`,
+    `Enable-VMIntegrationService -VM (Get-VM -Name '${esc(name)}' -ErrorAction Stop) -Name '${GUEST_FILE_COPY_SERVICE}' -ErrorAction SilentlyContinue`,
     `Write-Output ('${RESULT_PREFIX}' + (@{ created = $true; vm = '${esc(name)}' } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Re-attaches an orphaned environment disk (VHDX exists, VM config missing)
+// without destroying the data on it.
+function buildCreateVmFromExistingVhdScript({ vmName: name, existingVhdPath, switchName, memoryMB = DEFAULT_MEMORY_MB, cpuCount = DEFAULT_CPU_COUNT }) {
+  const esc = (s) => String(s).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `New-VM -Name '${esc(name)}' -MemoryStartupBytes (${memoryMB}MB) -VHDPath '${esc(existingVhdPath)}' -SwitchName '${esc(switchName)}' -Generation 2 | Out-Null`,
+    `Set-VM -Name '${esc(name)}' -ProcessorCount ${cpuCount} -AutomaticCheckpointsEnabled $false | Out-Null`,
+    `Enable-VMIntegrationService -VM (Get-VM -Name '${esc(name)}' -ErrorAction Stop) -Name '${GUEST_FILE_COPY_SERVICE}' -ErrorAction SilentlyContinue`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ created = $true; reusedDisk = $true; vm = '${esc(name)}' } | ConvertTo-Json -Compress))`,
   ].join('\n');
 }
 
@@ -90,12 +212,195 @@ function buildStartVmScript(vm) {
   ].join('\n');
 }
 
-function buildStopVmScript(vm) {
+// Probes REAL guest readiness: an actual PowerShell Direct command with the
+// guest credential, retried until timeout. Get-VM State 'Running' alone does
+// not prove the guest OS is operational.
+function buildWaitForGuestReadyScript({ vm, credFile, timeoutSec = 300, pollSec = 5 }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eVm}', [string]$CredFile = '${eCred}', [int]$TimeoutSec = ${Number(timeoutSec)}, [int]$PollSec = ${Number(pollSec)})`,
+    "$cred = Import-Clixml -Path $CredFile -ErrorAction Stop",
+    "$deadline = [datetime]::UtcNow.AddSeconds($TimeoutSec)",
+    "$ready = $false",
+    "while ([datetime]::UtcNow -lt $deadline) {",
+    "  try {",
+    "    Invoke-Command -VMName $Name -Credential $cred -ScriptBlock { $env:COMPUTERNAME } -ErrorAction Stop | Out-Null",
+    "    $ready = $true",
+    "    break",
+    "  } catch { Start-Sleep -Seconds $PollSec }",
+    "}",
+    "if (-not $ready) { throw \"PowerShell Direct did not become ready within $TimeoutSec seconds. The guest may still be booting, its network/integration services may be off, or the stored guest credential may be wrong.\" }",
+    `Write-Output ('${RESULT_PREFIX}' + (@{ ready = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildCopyToGuestScript({ vm, hostPath, guestPath }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eHost = String(hostPath).replace(/'/g, "''");
+  const eGuest = String(guestPath).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Copy-VMFile -Name '${eVm}' -SourcePath '${eHost}' -DestinationPath '${eGuest}' -CreateFullPath -FileSource Host -Force -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ copied = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Runs the installer INSIDE the guest, waits for its real exit code.
+function buildRunInstallerInGuestScript({ vm, credFile, guestInstallerPath, installArgs = '', timeoutSec = 1800 }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eGuest = String(guestInstallerPath).replace(/'/g, "''");
+  const eArgs = String(installArgs).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eVm}', [string]$CredFile = '${eCred}')`,
+    "$cred = Import-Clixml -Path $CredFile -ErrorAction Stop",
+    `$sb = { param($p, $a) $proc = Start-Process -FilePath $p -ArgumentList $a -Wait -PassThru; $proc.ExitCode }`,
+    `$code = Invoke-Command -VMName $Name -Credential $cred -ScriptBlock $sb -ArgumentList '${eGuest}', '${eArgs}' -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ installed = $true; exitCode = $code } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Legacy combined copy+run (kept for compatibility; new code uses the split steps).
+function buildInstallInGuestScript({ vm, credFile = '', hostInstallerPath, guestInstallerPath, installArgs = '' }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eHost = String(hostInstallerPath).replace(/'/g, "''");
+  const eGuest = String(guestInstallerPath).replace(/'/g, "''");
+  const eArgs = String(installArgs).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Copy-VMFile -Name '${eVm}' -SourcePath '${eHost}' -DestinationPath '${eGuest}' -CreateFullPath -FileSource Host -Force -ErrorAction Stop`,
+    ...(eCred
+      ? [
+          `$cred = Import-Clixml -Path '${eCred}' -ErrorAction Stop`,
+          `$sb = { param($p, $a) Start-Process -FilePath $p -ArgumentList $a -Wait -PassThru | Select-Object -ExpandProperty ExitCode }`,
+          `$code = Invoke-Command -VMName '${eVm}' -Credential $cred -ScriptBlock $sb -ArgumentList '${eGuest}', '${eArgs}' -ErrorAction Stop`,
+        ]
+      : [
+          `$sb = { param($p, $a) Start-Process -FilePath $p -ArgumentList $a -Wait -PassThru | Select-Object -ExpandProperty ExitCode }`,
+          `$code = Invoke-Command -VMName '${eVm}' -ScriptBlock $sb -ArgumentList '${eGuest}', '${eArgs}' -ErrorAction Stop`,
+        ]),
+    `Write-Output ('${RESULT_PREFIX}' + (@{ installed = $true; exitCode = $code; vm = '${eVm}' } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Launches the app INSIDE the guest. $guestPid is used because $pid is a
+// read-only automatic PowerShell variable and assignment to it fails.
+function buildLaunchInGuestScript({ vm, credFile = '', guestExePath, workingDir = '' }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eExe = String(guestExePath).replace(/'/g, "''");
+  const eDir = String(workingDir).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  const credDecl = eCred ? `$cred = Import-Clixml -Path '${eCred}' -ErrorAction Stop; ` : '';
+  const credArg = eCred ? '-Credential $cred ' : '';
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    ...(workingDir
+      ? [`$sb = { param($e, $d) $p = Start-Process -FilePath $e -WorkingDirectory $d -PassThru; $p.Id }`]
+      : [`$sb = { param($e, $d) $p = Start-Process -FilePath $e -PassThru; $p.Id }`]),
+    `${credDecl}$guestPid = Invoke-Command -VMName '${eVm}' ${credArg}-ScriptBlock $sb -ArgumentList '${eExe}', '${eDir}' -ErrorAction Stop`,
+    `if (-not $guestPid -or [int]$guestPid -le 0) { throw 'The guest did not confirm a process id.' }`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ guestPid = [int]$guestPid; vm = '${eVm}' } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildGuestProcessQueryScript({ vm, credFile = '', exeName }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eExe = String(exeName).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  const credDecl = eCred ? `$cred = Import-Clixml -Path '${eCred}' -ErrorAction Stop; ` : '';
+  const credArg = eCred ? '-Credential $cred ' : '';
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$sb = { param($n) Get-Process -Name $n -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id }`,
+    `${credDecl}$found = Invoke-Command -VMName '${eVm}' ${credArg}-ScriptBlock $sb -ArgumentList '${eExe}' -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ pids = @($found) } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Asks the guest app to close, waits, then force-stops leftovers in the guest.
+function buildStopGuestAppScript({ vm, credFile, exeName, gracefulTimeoutSec = 15 }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const eExe = String(exeName).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `param([string]$Name = '${eVm}', [string]$CredFile = '${eCred}')`,
+    "$cred = Import-Clixml -Path $CredFile -ErrorAction Stop",
+    `$sb = { param($n, $t)`,
+    `  $procs = Get-Process -Name $n -ErrorAction SilentlyContinue`,
+    "  foreach ($p in $procs) { try { $p.CloseMainWindow() | Out-Null } catch {} }",
+    `  $deadline = [datetime]::UtcNow.AddSeconds($t)`,
+    "  while ([datetime]::UtcNow -lt $deadline) {",
+    `    if (-not (Get-Process -Name $n -ErrorAction SilentlyContinue)) { break }`,
+    "    Start-Sleep -Seconds 1",
+    "  }",
+    `  $left = Get-Process -Name $n -ErrorAction SilentlyContinue`,
+    "  foreach ($p in $left) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {} }",
+    `  @(Get-Process -Name $n -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)`,
+    "}",
+    `$still = Invoke-Command -VMName $Name -Credential $cred -ScriptBlock $sb -ArgumentList '${eExe}', ${Number(gracefulTimeoutSec)} -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ remaining = @($still) } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildGuestFileExistsScript({ vm, credFile, guestPath }) {
+  const eVm = String(vm).replace(/'/g, "''");
+  const ePath = String(guestPath).replace(/'/g, "''");
+  const eCred = String(credFile).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$exists = Invoke-Command -VMName '${eVm}' -Credential (Import-Clixml -Path '${eCred}' -ErrorAction Stop) -ScriptBlock { param($p) Test-Path -LiteralPath $p } -ArgumentList '${ePath}' -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ exists = [bool]$exists } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Graceful guest shutdown with a documented timeout; throws on timeout so the
+// caller can decide whether to escalate to power-off (never silently).
+function buildGracefulShutdownScript({ vm, timeoutSec = 120, pollSec = 3 }) {
   const esc = String(vm).replace(/'/g, "''");
   return [
     "$ErrorActionPreference = 'Stop'",
-    `Stop-VM -Name '${esc}' -TurnOff -Force -ErrorAction SilentlyContinue`,
-    `Write-Output ('${RESULT_PREFIX}' + (@{ stopped = $true; vm = '${esc}' } | ConvertTo-Json -Compress))`,
+    `param([string]$Name = '${esc}', [int]$TimeoutSec = ${Number(timeoutSec)}, [int]$PollSec = ${Number(pollSec)})`,
+    "Stop-VM -Name $Name -ErrorAction Stop",
+    "$deadline = [datetime]::UtcNow.AddSeconds($TimeoutSec)",
+    "$state = (Get-VM -Name $Name -ErrorAction Stop).State",
+    "while ($state -ne 'Off' -and [datetime]::UtcNow -lt $deadline) {",
+    "  Start-Sleep -Seconds $PollSec",
+    "  $state = (Get-VM -Name $Name -ErrorAction Stop).State",
+    "}",
+    "if ($state -ne 'Off') { throw \"VM '$Name' did not reach Off within $TimeoutSec seconds (state: $state).\" }",
+    `Write-Output ('${RESULT_PREFIX}' + (@{ stopped = $true; graceful = $true } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+// Hard power-off: escalation path only, used after graceful shutdown times out
+// and only when the user confirms data loss is acceptable (Delete implies it).
+function buildPowerOffScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Stop-VM -Name '${esc}' -TurnOff -ErrorAction Stop`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ stopped = $true; graceful = $false } | ConvertTo-Json -Compress))`,
+  ].join('\n');
+}
+
+function buildStopVmScript(vm) {
+  return buildPowerOffScript(vm);
+}
+
+// Removes VM CONFIGURATION only (disks are separate). Verifies absence.
+function buildRemoveVmConfigScript(vm) {
+  const esc = String(vm).replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `Remove-VM -Name '${esc}' -Force -ErrorAction Stop`,
+    `$gone = Get-VM -Name '${esc}' -ErrorAction SilentlyContinue`,
+    `if ($gone) { throw "VM '${esc}' still exists after Remove-VM." }`,
+    `Write-Output ('${RESULT_PREFIX}' + (@{ removed = $true; vm = '${esc}' } | ConvertTo-Json -Compress))`,
   ].join('\n');
 }
 
@@ -104,49 +409,10 @@ function buildRemoveVmScript({ vm, vhdPath }) {
   const e2 = String(vhdPath).replace(/'/g, "''");
   return [
     "$ErrorActionPreference = 'Stop'",
-    `Stop-VM -Name '${e1}' -TurnOff -Force -ErrorAction SilentlyContinue`,
+    `Stop-VM -Name '${e1}' -TurnOff -ErrorAction SilentlyContinue`,
     `Remove-VM -Name '${e1}' -Force -ErrorAction SilentlyContinue`,
-    `Remove-Item -LiteralPath '${e2}' -Force -ErrorAction SilentlyContinue`,
+    `Remove-Item -LiteralPath '${e2}' -Force -ErrorAction Stop`,
     `Write-Output ('${RESULT_PREFIX}' + (@{ removed = $true; vm = '${e1}' } | ConvertTo-Json -Compress))`,
-  ].join('\n');
-}
-
-// Copy installer into guest and execute it there via PowerShell Direct.
-// Requires guest Windows 10+ with PowerShell Direct, host admin, VM running.
-function buildInstallInGuestScript({ vm, hostInstallerPath, guestInstallerPath, installArgs = '' }) {
-  const eVm = String(vm).replace(/'/g, "''");
-  const eHost = String(hostInstallerPath).replace(/'/g, "''");
-  const eGuest = String(guestInstallerPath).replace(/'/g, "''");
-  const eArgs = String(installArgs).replace(/'/g, "''");
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    `Copy-VMFile -Name '${eVm}' -SourcePath '${eHost}' -DestinationPath '${eGuest}' -CreateFullPath -FileSource Host -Force`,
-    `$sb = { param($p, $a) Start-Process -FilePath $p -ArgumentList $a -Wait -PassThru | Select-Object -ExpandProperty ExitCode }`,
-    `$code = Invoke-Command -VMName '${eVm}' -ScriptBlock $sb -ArgumentList '${eGuest}', '${eArgs}'`,
-    `Write-Output ('${RESULT_PREFIX}' + (@{ installed = $true; exitCode = $code; vm = '${eVm}' } | ConvertTo-Json -Compress))`,
-  ].join('\n');
-}
-
-function buildLaunchInGuestScript({ vm, guestExePath, workingDir = '' }) {
-  const eVm = String(vm).replace(/'/g, "''");
-  const eExe = String(guestExePath).replace(/'/g, "''");
-  const eDir = String(workingDir).replace(/'/g, "''");
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    `$sb = { param($e, $d) $p = Start-Process -FilePath $e ${workingDir ? "-WorkingDirectory $d" : ''} -PassThru; $p.Id }`,
-    `$pid = Invoke-Command -VMName '${eVm}' -ScriptBlock $sb -ArgumentList '${eExe}', '${eDir}'`,
-    `Write-Output ('${RESULT_PREFIX}' + (@{ guestPid = $pid; vm = '${eVm}' } | ConvertTo-Json -Compress))`,
-  ].join('\n');
-}
-
-function buildGuestProcessQueryScript({ vm, exeName }) {
-  const eVm = String(vm).replace(/'/g, "''");
-  const eExe = String(exeName).replace(/'/g, "''");
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    `$sb = { param($n) Get-Process -Name $n -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id }`,
-    `$pids = Invoke-Command -VMName '${eVm}' -ScriptBlock $sb -ArgumentList '${eExe}'`,
-    `Write-Output ('${RESULT_PREFIX}' + (@{ pids = @($pids) } | ConvertTo-Json -Compress))`,
   ].join('\n');
 }
 
@@ -161,6 +427,23 @@ function parseHyperVOutput(stdout) {
   }
 }
 
+// Ordered deletion lifecycle for one environment. Pure and testable: each step
+// names the Hyper-V/host operation; the executor (main.js) runs them in order,
+// stops at the first failure, and never reports success until every step passes.
+function deletionPlan({ vm, vhdValid }) {
+  const steps = [
+    'guard-launches',
+    'stop-guest-app',
+    'graceful-shutdown',
+    'verify-off',
+    'remove-vm-config',
+    'verify-vm-absent',
+  ];
+  if (vhdValid) steps.push('remove-env-vhd', 'verify-vhd-absent');
+  steps.push('remove-host-files', 'verify-host-absent', 'remove-record');
+  return steps;
+}
+
 function guestExePathForApp(vmDriveRoot, appId, exeBaseName) {
   return path.win32.join(vmDriveRoot, vmName(appId), exeBaseName);
 }
@@ -168,22 +451,42 @@ function guestExePathForApp(vmDriveRoot, appId, exeBaseName) {
 module.exports = {
   RESULT_PREFIX,
   DEFAULT_SWITCH_NAME,
+  DEFAULT_SWITCH_TYPE,
   DEFAULT_MEMORY_MB,
   DEFAULT_CPU_COUNT,
+  GUEST_FILE_COPY_SERVICE,
   vmName,
   vmFileNames,
+  envVhdPathForApp,
+  isEnvVhdPath,
+  validateDeletionTarget,
+  guestCredentialFilePath,
+  buildProvisionCredentialScript,
   isHyperVSupported,
   buildHyperVPrereqScript,
   parseHyperVPrereqOutput,
   hyperVMissingRequirements,
   describeHyperVMissing,
+  buildEnsureSwitchScript,
+  buildGetVmScript,
+  buildEnableGuestServicesScript,
   buildCreateVmScript,
+  buildCreateVmFromExistingVhdScript,
   buildStartVmScript,
-  buildStopVmScript,
-  buildRemoveVmScript,
+  buildWaitForGuestReadyScript,
+  buildCopyToGuestScript,
+  buildRunInstallerInGuestScript,
   buildInstallInGuestScript,
   buildLaunchInGuestScript,
   buildGuestProcessQueryScript,
+  buildStopGuestAppScript,
+  buildGuestFileExistsScript,
+  buildGracefulShutdownScript,
+  buildPowerOffScript,
+  buildStopVmScript,
+  buildRemoveVmConfigScript,
+  buildRemoveVmScript,
   parseHyperVOutput,
+  deletionPlan,
   guestExePathForApp,
 };

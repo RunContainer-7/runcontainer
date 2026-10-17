@@ -1,6 +1,24 @@
 const {
   vmName,
   vmFileNames,
+  envVhdPathForApp,
+  isEnvVhdPath,
+  validateDeletionTarget,
+  guestCredentialFilePath,
+  buildProvisionCredentialScript,
+  buildEnsureSwitchScript,
+  buildGetVmScript,
+  buildEnableGuestServicesScript,
+  buildCreateVmFromExistingVhdScript,
+  buildWaitForGuestReadyScript,
+  buildCopyToGuestScript,
+  buildRunInstallerInGuestScript,
+  buildStopGuestAppScript,
+  buildGuestFileExistsScript,
+  buildGracefulShutdownScript,
+  buildPowerOffScript,
+  buildRemoveVmConfigScript,
+  deletionPlan,
   buildHyperVPrereqScript,
   parseHyperVPrereqOutput,
   hyperVMissingRequirements,
@@ -46,6 +64,70 @@ describe("hyper-v readiness", () => {
     expect(script).toContain("Get-WindowsOptionalFeature");
     expect(script).toContain("HyperHypervisorPresent");
     expect(script).toContain(RESULT_PREFIX.trim());
+  });
+});
+
+
+describe("vm disk guards", () => {
+  const appId = "abc-123";
+  const envDir = "C:\\RunContainer\\sandboxes\\app-x\\hyperv";
+  it("accepts only this environment's differencing disk", () => {
+    const vhd = envVhdPathForApp(envDir, appId);
+    expect(vhd.toLowerCase().endsWith("runcontainer-abc-123.vhdx")).toBe(true);
+    expect(isEnvVhdPath(vhd, envDir, appId)).toBe(true);
+    expect(isEnvVhdPath("C:\\base.vhdx", envDir, appId)).toBe(false);
+    expect(isEnvVhdPath(envVhdPathForApp("C:\\other", appId), envDir, appId)).toBe(false);
+  });
+  it("never targets the shared base image", () => {
+    expect(validateDeletionTarget({ candidate: "C:\\base.vhdx", envDir, baseImagePath: "C:\\base.vhdx" }).ok).toBe(false);
+    expect(validateDeletionTarget({ candidate: "C:\\elsewhere\\x.vhdx", envDir, baseImagePath: "C:\\base.vhdx" }).ok).toBe(false);
+    expect(validateDeletionTarget({ candidate: envVhdPathForApp(envDir, appId), envDir, baseImagePath: "C:\\base.vhdx" }).ok).toBe(true);
+  });
+  it("orders deletion VM-first and verifies every step", () => {
+    const plan = deletionPlan({ vm: "RunContainer-a", vhdValid: true });
+    expect(plan).toEqual(["guard-launches", "stop-guest-app", "graceful-shutdown", "verify-off", "remove-vm-config", "verify-vm-absent", "remove-env-vhd", "verify-vhd-absent", "remove-host-files", "verify-host-absent", "remove-record"]);
+    expect(deletionPlan({ vm: "RunContainer-a", vhdValid: false })).not.toContain("remove-env-vhd");
+  });
+});
+
+describe("corrected hyper-v builders", () => {
+  it("never assigns to the automatic $pid variable", () => {
+    const launch = buildLaunchInGuestScript({ vm: "RunContainer-a", credFile: "C:\\c.xml", guestExePath: "C:\\g\\a.exe", workingDir: "C:\\g" });
+    expect(launch).toContain("$guestPid");
+    expect(launch).not.toMatch(/\$pid\s*=/);
+  });
+  it("passes guest credentials to every in-guest command", () => {
+    for (const script of [
+      buildLaunchInGuestScript({ vm: "V", credFile: "C:\\c.xml", guestExePath: "C:\\g\\a.exe" }),
+      buildGuestProcessQueryScript({ vm: "V", credFile: "C:\\c.xml", exeName: "a" }),
+      buildRunInstallerInGuestScript({ vm: "V", credFile: "C:\\c.xml", guestInstallerPath: "C:\\g\\s.exe" }),
+      buildStopGuestAppScript({ vm: "V", credFile: "C:\\c.xml", exeName: "a" }),
+      buildWaitForGuestReadyScript({ vm: "V", credFile: "C:\\c.xml" }),
+    ]) {
+      expect(script).toContain("-Credential");
+      expect(script).toContain("Import-Clixml");
+    }
+  });
+  it("ensures the switch, reconciles VM existence, and enables file copy", () => {
+    expect(buildEnsureSwitchScript({})).toContain("Get-VMSwitch");
+    expect(buildEnsureSwitchScript({})).toContain("New-VMSwitch");
+    expect(buildGetVmScript("V")).toContain("Get-VM");
+    expect(buildEnableGuestServicesScript("V")).toContain("Guest Service Interface");
+    expect(buildCreateVmFromExistingVhdScript({ vmName: "V", existingVhdPath: "C:\\e.vhdx", switchName: "S" })).not.toContain("New-VHD");
+  });
+  it("shuts down gracefully with timeout and escalates explicitly", () => {
+    const graceful = buildGracefulShutdownScript({ vm: "V", timeoutSec: 120 });
+    expect(graceful).toContain("Stop-VM -Name");
+    expect(graceful).not.toContain("-TurnOff");
+    expect(graceful).toContain("did not reach Off");
+    expect(buildPowerOffScript("V")).toContain("-TurnOff");
+    expect(buildRemoveVmConfigScript("V")).toContain("still exists after Remove-VM");
+  });
+  it("provisions credentials encrypted, never in plain text", () => {
+    const prov = buildProvisionCredentialScript("C:\\u\\cred.xml");
+    expect(prov).toContain("Get-Credential");
+    expect(prov).toContain("Export-Clixml");
+    expect(guestCredentialFilePath("C:\\u").toLowerCase()).toContain("hyperv-guest-cred.xml");
   });
 });
 

@@ -1,10 +1,10 @@
 const { selectIsolationEngine } = require("../../public/engine-select");
 
-describe("fail-closed engine selection", () => {
+describe("VM-required engine selection", () => {
   it("never selects an unguarded profile launch, even when requested", () => {
     const d = selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "profile" }, hypervReady: true });
     expect(d.engine).toBe("refused");
-    expect(d.reason).toContain("not a security boundary");
+    expect(d.reason).toContain("Nothing was launched");
   });
 
   it("never selects sandboxie, even for legacy records", () => {
@@ -16,17 +16,20 @@ describe("fail-closed engine selection", () => {
     expect(selectIsolationEngine({ platform: "linux", appRecord: {}, hypervReady: false }).engine).toBe("unavailable");
   });
 
-  it("sends vm-needing apps to hyper-v, failing closed when hyper-v is not ready", () => {
-    const noHv = selectIsolationEngine({ platform: "win32", appRecord: { requiresVm: true }, hypervReady: false });
-    expect(noHv.engine).toBe("hyperv-unavailable");
-    expect(noHv.reason).toContain("Hyper-V is not ready");
+  it("defaults to the VM path, failing closed when Hyper-V is not ready", () => {
+    const cold = selectIsolationEngine({ platform: "win32", appRecord: {}, hypervReady: false });
+    expect(cold.engine).toBe("hyperv-unavailable");
+    expect(cold.reason).toContain("did not fall back");
+    expect(selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "auto" }, hypervReady: true }).engine).toBe("hyperv");
+    expect(selectIsolationEngine({ platform: "win32", appRecord: { requiresVm: true }, hypervReady: false }).engine).toBe("hyperv-unavailable");
     expect(selectIsolationEngine({ platform: "win32", appRecord: { requiresVm: true }, hypervReady: true }).engine).toBe("hyperv");
-    expect(selectIsolationEngine({ platform: "win32", appRecord: { preferVm: true }, hypervReady: false }).engine).toBe("hyperv-unavailable");
-    expect(selectIsolationEngine({ platform: "win32", appRecord: { preferVm: true }, hypervReady: true }).engine).toBe("hyperv");
   });
 
-  it("defaults to appcontainer for compatible apps", () => {
-    expect(selectIsolationEngine({ platform: "win32", appRecord: {}, hypervReady: false }).engine).toBe("appcontainer");
-    expect(selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "auto" }, hypervReady: false }).engine).toBe("appcontainer");
+  it("offers AppContainer only as an explicit opt-in, never as fallback", () => {
+    const d = selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "appcontainer" }, hypervReady: true });
+    expect(d.engine).toBe("appcontainer");
+    expect(d.reason).toContain("NOT a virtual machine");
+    // Explicit VM preference beats AppContainer history; without readiness it still fails closed.
+    expect(selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "appcontainer", preferVm: true }, hypervReady: false }).engine).toBe("hyperv-unavailable");
   });
 });
