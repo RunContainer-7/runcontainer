@@ -157,31 +157,7 @@ It creates two VMs from the base image, proves in-guest installer execution
 on host), deletes one environment in order (VM absent, env disk absent, sibling
 + base intact), exercises a locked host file, and cleans up.
 
-## Provisioning a host for VM isolation (do this on your Windows PC)
 
-1. **Host OS:** Windows 10/11 Pro, Enterprise, or Education (Home has no
-   Hyper-V). Firmware virtualization on (Intel VT-x / AMD-V, SLAT).
-2. **Enable Hyper-V** (elevated): `DISM /Online /Enable-Feature /All
-   /FeatureName:Microsoft-Hyper-V`, reboot, ensure `vmms` is Running.
-3. **Base image:** build a reference VM (Gen 2, Windows 10/11 Pro/Enterprise),
-   install guest Windows + updates + Hyper-V Integration Services, create the
-   local admin account the guest credential will use, `sysprep /generalize
-   /oobe /shutdown`, then copy its VHDX aside as the read-only base, e.g.
-   `C:\VMs\base\win11-sysprepped.vhdx`. Set
-   `RUNCONTAINER_HYPERV_BASE_IMAGE` to that path. Keep one licensed guest per
-   base image: each environment is a differencing child of it, and guest
-   Windows licensing follows your Microsoft license terms (check them for
-   virtualization use).
-4. **Guest credential:** RunContainer Settings → provision (or the
-   `hyperv-provision-credential` IPC): shows `Get-Credential` once and stores
-   it DPAPI-encrypted at `%APPDATA%\RunContainer\hyperv-guest-cred.xml`
-   (same user, same host only). PowerShell Direct requires it.
-5. **Network:** RunContainer ensures an Internal switch (`RunContainer-NAT`)
-   idempotently; guest file copy and PowerShell Direct do not need a NAT, and
-   no host folder sharing is configured (verify: no `New-SmbShare`/enhanced
-   session file sharing is created by these scripts).
-6. **Per environment:** ~20–40 GB disk for the differencing VHDX growth +
-   4 GB RAM default. Delete removes the VM config + env VHDX only.
 
 Six bottom tabs are back: Sources, Apps, Tweaks, Settings, Profiles, Info. Tweaks
 (launch arguments, VM memory/CPU, guest networking — all validated server-side) and
