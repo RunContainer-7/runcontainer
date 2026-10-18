@@ -112,7 +112,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.5.0");
+    expect(container.textContent).toContain("RunContainer v0.5.1");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
