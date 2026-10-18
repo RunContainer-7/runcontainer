@@ -63,73 +63,39 @@ runcontainer
 5. Click "Run" to start the application inside a container.
 6. To return to the Container Manager, simply terminate the running application.
 
-## Architecture decision (audited, not assumed)
+## How RunContainer Works
 
-RunContainer must isolate arbitrary Windows installers and desktop apps with VM-like
-management (install into an environment, run/stop inside it, delete the environment),
-with no Sandboxie dependency and no silent unguarded fallback. The committed code was
-audited against three options:
+RunContainer lets you install, manage, and run Windows applications inside separate environments managed by RunContainer, rather than running them as ordinary applications directly on your desktop.
 
-- **A. Windows AppContainer (kept, lightweight tier).** Genuine OS boundary: the child
-  gets a container token via `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`,
-  and RunContainer reports `isolated` only when the new process token carries
-  `TokenIsAppContainer` (29) **and** the `TokenAppContainerSid` (31) equals the profile
-  SID. Free and built into Windows 10/11 (all editions). Limitation, stated openly:
-  it was designed for packaged apps. Arbitrary installers routinely fail inside it —
-  no administrator rights, no drivers/services, no writes outside container locations,
-  low integrity breaks many Win32 apps. It cannot cover the full "arbitrary software"
-  range, so it is offered only for compatible apps, fail-closed.
-- **B. Hyper-V virtual machine (new, full tier).** The only built-in Windows technology
-  that isolates arbitrary installers/desktop software with a VM boundary: separate
-  guest OS per environment (differencing VHDX off a base image), installer executes in
-  the guest via `Copy-VMFile` + PowerShell Direct `Invoke-Command`, app launches in
-  the guest, host only manages the VM. Requirements (not hidden): Windows 10/11
-  **Pro/Enterprise/Education** (Home has no Hyper-V), virtualization enabled in
-  firmware (Intel VT-x / AMD-V, SLAT), Hyper-V feature + `vmms` running, a sysprepped
-  Windows base VHDX (Generation 2, set `RUNCONTAINER_HYPERV_BASE_IMAGE`), admin rights
-  for VM/switch setup, and disk/RAM per environment (tens of GB + GBs of RAM).
-  If Hyper-V is not ready, Run refuses to launch and names the exact missing piece.
-- **C. Other built-in options (rejected as the boundary).** Windows Sandbox is an
-  ephemeral lightweight VM (no persistent per-app environments, Pro+ only). Windows
-  containers are server-side with no GUI desktop apps. Restricted-token/job-object
-  sandboxes (Chrome-style) are real mitigations but share AppContainer's compatibility
-  ceiling and are not a VM. A normal child process with redirected env vars is **not**
-  isolation and is no longer a launch path. None of these is interchangeable with a
-  full VM, and RunContainer does not pretend otherwise.
+### Separate environments for your applications
 
-Required path: the Hyper-V VM. AppContainer stays ONLY as an explicit per-app
-opt-in for compatible apps, labeled as NOT a VM and never used as a fallback.
-Both are free with no third-party paid feature. Sandboxie is not used as a
-backend (legacy boxes are only best-effort cleaned on Delete); unguarded
-execution was removed entirely.
+Each application environment has its own managed files and lifecycle. You can install an application, launch it within its environment, stop it, and remove the environment when you no longer need it.
 
-## How isolation actually works now
+This makes RunContainer useful for trying unfamiliar software, keeping applications organised, and experimenting without immediately committing to a conventional installation on your main Windows environment.
 
-- **Hyper-V VM (REQUIRED path).** Per-environment VM (`RunContainer-<appId>`,
-  differencing VHDX under the environment's `hyperv/` folder, shared base image
-  never modified). Install: the installer is staged, copied into the guest
-  (`Copy-VMFile`, Guest Service Interface), executed in the guest via PowerShell
-  Direct with the provisioned guest credential, and its REAL exit code is waited
-  on; the installed guest path is recorded. Run: the app launches in the guest,
-  the guest PID is verified in the guest process list, AND the host process table
-  is checked for strays (any host execution fails the launch closed). Stop ends
-  the guest app (VM kept running for fast relaunch); Delete does the ordered
-  lifecycle below. Any VM failure refuses — never AppContainer, never host.
-- **AppContainer (OPTIONAL, not a VM, explicit opt-in only).** Profile per app,
-  verified token before reporting. Compatible apps only; never selected when VM
-  isolation is required and never a fallback.
-- **Installers run inside the environment.** `install-in-environment` stages the
-  installer into the environment and runs it under the same boundary as the app.
-  Installer-spawned children are persisted (`knownPids` + parent-PID lineage), so a
-  child that outlives its installer stays tracked for Stop/Delete.
-- **Fail-closed everywhere.** Bad paths, missing Hyper-V, token mismatch, and legacy
-  `profile`/`sandboxie` selections all refuse with an actionable error. Nothing is
-  ever launched without a boundary.
+### Installation and launching
 
-Window hosting (re-parenting the app window into RunContainer) is **presentation
-only, experimental, and unverified on Windows**: it adds no isolation, Windows often
-refuses it across integrity levels, and it must never be mistaken for the boundary.
-Do not claim it works until `scripts/windows-verify.js` + manual testing prove it.
+When you install an application, RunContainer attempts to run its installer within the selected environment. Applications are then launched through that environment's execution mechanism rather than being deliberately launched as ordinary host applications.
+
+RunContainer is designed to refuse operations when required isolation cannot be established, rather than silently switching to unrestricted execution.
+
+### Isolation and compatibility
+
+Isolation is intended to separate an application's execution environment from your normal Windows desktop. However, isolation is not a guarantee that every application will work, that every possible interaction with the host is prevented, or that software is automatically safe.
+
+Compatibility depends on the application and the environment available on your system. Some installers and applications may require capabilities that an isolated environment does not provide. Applications that depend on particular drivers, services, hardware access, or elevated system permissions may not work as expected.
+
+### System requirements
+
+RunContainer's available isolation features depend on your Windows edition, system configuration, and the requirements of the selected environment. Some configurations may require additional Windows features, administrator permissions, hardware virtualisation, memory, and disk space.
+
+Check the system requirements and setup guide before creating an environment.
+
+### An important distinction
+
+RunContainer manages isolated application environments; it is not simply a launcher that changes an application's settings or redirects its files. Its goal is to provide a more controlled way to install and experiment with Windows software.
+
+Isolation reduces certain risks but does not eliminate them. Only use software you trust, and do not treat RunContainer as a substitute for security updates, backups, or appropriate precautions when testing untrusted applications.
 
 ### Deleting an environment
 
