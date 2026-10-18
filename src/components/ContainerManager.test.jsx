@@ -21,6 +21,7 @@ jest.mock("../services/containerService", () => ({
   resetEnvironment: jest.fn(),
   openGuestDisplay: jest.fn(),
   getHyperVStatus: jest.fn(async () => null),
+  checkForUpdate: jest.fn(async () => null),
   provisionGuestCredential: jest.fn(),
   getAppVersion: jest.fn(async () => "0.5.0"),
   listContainers: jest.fn(async () => []),
@@ -151,5 +152,17 @@ describe("ContainerManager", () => {
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
+  });
+
+  it("shows the update banner when a newer Stable release exists, and links Discord", async () => {
+    const { checkForUpdate } = require("../services/containerService");
+    checkForUpdate.mockResolvedValueOnce({ available: true, current: "0.5.0", latest: "0.5.1", url: "https://github.com/RunContainer-7/runcontainer/releases/latest" });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("RunContainer 0.5.1 is available");
+    openTab(container, "Info");
+    const link = Array.from(container.querySelectorAll("a")).find((a) => a.getAttribute("href") === "https://discord.gg/UKTGRMMmC4");
+    expect(link).toBeTruthy();
+    expect(link.getAttribute("target")).toBe("_blank");
   });
 });

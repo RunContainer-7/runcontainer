@@ -109,6 +109,15 @@ export async function setWindowHosting(container) {
   return requireIpc('Changing window hosting').invoke('set-window-hosting', container);
 }
 
+export async function checkForUpdate() {
+  if (!ipcRenderer) return null;
+  try {
+    return await ipcRenderer.invoke('check-for-update');
+  } catch (_error) {
+    return null;
+  }
+}
+
 export async function getAppVersion() {
   if (!ipcRenderer) return null;
   try {

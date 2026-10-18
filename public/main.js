@@ -1,9 +1,10 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const https = require('https');
 const crypto = require('crypto');
+const { checkForUpdate } = require('./update-check');
 const {
   sandboxBoxName,
   findSandboxieTools,
@@ -555,7 +556,7 @@ async function ensureHyperVGuestReady(appRecord, sandboxRoot, logPath) {
   if (!readiness.ready) throw new Error(describeHyperVMissing(readiness.missing));
   const baseImage = hyperVBaseImagePath();
   if (!baseImage || !fs.existsSync(baseImage)) {
-    throw new Error('VM isolation needs a provisioned Windows base image: set RUNCONTAINER_HYPERV_BASE_IMAGE to a sysprepped Windows 10/11 Pro/Enterprise VHDX (Generation 2) and provision the guest credential (see Settings). Nothing was launched on the host.');
+    throw new Error('VM isolation needs a provisioned Windows base image: set RUNCONTAINER_HYPERV_BASE_IMAGE to a sysprepped Windows 10/11 VHDX (Generation 2) and provision the guest credential (see Settings). Nothing was launched on the host.');
   }
   const credFile = guestCredentialFile();
   if (!fs.existsSync(credFile)) {
@@ -1054,6 +1055,11 @@ function createWindow() {
   });
 
   mainWindow.setTitle('RunContainer');
+  // Links open in the default browser, never in a new RunContainer window. Only https is passed on.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
     appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `did-fail-load: ${errorCode} ${errorDescription} ${validatedURL}`);
@@ -1387,7 +1393,7 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
       return runWithHyperV(appRecord, sandboxRoot, logPath);
     }
     if (!isAppContainerSupported()) {
-      return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
+      return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM. Nothing was launched.');
     }
     appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
     return runWithAppContainer(appRecord, sandboxRoot, logPath);
@@ -1827,6 +1833,9 @@ ipcMain.handle('open-guest-display', async (_event, requestedAppRecord) => {
 
 // The UI asks the main process for the version, so package.json stays the single source.
 ipcMain.handle('get-app-version', async () => ({ version: app.getVersion() }));
+
+// Notice only: the app never downloads or installs a new version itself.
+ipcMain.handle('check-for-update', async () => checkForUpdate(app.getVersion()));
 
 ipcMain.handle('cancel-delete', async (_event, requestedAppRecord) => {
   const job = deleteJobs.get(requestedAppRecord?.id);

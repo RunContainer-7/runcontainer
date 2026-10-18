@@ -30,10 +30,10 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
   if (!hypervReady) {
     const why = appRecord.requiresVm || appRecord.preferVm || appRecord.isolationEngine === 'hyperv'
       ? 'Hyper-V VM isolation was requested'
-      : 'VM isolation is the required execution path';
+      : 'VM isolation is the default execution path';
     return {
       engine: 'hyperv-unavailable',
-      reason: `${why}, but Hyper-V is not ready. Enable Hyper-V on Windows 10/11 Pro/Enterprise/Education with virtualization enabled in firmware, provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.`,
+      reason: `${why}, but Hyper-V is not ready. Turn on Hyper-V and virtualization in firmware, then provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.`,
     };
   }
   return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (guest OS boundary).' };

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, checkForUpdate, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 
 function useBootAnimation() {
@@ -13,7 +13,9 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.5.0";
+const APP_VERSION_FALLBACK = "0.5.1";
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_DISMISS_KEY = "runcontainer.update.dismissed";
 const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info"];
 const tabIcons = {
   Sources: "◫",
@@ -43,7 +45,24 @@ export default function ContainerManager() {
   const [tweakMemory, setTweakMemory] = useState("4096");
   const [tweakCpu, setTweakCpu] = useState("2");
   const [tweakNetwork, setTweakNetwork] = useState(true);
+  const [updateNotice, setUpdateNotice] = useState(null);
   const booting = useBootAnimation();
+
+  useEffect(() => {
+    // Checks once at launch and then once a day while the app stays open. The notice is
+    // hidden for any version the user has dismissed.
+    let cancelled = false;
+    const run = () => Promise.resolve(checkForUpdate())
+      .then((result) => {
+        if (cancelled || !result || !result.available) return;
+        if (window.localStorage?.getItem(UPDATE_DISMISS_KEY) === result.latest) return;
+        setUpdateNotice(result);
+      })
+      .catch(() => {});
+    run();
+    const timer = window.setInterval(run, UPDATE_CHECK_INTERVAL_MS);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     // Promise.resolve keeps this safe when the bridge is unavailable (for example in tests
@@ -336,7 +355,7 @@ export default function ContainerManager() {
       updateContainerStatus(container.id, container.status);
       refreshContainers();
       setInstallMessage(engine === 'hyperv' || engine === 'auto'
-        ? `${container.name} will run inside its Hyper-V VM (required path; needs Pro/Enterprise/Education + virtualization + base image + guest credential).`
+        ? `${container.name} will run inside its own Hyper-V VM (needs a base image and guest credential, set up in Settings).`
         : `${container.name} opted into AppContainer mode: lightweight token boundary, NOT a VM, compatible apps only.`);
     });
   }
@@ -386,6 +405,18 @@ export default function ContainerManager() {
         <div className="boot-overlay">
           <div className="boot-ring" />
           <div className="boot-copy">Initializing RunContainer desktop…</div>
+        </div>
+      )}
+      {updateNotice && (
+        <div className="update-banner" role="status">
+          <span>RunContainer {updateNotice.latest} is available (you have {updateNotice.current}). Install it over this version; your apps and environments stay.</span>
+          <div className="detail-actions">
+            <a className="settings-button" href={updateNotice.url} target="_blank" rel="noopener noreferrer">Download</a>
+            <button className="settings-button ghost" onClick={() => {
+              window.localStorage?.setItem(UPDATE_DISMISS_KEY, updateNotice.latest);
+              setUpdateNotice(null);
+            }}>Dismiss</button>
+          </div>
         </div>
       )}
       <div className="app-header">
@@ -501,7 +532,7 @@ export default function ContainerManager() {
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
                         {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • VM disk missing' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
-                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : ' • Hyper-V VM (required)'}
+                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (not a VM)' : ' • Hyper-V VM'}
                       </div>
                     </div>
                   </div>
@@ -640,12 +671,12 @@ export default function ContainerManager() {
           )}
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>VM isolation (required, free, no Sandboxie)</strong>
-              <span>Every app runs inside its own Hyper-V guest VM: installer executes in the guest, app launches in the guest, guest PID verified in-guest with zero host processes. Needs Windows 10/11 Pro/Enterprise/Education, firmware virtualization, Hyper-V enabled, a provisioned base VHDX (RUNCONTAINER_HYPERV_BASE_IMAGE), and a provisioned guest credential. Failures refuse the launch — never AppContainer, never host.</span>
+              <strong>VM isolation (Hyper-V, no Sandboxie)</strong>
+              <span>Every app runs inside its own Hyper-V guest VM: installer executes in the guest, app launches in the guest, guest PID verified in-guest with zero host processes. Needs a provisioned base VHDX (RUNCONTAINER_HYPERV_BASE_IMAGE) and a provisioned guest credential. Failures refuse the launch — never AppContainer, never host.</span>
             </div>
             <div className="profile-card">
               <strong>Optional AppContainer mode (NOT a VM)</strong>
-              <span>A lighter token-boundary mode stays available only by explicit per-app opt-in, for compatible apps that do not need admin rights, drivers, or services. It is never selected when VM isolation is required and never used as a fallback. There is no unguarded mode at all.</span>
+              <span>A lighter token-boundary mode stays available only by explicit per-app opt-in, for compatible apps that do not need admin rights, drivers, or services. It is never selected automatically and never used as a fallback. There is no unguarded mode at all.</span>
             </div>
             <div className="profile-card">
               <strong>Windows inside RunContainer</strong>
@@ -686,7 +717,7 @@ export default function ContainerManager() {
             </div>
             <div className="profile-card">
               <strong>Beta notice</strong>
-              <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: https://discord.gg/UKTGRMMmC4</span>
+              <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: <a href="https://discord.gg/UKTGRMMmC4" target="_blank" rel="noopener noreferrer">https://discord.gg/UKTGRMMmC4</a></span>
             </div>
           </div>
           <div className="panel-section">
@@ -726,14 +757,14 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div>
-                <h4>Isolation: VM required (fail-closed)</h4>
+                <h4>Isolation</h4>
                 <p className="muted">
                   {selectedApp.isolationEngine === 'appcontainer'
                     ? 'OPTIONAL AppContainer mode: verified token boundary only — NOT a virtual machine. Compatible apps only; admin installers, drivers, and services cannot run here.'
-                    : 'Hyper-V VM (required path): installer and app run inside this environment\'s own guest VM. Needs Pro/Enterprise/Education + firmware virtualization + provisioned base image + guest credential.'}
+                    : 'Hyper-V VM: installer and app run inside this environment\'s own guest VM. Needs a provisioned base image and guest credential.'}
                 </p>
                 <div className="detail-actions">
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM (required)</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM</button>
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer (optional, not a VM)</button>
                 </div>
                 <p className="muted">Profile: {selectedApp.profile || 'default'}. Change it in the Profiles tab.</p>
