@@ -60,7 +60,6 @@
     "files": [
       "build/**/*",
       "public/**/*",
-      "node_modules/**/*",
       "package.json"
     ],
     "directories": {
