@@ -69,13 +69,17 @@
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "artifactName": "RunContainer-Setup-${version}.exe"
+    },
+    "extraMetadata": {
+      "main": "public/main.js"
     }
   },
   "browserslist": {
