@@ -686,7 +686,7 @@ export default function ContainerManager() {
             </div>
             <div className="profile-card">
               <strong>Beta notice</strong>
-              <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: https://discord.gg/rvMjMZJykE</span>
+              <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: https://discord.gg/UKTGRMMmC4</span>
             </div>
           </div>
           <div className="panel-section">
