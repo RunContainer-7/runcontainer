@@ -419,7 +419,7 @@ function checkHyperVReport() {
   // Read-only host probe (never creates anything).
   let probe = 'Hyper-V PowerShell module not present here (expected on CI)';
   try {
-    const out = powershell(['-Command', "(Get-Command Get-VM -ErrorAction SilentlyContinue) ? 'PRESENT' : 'ABSENT'"]);
+    const out = powershell(['-Command', "if (Get-Command Get-VM -ErrorAction SilentlyContinue) { 'PRESENT' } else { 'ABSENT' }"]);
     if (String(out).includes('PRESENT')) {
       const script = path.join(work, 'prereq.ps1');
       fs.writeFileSync(script, hyperv.buildHyperVPrereqScript(), 'utf8');
