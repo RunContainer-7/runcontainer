@@ -4,7 +4,9 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
   packagerConfig: {
     asar: true,
-    icon: 'public/runcontainer-icon',
+    // Explicit .ico: Windows picks this for the packaged RunContainer.exe and
+    // the window/taskbar icon, and it carries every size 16-256.
+    icon: 'public/runcontainer-icon.ico',
     executableName: 'RunContainer',
     name: 'RunContainer',
     overwrite: true,

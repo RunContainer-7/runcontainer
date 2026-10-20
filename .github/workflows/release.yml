@@ -46,6 +46,12 @@ jobs:
       - name: Unit tests
         run: npm test -- --watchAll=false
 
+      # The .ico is generated from public/runcontainer-icon.svg. If someone edits
+      # the design and forgets to regenerate, the shipped app would carry the old
+      # icon everywhere; fail the release instead of shipping stale art.
+      - name: Verify shipped icon matches its source design
+        run: node scripts/build-app-icon.js --check
+
       - name: Production build
         run: npm run build
 

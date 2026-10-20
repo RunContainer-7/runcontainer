@@ -4,6 +4,15 @@
 
 export const UPDATES = [
   {
+    version: '0.6.1',
+    date: '2026-10-20',
+    title: 'New app icon, applied everywhere',
+    changes: [
+      'New mark: a mint-green container with a play glyph, shipped as one multi-resolution icon containing every size Windows asks for (16, 24, 32, 48, 64, 128 and 256 px).',
+      'The icon now shows on the app window and taskbar, is stamped into the packaged RunContainer.exe, and is used by the installer wizard, Start menu and desktop shortcuts, and the uninstall entry. Before this, the window pointed at an SVG, which Windows silently ignores.',
+    ],
+  },
+  {
     version: '0.6.0',
     date: '2026-10-20',
     title: 'Genuine QEMU virtual machines, update wizard with downloads',

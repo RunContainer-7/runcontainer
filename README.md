@@ -136,13 +136,14 @@ runcontainer
 
 ## Versioning
 
-`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.0 && git push origin v0.6.0` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
+`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.1 && git push origin v0.6.1` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
 
 ## For developers
 
 - Easiest from source on Windows: double-click `run.bat` (installs dependencies, builds the interface, opens the app).
 - `npm install`, `npm start` (Electron), `npm run build`.
 - `npm test`, plus on Windows `node scripts/windows-verify.js`.
+- App icon: edit `public/runcontainer-icon.svg`, then run `node scripts/build-app-icon.js` to regenerate `public/runcontainer-icon.ico` (16-256 px) and `.png`. The release workflow runs `--check` and refuses to ship a stale icon. `package.json` carries a `jest.testMatch` override because create-react-app's absolute-path patterns stop matching on Windows with micromatch 4.0.8, which made `npm test` silently find zero tests.
 - App states: Running, Stopped, Failed, Unknown. One operation per environment at a time.
 - Hyper-V internals (differencing disks, PowerShell Direct, VMConnect display) live in `public/hyperv-runtime.js`; RCVM builders in `public/rcvm-runtime.js`; update checks in `public/update-check.js`.
 

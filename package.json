@@ -1,7 +1,7 @@
 {
   "name": "RunContainer",
   "productName": "RunContainer",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A Windows-based container management application for running applications in a sandboxed environment.",
   "main": "public/main.js",
   "scripts": {
@@ -50,6 +50,7 @@
       "buildResources": "public"
     },
     "win": {
+      "icon": "public/runcontainer-icon.ico",
       "target": [
         "nsis"
       ],
@@ -64,6 +65,12 @@
     "extraMetadata": {
       "main": "public/main.js"
     }
+  },
+  "jest": {
+    "testMatch": [
+      "**/__tests__/**/*.{js,jsx,ts,tsx}",
+      "**/*.{spec,test}.{js,jsx,ts,tsx}"
+    ]
   },
   "browserslist": {
     "production": [

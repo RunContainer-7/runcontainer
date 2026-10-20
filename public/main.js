@@ -1870,7 +1870,9 @@ function createWindow() {
     title: 'RunContainer',
     show: false,
     titleBarStyle: 'hiddenInset',
-    icon: path.join(__dirname, 'runcontainer-icon.svg'),
+    // Windows only renders .ico/.png window icons; an SVG path silently falls
+    // back to the stock Electron icon in the taskbar and Alt-Tab switcher.
+    icon: path.join(__dirname, 'runcontainer-icon.ico'),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
