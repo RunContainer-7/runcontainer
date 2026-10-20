@@ -37,22 +37,6 @@
     "electron-builder": "^26.0.0",
     "electron-packager": "^17.1.0"
   },
-  "config": {
-    "forge": {
-      "makers": [
-        {
-          "name": "@electron-forge/maker-squirrel",
-          "config": {}
-        },
-        {
-          "name": "@electron-forge/maker-zip",
-          "platforms": [
-            "win32"
-          ]
-        }
-      ]
-    }
-  },
   "homepage": ".",
   "build": {
     "appId": "com.runcontainer.app",

@@ -58,9 +58,17 @@ jobs:
           $out = Join-Path (Get-Location) 'out'
           if (-not (Test-Path $src)) { throw "Packaged app not found at $src." }
           & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /DMyAppVersion=$ver "/DMyAppSource=$src" "/DMyOutDir=$out" installer\RunContainer.iss
+          # PowerShell does not fail a step on a native command's non-zero exit,
+          # so propagate it explicitly: a silent compiler failure would otherwise
+          # only surface later as a missing asset.
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
+          $setup = Join-Path $out "RunContainer-Setup-$ver.exe"
+          if (-not (Test-Path $setup)) { throw "Installer was not produced at $setup." }
+          Write-Output "Built $setup ($((Get-Item $setup).Length) bytes)"
 
       - name: Attach installer to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: out/RunContainer-Setup-*.exe
           generate_release_notes: true
+          fail_on_unmatched_files: true
