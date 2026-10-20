@@ -1,4 +1,4 @@
-const { selectIsolationEngine } = require("../../public/engine-select");
+const { selectIsolationEngine, requestedIsolationEngine } = require("../../public/engine-select");
 
 describe("best-available engine selection", () => {
   it("never selects an unguarded profile launch, even when requested", () => {
@@ -39,6 +39,14 @@ describe("best-available engine selection", () => {
     expect(d.engine).toBe("qemu-unavailable");
     expect(d.reason).toContain("QEMU is not installed.");
     expect(d.reason).toContain("did not fall back");
+    expect(d.reason).toContain("Use automatic");
+  });
+
+  it("keeps 'auto' automatic instead of pinning it to a VM", () => {
+    expect(requestedIsolationEngine("auto")).toBe("auto");
+    expect(requestedIsolationEngine(undefined)).toBe("auto");
+    expect(requestedIsolationEngine("qemu")).toBe("qemu");
+    expect(requestedIsolationEngine("rcvm")).toBe("rcvm");
   });
 
   it("keeps explicit RCVM containment as a non-VM choice", () => {

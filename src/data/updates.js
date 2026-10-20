@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.6.4',
+    date: '2026-10-20',
+    title: 'A launcher, not a virtual machine console',
+    changes: [
+      'The app now describes what it does: each app gets its own space and its own files. Settings no longer shows a backend to pick, and VM setup, prepared images and guest paths are gone from the everyday screens.',
+      'Profiles are honest: locked means no network access, and the app tells you plainly when this PC cannot enforce that for a standard environment.',
+      'Tweaks no longer offers a networking switch that containment could not honour, and saving tweaks can no longer put a locked app back online.',
+      'Apps pinned to a backend can return to Automatic from Manage, and Automatic now stays automatic instead of turning into a VM request.',
+    ],
+  },
+  {
     version: '0.6.3',
     date: '2026-10-20',
     title: 'A tidier launcher with an automatic isolation backend',

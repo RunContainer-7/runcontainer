@@ -14,6 +14,15 @@
 // - Explicit 'hyperv' without Hyper-V ready -> 'hyperv-unavailable'.
 // - 'profile'/'sandboxie' -> 'refused'. 'appcontainer' stays an explicit
 //   opt-in, labeled NOT a VM.
+//
+// requestedIsolationEngine() is the single mapping from a stored/requested value
+// to what gets saved. Anything that is not an explicit pinned backend means
+// 'auto', so a user can always return an app to automatic selection.
+function requestedIsolationEngine(value) {
+  if (value === 'hyperv' || value === 'appcontainer' || value === 'rcvm' || value === 'qemu') return value;
+  return 'auto';
+}
+
 function selectIsolationEngine({ platform = process.platform, appRecord = {}, hypervReady = false, qemuReady = false, qemuMissing = [] } = {}) {
   if (platform !== 'win32') {
     return { engine: 'unavailable', reason: 'Isolation requires Windows 10/11.' };
@@ -44,7 +53,7 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
     if (!hypervReady) {
       return {
         engine: 'hyperv-unavailable',
-        reason: 'Hyper-V VM isolation was requested, but Hyper-V is not ready. Turn on Hyper-V and virtualization in firmware, then provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.',
+        reason: 'Hyper-V VM isolation was requested, but Hyper-V is not ready. RunContainer did not launch anything, and did not fall back to any other mode. Open the app’s Manage panel and choose Use automatic to let RunContainer pick again.',
       };
     }
     return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (guest OS boundary).' };
@@ -56,7 +65,7 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
       const detail = (qemuMissing || []).filter(Boolean).join(' ');
       return {
         engine: 'qemu-unavailable',
-        reason: `A VM backend was requested for this app, but this PC has no prepared VM image.${detail ? ` ${detail}` : ''} Add one in Settings → Advanced → Use prepared image. RunContainer did not launch anything, and did not fall back to any other mode.`,
+        reason: `A VM backend was requested for this app, but this PC has no prepared VM image.${detail ? ` ${detail}` : ''} RunContainer did not launch anything, and did not fall back to any other mode. Open the app’s Manage panel and choose Use automatic to let RunContainer pick again.`,
       };
     }
     return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
@@ -69,4 +78,4 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
   return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
 }
 
-module.exports = { selectIsolationEngine };
+module.exports = { selectIsolationEngine, requestedIsolationEngine };

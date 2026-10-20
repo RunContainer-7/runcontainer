@@ -1346,7 +1346,7 @@ async function refreshQemuStatus() {
   }
   const baseImage = store.baseImage && fs.existsSync(store.baseImage) ? store.baseImage : null;
   if (!baseImage) {
-    missing.push('No VM image is set on this PC. Apps run contained until one is available (Settings → Advanced → Use prepared image).');
+    missing.push('No VM image is set on this PC, so apps run in their own contained space.');
   }
   const status = {
     available: missing.filter((m) => !m.startsWith('WHPX')).length === 0,
@@ -2511,10 +2511,11 @@ ipcMain.handle('hyperv-provision-credential', async () => {
   }
 });
 
-// Profiles assign real, enforced settings. locked = offline VM + container with no
-// capabilities; relaxed = online + wider container capabilities; default = online +
-// internetClient. Changing network attachment needs the VM Off, so a running VM
-// keeps its NICs until Reset and the change is reported, not silently dropped.
+// Profiles decide what an app may reach. locked = no network + no container
+// capabilities; relaxed = online + wider capabilities; default = online +
+// internetClient. Blocks are only real where the selected backend can enforce
+// them (a VM, or an AppContainer without the internet capability); the UI says
+// so instead of promising an offline switch containment cannot honour.
 ipcMain.handle('set-app-profile', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
@@ -3010,9 +3011,10 @@ ipcMain.handle('cancel-delete', async (_event, requestedAppRecord) => {
 });
 
 // Fail-closed: 'profile' (unguarded) and 'sandboxie' are rejected, never saved. Allowed:
-// 'rcvm'/'auto' (RCVM containment, the default on all editions), 'hyperv' (full VM),
-// 'appcontainer' (explicit opt-in token mode).
+// 'auto' (VM when one is ready, containment otherwise — the default), 'rcvm',
+// 'qemu', 'hyperv' (full VM), and 'appcontainer' (explicit opt-in token mode).
 ipcMain.handle('set-isolation-engine', async (_event, requestedAppRecord) => {
+  const { requestedIsolationEngine } = require('./engine-select');
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
   const requested = requestedAppRecord?.isolationEngine;
@@ -3022,7 +3024,9 @@ ipcMain.handle('set-isolation-engine', async (_event, requestedAppRecord) => {
   if (requested !== 'hyperv' && requested !== 'appcontainer' && requested !== 'rcvm' && requested !== 'qemu' && requested !== 'auto' && requested !== undefined) {
     return { id: appRecord.id, status: 'Failed', error: `Unknown isolation engine "${requested}". Use the QEMU VM, RCVM containment, Hyper-V VM, or AppContainer. Nothing was changed.` };
   }
-  const engine = requested === 'hyperv' ? 'hyperv' : requested === 'appcontainer' ? 'appcontainer' : requested === 'rcvm' ? 'rcvm' : 'qemu';
+  // 'auto' must stay automatic: coercing it to 'qemu' left apps pinned to a VM
+  // they could no longer fall back from when no VM was available.
+  const engine = requestedIsolationEngine(requested);
   const updated = { ...appRecord, isolationEngine: engine, preferVm: engine === 'hyperv', requiresVm: engine === 'hyperv' };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
   return { id: appRecord.id, status: updated.status, isolationEngine: engine, preferVm: updated.preferVm };

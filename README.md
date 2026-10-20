@@ -1,148 +1,87 @@
 # RunContainer
 
-RunContainer runs Windows apps contained: each app gets its own environment folder and always launches inside it — never loose on your system. Free forever, no accounts, no paid tiers.
+RunContainer is a launcher for Windows apps. Add an app, press **Run**, and it starts from its own folder with its own data — not installed into the rest of your PC. Free forever, no account, no paid tiers, and open source.
+
+It works like LiveContainer does on iOS: a launcher with a container per app, not a virtual machine or an emulator. You can run several copies of the same app with separate data, and remove an app together with everything it kept.
 
 ## Download & install
 
-- **New users:** download the latest `RunContainer-Setup-<version>.exe` from the **[Releases page](../../releases)** and run it. Always get it from a release, never from anywhere else.
-- **Installed users:** you don't need to watch releases. When a new stable version is out, the app shows a notice banner with a **Download installer** button, and the Updates tab lists what changed.
+- **New users:** download the latest `RunContainer-Setup-<version>.exe` from the [Releases page](../../releases) and run it.
+- **Installed users:** you don't need to watch releases. When a new stable version is out, the app shows a notice with an **Update…** button, and the Updates tab lists what changed.
 
-Requirements: Windows 10/11 (Home works), 64-bit. No admin rights needed for the default containment.
+Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed.
 
-## How Run works out of the box
+## What you can do
 
-Press **Run** and the app launches inside its environment — no setup needed. RunContainer picks the strongest backend the PC supports:
+- **Add an app** with the **+** button: pick an EXE, or import one from a URL.
+- **Run / Close** starts and stops the app.
+- **Duplicate** makes a second copy with its own separate data — handy for multiple accounts or trying a new version without losing the old one.
+- **Reset** returns an app to a fresh state but keeps its data. **Delete** removes the app and its folder.
+- **Tweaks** adds launch arguments and memory/CPU limits per app.
+- **Profiles** sets how much access an app gets: `default`, `relaxed`, or `locked` (no network).
+- **Manage** shows where an app lives, its log, and how its window appears.
 
-- **VM backend (QEMU):** when a prepared VM image is configured, each app runs inside its own virtual machine (overlay disk, guest agent, no virtual network). QEMU is detected, never bundled, and no Windows image is downloaded.
-- **Containment (RCVM):** otherwise the app runs in a Windows Job Object with lifetime, memory, CPU and process-count caps and a private profile folder, verified on this machine after every launch. This is process containment, not a hardware VM.
+## Where apps live
 
-The Settings tab shows which backend is in use; prepared-image and Hyper-V controls sit under **Advanced**. If verification fails, the app is killed and Run reports exactly which check failed — nothing runs uncontained.
+Every app has its own folder under RunContainer's data directory. Its settings, save files and temporary files go there. Duplicate creates a second folder; Delete removes the folder and the app's record.
+
+## Keeping apps apart
+
+Each app starts inside its own managed environment, never loose on your desktop. RunContainer picks the strongest option this PC supports, automatically:
+
+- **Its own space** — the app runs with its own files and processes, memory and CPU limits, and a private app-data folder. This is the default and needs no setup.
+- **Its own virtual machine** — if a prepared VM image is already available on the PC, RunContainer uses it for a stronger boundary. Nothing is downloaded, and no Windows licence is included.
+
+Either way, if RunContainer can't establish the environment, it refuses to launch the app rather than run it unprotected.
+
+A `locked` profile asks for no network access. That can only be enforced when the app runs in a virtual machine or a restricted container; on a standard environment Windows gives ordinary apps network access, and the app says so instead of pretending otherwise.
+
+## One honest limit
+
+This is containment, not a sandbox driver. Well-behaved apps keep their files, settings and child processes in their own folder. An app that writes to shared Windows places — the registry, or a system-wide install directory — can still leave traces outside its folder. If it needs a driver, a Windows service, or hardware access, it may not work at all.
+
+Only add software you trust. RunContainer is not antivirus and not a guarantee; keep your normal backups and security software running.
 
 ## Updating
 
-When a stable release is out, a notice banner appears with an **Update…** wizard:
+When a stable release is out, a notice appears with an **Update…** wizard:
 
-1. **Notes** — your version vs the new one, with release notes.
-2. **Download** — the exact `RunContainer-Setup-<version>.exe` from the release, with progress, a Cancel button, and size + checksum verification (mismatches are refused, partials deleted).
-3. **Install & restart** — runs the installer wizard over your current copy (same AppId, so it updates in place; apps and settings are kept), then the app restarts.
+1. **Notes** — your version, the new version, and what changed.
+2. **Download** — the exact installer from the release, with progress and size plus checksum verification.
+3. **Install & restart** — installs over your current copy, keeping your apps and settings.
 
-**Remind tomorrow** snoozes that version for a day; a new release always notifies. If the check fails, the Updates tab's diagnostics panel says why (not configured, rate-limited, offline, no releases yet) instead of staying silent. Every check is also logged with repo, versions, and outcome.
+**Remind tomorrow** snoozes that version for a day. If the check fails, the Updates tab says why instead of staying silent.
 
-To test the whole flow before any real release exists: `node scripts/update-test-server.js 8977 newer`, then set `RUNCONTAINER_UPDATE_API=http://127.0.0.1:8977` and use repo `test/app` (env only, never a URL from the UI).
+## Build from source
 
-## Using it
+```bash
+npm install
+npm run build   # bundle the interface
+npm start       # open the app
+npm test        # run the test suite
+```
 
-1. **Apps tab, ＋ button:** Install EXE or import from URL.
-2. **Run** launches the app contained; **Close** stops it; **Delete** removes it with its folder.
-3. **Tweaks tab:** per-app launch arguments, memory cap, CPU share.
-4. **Profiles tab:** default / relaxed / locked presets (locked takes network off Hyper-V VMs; RCVM cannot cut network).
-5. **Settings tab:** the backend picked for this PC, app storage, and Advanced backend overrides.
-6. **Updates tab:** installed version, changelog, Check for updates.
+On Windows you can also double-click `run.bat`, which installs dependencies and opens the app.
 
-## How apps are contained
-
-| Mode | What it does | Needs |
-| --- | --- | --- |
-| **QEMU VM backend (automatic)** | Each app runs in its own real virtual machine (overlay disk, guest agent, no virtual network). | Installed QEMU 8+ and a prepared VM image (optional) |
-| **Hyper-V VM (per-app opt-in)** | The app runs in its own guest Windows VM. For software RCVM can't hold. | Pro/Enterprise/Education, firmware virtualization on, Hyper-V enabled, a sysprepped base image (`RUNCONTAINER_HYPERV_BASE_IMAGE`), one-time guest credential |
-| **AppContainer (per-app opt-in)** | Verified container token for compatible apps. Not a VM. | Windows 10/11 |
-
-QEMU VMs have no virtual network by default and are managed over localhost only. Without a VM image, apps run under RCVM containment (it doesn't cut network access). Anything that can't be contained or virtualized refuses to launch instead of running loose.
-
-Hyper-V setup (only if you opt an app into the full VM): enable virtualization in firmware, run as admin `DISM /Online /Enable-Feature /All /FeatureName:Microsoft-Hyper-V`, reboot, build a sysprepped Gen-2 base VHDX, set `RUNCONTAINER_HYPERV_BASE_IMAGE` to its path, then provision the guest credential from Settings.
-
-## Reset vs Delete
-
-`Reset` stops the app and returns the environment to a fresh state, keeping data. `Delete` stops everything and removes the app with its folder. There is no unguarded mode and no Sandboxie backend.
-
-## Compatibility and safety
-
-- Some installers expect to be installed system-wide, or rely on drivers, services or hardware access. These may not work in an environment.
-- Only install software you trust. Applications inside an environment can still see anything you type into them, so sign in only where you trust the software.
-- Isolation reduces the impact an application can have on your PC, but it is not a guarantee. It is not antivirus, and not every Windows application will work.
-- Keep your normal antivirus and backups running.
-
-## (Old engineering notes below — kept for developers)
-
-## How isolation actually works now (developer reference)
-
-- **Hyper-V VM (REQUIRED path).** Per-environment VM (`RunContainer-<appId>`,
-  differencing VHDX under the environment's `hyperv/` folder, shared base image
-  never modified). Install: the installer is staged, copied into the guest
-  (`Copy-VMFile`, Guest Service Interface), executed in the guest via PowerShell
-  Direct with the provisioned guest credential, and its REAL exit code is waited
-  on; the installed guest path is recorded. Run: the app launches in the guest,
-  the guest PID is verified in the guest process list, AND the host process table
-  is checked for strays (any host execution fails the launch closed). Stop ends
-  the guest app (VM kept running for fast relaunch); Delete does the ordered
-  lifecycle below. Any VM failure refuses — never AppContainer, never host.
-- **AppContainer (OPTIONAL, not a VM, explicit opt-in only).** Profile per app,
-  verified token before reporting. Compatible apps only; never selected when VM
-  isolation is required and never a fallback.
-- **Installers run inside the environment.** `install-in-environment` stages the
-  installer into the environment and runs it under the same boundary as the app.
-  Installer-spawned children are persisted (`knownPids` + parent-PID lineage), so a
-  child that outlives its installer stays tracked for Stop/Delete.
-- **Fail-closed everywhere.** Bad paths, missing Hyper-V, token mismatch, and legacy
-  `profile`/`sandboxie` selections all refuse with an actionable error. Nothing is
-  ever launched without a boundary.
-
-Window hosting (re-parenting the app window into RunContainer) is **presentation
-only, experimental, and unverified on Windows**: it adds no isolation, Windows often
-refuses it across integrity levels, and it must never be mistaken for the boundary.
-Do not claim it works until `scripts/windows-verify.js` + manual testing prove it.
-
-### Deleting an environment
-
-`Reset` and `Delete` are separate. Reset stops the guest app and reboots the guest OS
-fresh (verified ready afterwards), keeping the disk, installed apps, and data; for
-AppContainer mode it stops processes and drops the container profile. Use Reset after
-changing CPU/memory/network tweaks or when the guest is wedged.
-
-`Delete` on a VM environment is ordered and verified: launches blocked
-(`deleteJobs` guard + per-environment operation lock) → guest app stopped in-guest (graceful close, 15s, then
-force) → graceful guest shutdown with 120s wait for Hyper-V `Off` → power-off
-escalation ONLY after timeout (and re-verified `Off` before touching disks) →
-`Remove-VM` config with absence verification → remove ONLY this environment's
-differencing VHDX (exact-name + inside-env + not-the-base-image validation, 5
-unlink retries for the vmms handle window, absence verified) → host files via
-`\\?\` extended path → record removed. Success is reported only when the VM
-is absent AND the intended files are absent; the base image and sibling envs are
-re-verified intact. A leftover lock reports the exact path, error, and recovery
-(close antivirus/backup/indexer, run Delete again) — this is why deletion no
-longer "locks up Windows": the VM is off and its disk detached before any file
-is removed, instead of deleting a live VHDX out from under vmms.
-
-There is no unguarded mode. There is no Sandboxie path.
-
-## Get help and report issues
-
-- **Questions and ideas:** [RunContainer Discord](https://discord.gg/UKTGRMMmC4)
-- **Bugs and feature requests:** [Issue tracker](https://github.com/RunContainer-7/runcontainer/issues)
-
-## Project structure
+## Project layout
 
 ```
 runcontainer
-├── public/        Electron main process and runtime scripts
-├── src/           React interface
-├── scripts/       Helper scripts
-├── installer/     Installer build files (Inno Setup)
-├── run.bat        Run from source on Windows
+├── public/     Electron main process and runtime helpers
+├── src/        React interface
+├── scripts/    Build and verification helpers
+├── installer/  Installer build files
 └── package.json
 ```
 
-## Versioning
+## Releasing
 
-`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.3 && git push origin v0.6.3` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
+`package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
-## For developers
+```bash
+git tag v0.6.4 && git push origin v0.6.4
+```
 
-- Easiest from source on Windows: double-click `run.bat` (installs dependencies, builds the interface, opens the app).
-- `npm install`, `npm start` (Electron), `npm run build`.
-- `npm test`, plus on Windows `node scripts/windows-verify.js`.
-- App icon: edit `public/runcontainer-icon.svg`, then run `node scripts/build-app-icon.js` to regenerate `public/runcontainer-icon.ico` (16-256 px) and `.png`. The release workflow runs `--check` and refuses to ship a stale icon. `package.json` carries a `jest.testMatch` override because create-react-app's absolute-path patterns stop matching on Windows with micromatch 4.0.8, which made `npm test` silently find zero tests.
-- App states: Running, Stopped, Failed, Unknown. One operation per environment at a time.
-- Hyper-V internals (differencing disks, PowerShell Direct, VMConnect display) live in `public/hyperv-runtime.js`; RCVM builders in `public/rcvm-runtime.js`; update checks in `public/update-check.js`.
+The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.
 
 MIT License.

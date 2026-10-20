@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
-import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate } from "../services/containerService";
+import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -61,6 +61,7 @@ describe("ContainerManager", () => {
 
   afterEach(() => {
     jest.clearAllMocks();
+    listContainers.mockResolvedValue([]);
     document.body.innerHTML = "";
   });
 
@@ -84,11 +85,11 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows the automatic backend and storage in Settings", () => {
+  it("shows where app files live, with nothing to configure in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Backend:");
-    expect(container.textContent).toContain("App storage");
+    expect(container.textContent).toContain("Each app runs in its own space");
+    expect(container.textContent).toContain("Where app files live");
     expect(container.textContent).toContain("Logs");
     expect(container.textContent).not.toContain("Auto-isolate APPDATA");
     act(() => {
@@ -109,13 +110,12 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("labels every non-VM backend as not a VM", () => {
+  it("keeps backend and VM jargon out of Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Hyper-V");
-    expect(container.textContent).toContain("NOT a VM");
-    expect(container.textContent).not.toContain("Sandboxie");
-    expect(container.textContent).not.toContain("Run unguarded instead");
+    for (const jargon of ["Backend:", "QEMU", "Hyper-V", "AppContainer", "virtual machine", "NOT a VM", "Sandboxie", "Run unguarded instead"]) {
+      expect(container.textContent).not.toContain(jargon);
+    }
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -137,7 +137,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.6.3");
+    expect(container.textContent).toContain("RunContainer v0.6.4");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -164,7 +164,7 @@ describe("ContainerManager", () => {
     expect(container.textContent).toContain("Save tweaks");
     openTab(container, "Profiles");
     expect(container.textContent).toContain("locked");
-    expect(container.textContent).toContain("Isolation presets");
+    expect(container.textContent).toContain("Choose how much access");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -194,14 +194,13 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("keeps backend overrides behind the Advanced disclosure", () => {
+  it("does not ask users to choose or override a backend", () => {
     const container = render();
     openTab(container, "Settings");
-    const advanced = container.querySelector("details.advanced-settings");
-    expect(advanced).not.toBeNull();
-    expect(advanced.open).toBe(false);
-    expect(advanced.textContent).toContain("Use prepared image");
-    expect(advanced.textContent).toContain("Check readiness");
+    expect(container.querySelector("details.advanced-settings")).toBeNull();
+    for (const control of ["Use prepared image", "Check readiness", "Override backend", "base image"]) {
+      expect(container.textContent).not.toContain(control);
+    }
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -248,12 +247,47 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("presents the QEMU VM as a backend RunContainer picks automatically", () => {
+  it("describes one space per app instead of backend choices", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("picks the strongest backend");
-    expect(container.textContent).toContain("Recheck backend");
-    expect(container.textContent).toContain("not a hardware VM");
+    expect(container.textContent).toContain("own space");
+    expect(container.textContent).toContain("Check again");
+    for (const jargon of ["picks the strongest backend", "Recheck backend", "not a hardware VM"]) {
+      expect(container.textContent).not.toContain(jargon);
+    }
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("says when a locked profile cannot be enforced on this PC", async () => {
+    listContainers.mockResolvedValue([
+      { id: "offline-app", name: "Offline app", source: "C:\\apps\\offline\\app.exe", profile: "locked", networkEnabled: false },
+    ]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Profiles");
+    expect(container.textContent).toContain("no network requested (not enforced on this PC)");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("keeps backend and guest knobs out of the Manage panel", async () => {
+    listContainers.mockResolvedValue([
+      { id: "app-1", name: "Test app", source: "C:\\apps\\one\\app.exe", status: "Stopped" },
+    ]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    const manage = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Manage");
+    expect(manage).not.toBeUndefined();
+    act(() => {
+      manage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("This app runs in its own managed environment");
+    for (const control of ["Override backend", "Guest exe path", "VM backend", "Containment", "Hyper-V VM", "AppContainer"]) {
+      expect(container.textContent).not.toContain(control);
+    }
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
