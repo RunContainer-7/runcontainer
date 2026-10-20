@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.6.2',
+    date: '2026-10-20',
+    title: 'Documentation and Discord links in the Info tab',
+    changes: [
+      'The Info tab has a Support & documentation section: an Open documentation button that opens the official documentation site, and the Discord server as a real link.',
+      'The Discord link in the beta notice is now clickable instead of showing the address as plain text.',
+      'Links open in your default browser. RunContainer only opens its own documentation, Discord server and GitHub pages, and refuses every other address.',
+    ],
+  },
+  {
     version: '0.6.1',
     date: '2026-10-20',
     title: 'New app icon, applied everywhere',

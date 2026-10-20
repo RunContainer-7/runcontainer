@@ -136,7 +136,7 @@ runcontainer
 
 ## Versioning
 
-`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.1 && git push origin v0.6.1` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
+`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.2 && git push origin v0.6.2` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
 
 ## For developers
 
