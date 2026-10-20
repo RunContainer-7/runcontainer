@@ -11,14 +11,12 @@ Requirements: Windows 10/11 (Home works), 64-bit. No admin rights needed for the
 
 ## How Run works out of the box
 
-Press **Run** and the app launches contained — no setup needed. RunContainer picks the strongest backend available: the genuine QEMU VM when one is provisioned below, otherwise RCVM process containment (Job Object lifetime/resource caps, verified on your machine after every launch). If verification fails, the app is killed and Run reports exactly which check failed — nothing runs uncontained.
+Press **Run** and the app launches inside its environment — no setup needed. RunContainer picks the strongest backend the PC supports:
 
-## QEMU setup (first run, optional but recommended)
+- **VM backend (QEMU):** when a prepared VM image is configured, each app runs inside its own virtual machine (overlay disk, guest agent, no virtual network). QEMU is detected, never bundled, and no Windows image is downloaded.
+- **Containment (RCVM):** otherwise the app runs in a Windows Job Object with lifetime, memory, CPU and process-count caps and a private profile folder, verified on this machine after every launch. This is process containment, not a hardware VM.
 
-1. Install QEMU for Windows (https://www.qemu.org/download/) — it is detected, never bundled.
-2. Settings → QEMU VM setup → Detect QEMU (WHPX acceleration when available, TCG fallback otherwise).
-3. Create a staging disk, boot it with your own licensed Windows ISO, install Windows + virtio drivers + qemu-guest-agent inside the VM window, shut Windows down.
-4. Select the staging disk as the base image. Each app then gets its own overlay disk; the base is never modified.
+The Settings tab shows which backend is in use; prepared-image and Hyper-V controls sit under **Advanced**. If verification fails, the app is killed and Run reports exactly which check failed — nothing runs uncontained.
 
 ## Updating
 
@@ -38,18 +36,18 @@ To test the whole flow before any real release exists: `node scripts/update-test
 2. **Run** launches the app contained; **Close** stops it; **Delete** removes it with its folder.
 3. **Tweaks tab:** per-app launch arguments, memory cap, CPU share.
 4. **Profiles tab:** default / relaxed / locked presets (locked takes network off Hyper-V VMs; RCVM cannot cut network).
-5. **Settings tab:** containment overview, Hyper-V readiness check, guest credential setup.
+5. **Settings tab:** the backend picked for this PC, app storage, and Advanced backend overrides.
 6. **Updates tab:** installed version, changelog, Check for updates.
 
 ## How apps are contained
 
 | Mode | What it does | Needs |
 | --- | --- | --- |
-| **QEMU genuine VM (default)** | Each app runs in its own real virtual machine (overlay disk, guest agent, no virtual network). | Installed QEMU 8+, a provisioned base image from Windows media you own |
+| **QEMU VM backend (automatic)** | Each app runs in its own real virtual machine (overlay disk, guest agent, no virtual network). | Installed QEMU 8+ and a prepared VM image (optional) |
 | **Hyper-V VM (per-app opt-in)** | The app runs in its own guest Windows VM. For software RCVM can't hold. | Pro/Enterprise/Education, firmware virtualization on, Hyper-V enabled, a sysprepped base image (`RUNCONTAINER_HYPERV_BASE_IMAGE`), one-time guest credential |
 | **AppContainer (per-app opt-in)** | Verified container token for compatible apps. Not a VM. | Windows 10/11 |
 
-QEMU VMs have no virtual network by default and are managed over localhost only. Legacy RCVM process containment remains as an explicitly labelled non-VM fallback (it doesn't cut network access). Anything that can't run in a VM refuses to launch instead of running loose.
+QEMU VMs have no virtual network by default and are managed over localhost only. Without a VM image, apps run under RCVM containment (it doesn't cut network access). Anything that can't be contained or virtualized refuses to launch instead of running loose.
 
 Hyper-V setup (only if you opt an app into the full VM): enable virtualization in firmware, run as admin `DISM /Online /Enable-Feature /All /FeatureName:Microsoft-Hyper-V`, reboot, build a sysprepped Gen-2 base VHDX, set `RUNCONTAINER_HYPERV_BASE_IMAGE` to its path, then provision the guest credential from Settings.
 

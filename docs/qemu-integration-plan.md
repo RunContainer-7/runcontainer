@@ -19,9 +19,11 @@
   `qemu-unavailable` with setup guidance otherwise (never silent fallback).
   Legacy `rcvm` process containment stays as an explicitly labelled non-VM
   opt-in; Hyper-V and AppContainer paths untouched.
-- UI: Settings → QEMU VM setup card (detect, base select, staging disk,
-  provision boot), Manage → engine buttons + guest-exe-path editor, Updates →
-  update wizard (notes, download with progress, install & restart).
+- UI: Settings reports the backend RunContainer picked (VM when an image is
+  present, containment otherwise) in one line; detect, prepared-image select
+  and Hyper-V readiness sit under Advanced. Manage keeps the engine override
+  and guest-exe-path editor under its own Advanced disclosure. Updates keeps
+  the update wizard (notes, download with progress, install & restart).
 - Data preserved: old records keep working (undefined engine → QEMU path with
   guidance; `rcvm` records → legacy containment). No migration needed.
 
