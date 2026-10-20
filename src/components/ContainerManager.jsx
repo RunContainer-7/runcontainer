@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, createQemuProvisionDisk, bootQemuProvision, setGuestExePath, openExternalUrl } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, setGuestExePath, openExternalUrl } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.2";
+const APP_VERSION_FALLBACK = "0.6.3";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -51,7 +51,6 @@ export default function ContainerManager() {
   const [wizardMessage, setWizardMessage] = useState('');
   const [downloadProgress, setDownloadProgress] = useState(null);
   const [qemuStatus, setQemuStatus] = useState(null);
-  const [qemuIso, setQemuIso] = useState('');
   const [guestExePath, setGuestExePath] = useState('');
   const [tweakAppId, setTweakAppId] = useState(null);
   const [tweakArgs, setTweakArgs] = useState("");
@@ -484,9 +483,9 @@ export default function ContainerManager() {
     Promise.resolve(detectQemu())
       .then((status) => {
         if (status) setQemuStatus(status);
-        setInstallMessage(status?.qemuSystem
-          ? `QEMU ${status.version || ''} at ${status.qemuSystem} (${status.accel || 'unknown accel'}).${status.baseImage ? '' : ' Now provision a base image below.'}`
-          : `QEMU not found: ${(status?.missing || []).join(' ')}`);
+        setInstallMessage(status?.available
+          ? `VM backend ready: QEMU ${status.version || ''} (${status.accel || 'unknown accel'}).`
+          : `Apps will run contained (RCVM): ${(status?.missing || []).join(' ') || 'no VM image on this PC.'}`);
       })
       .catch((error) => setInstallMessage(error?.message || 'QEMU detection failed.'));
   }
@@ -505,28 +504,6 @@ export default function ContainerManager() {
         });
       })
       .catch((error) => setInstallMessage(error?.message || 'Base image was not set.'));
-  }
-
-  function handleProvisionCreate() {
-    setInstallMessage('Creating staging disk…');
-    Promise.resolve(createQemuProvisionDisk({ sizeGB: 60 }))
-      .then((result) => setInstallMessage(result?.created
-        ? `Staging disk created at ${result.diskPath}. Boot it with your Windows ISO next.`
-        : (result?.error || 'Staging disk was not created.')))
-      .catch((error) => setInstallMessage(error?.message || 'Staging disk was not created.'));
-  }
-
-  function handleProvisionBoot() {
-    if (!qemuIso) {
-      setInstallMessage('Enter your Windows ISO path first (media and licence you own).');
-      return;
-    }
-    setInstallMessage('Booting provisioning VM…');
-    Promise.resolve(bootQemuProvision({ isoPath: qemuIso }))
-      .then((result) => setInstallMessage(result?.booted
-        ? result.note
-        : (result?.error || 'Provisioning VM did not boot.')))
-      .catch((error) => setInstallMessage(error?.message || 'Provisioning VM did not boot.'));
   }
 
   function handleSetGuestExe(container) {
@@ -574,7 +551,7 @@ export default function ContainerManager() {
       updateContainerStatus(container.id, container.status);
       refreshContainers();
       setInstallMessage(engine === 'qemu'
-        ? `${container.name} will run inside its genuine QEMU VM (needs detected QEMU + provisioned base image; see Settings).`
+        ? `${container.name} will run inside its own VM when this PC has a VM backend.`
         : engine === 'hyperv'
         ? `${container.name} will run inside its Hyper-V VM (full guest OS; needs Pro/Enterprise/Education + virtualization + base image + guest credential).`
         : engine === 'appcontainer'
@@ -671,7 +648,7 @@ export default function ContainerManager() {
               <h3>Installing into RunContainer</h3>
               <button className="icon-button" onClick={() => setShowInstallWizard(false)}>×</button>
             </div>
-            <p className="wizard-copy">RunContainer prepares a managed environment folder. The app always runs contained inside it — RCVM containment on all editions, Hyper-V VM for arbitrary software, AppContainer for compatible apps — never directly on the host without a boundary. If containment cannot be established, Run refuses to launch.</p>
+            <p className="wizard-copy">RunContainer prepares a managed environment folder. The app always runs inside it — in a VM when one is available, otherwise contained with Job Object caps and a private profile — never directly on the host. If that cannot be established, Run refuses to launch.</p>
             <div className="wizard-steps">
               <div className="wizard-step active">1. Validate app</div>
               <div className="wizard-step active">2. Create sandbox</div>
@@ -706,7 +683,7 @@ export default function ContainerManager() {
                     {activeSession.status === 'Unknown'
                       ? `State unknown${activeSession.statusNote ? `: ${activeSession.statusNote}` : '. Run reconciles, Stop attempts a clean stop, Reset reboots the guest.'}`
                       : activeSession.isolated
-                        ? `Isolation: ${activeSession.activeEngine === 'hyperv' || activeSession.isolationLevel === 'vm' ? `VM ${activeSession.hypervVm || ''} (guest PID ${activeSession.guestPid ?? '—'}, verified in-guest)` : 'AppContainer mode (NOT a VM)'}.`
+                        ? `Isolation: ${activeSession.activeEngine === 'hyperv' || activeSession.isolationLevel === 'vm' ? (activeSession.activeEngine === 'qemu' ? `QEMU VM (guest PID ${activeSession.guestPid ?? '—'}, verified by the guest agent)` : `VM ${activeSession.hypervVm || ''} (guest PID ${activeSession.guestPid ?? '—'}, verified in-guest)`) : 'AppContainer mode (NOT a VM)'}.`
                         : 'Isolation: none. Only APPDATA, LOCALAPPDATA and TEMP are redirected, so this app can still reach the rest of Windows.'}
                   </div>
                 )}
@@ -728,9 +705,8 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div>
               <h2>My Apps</h2>
-              <span className="muted">Managed apps</span>
+              <span className="muted">Managed apps · {appContainers.length}</span>
             </div>
-            <div className="pill">Live container mode</div>
           </div>
 
           {selectedExe && <p className="status-line">Selected: {selectedExe}</p>}
@@ -758,7 +734,7 @@ export default function ContainerManager() {
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
                         {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • VM disk missing' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
-                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : container.isolationEngine === 'hyperv' ? ' • Hyper-V VM (full)' : container.isolationEngine === 'rcvm' ? ' • RCVM containment (not a VM)' : ' • Genuine VM when provisioned, RCVM containment otherwise'}
+                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (not a VM)' : container.isolationEngine === 'hyperv' ? ' • Hyper-V VM' : container.isolationEngine === 'qemu' ? ' • VM requested' : ''}
                       </div>
                     </div>
                   </div>
@@ -767,13 +743,18 @@ export default function ContainerManager() {
                     <button className="settings-button" onClick={() => setSelectedApp(container)}>Manage</button>
                     <button className="settings-button" onClick={() => handleRun(container)}>Run</button>
                     <button className="settings-button ghost" onClick={() => handleKill(container)}>Close</button>
-                    <button className="settings-button ghost" onClick={() => handleReset(container)}>Reset</button>
-                    {deletingId === container.id
-                      ? <button className="settings-button ghost" onClick={() => handleCancelDelete(container)}>Cancel delete</button>
-                      : <button className="settings-button ghost" onClick={() => handleDelete(container)}>Delete</button>}
-                    <button className="settings-button ghost" onClick={() => handleDuplicate(container)}>Duplicate</button>
-                    <button className="settings-button ghost" onClick={() => handleExport(container)}>Export info</button>
-                    <button className="settings-button ghost" onClick={() => handleViewLogs(container)}>Logs</button>
+                    <details className="more-menu">
+                      <summary className="settings-button ghost">More</summary>
+                      <div className="more-menu-panel">
+                        <button onClick={() => handleReset(container)}>Reset (keep data)</button>
+                        <button onClick={() => handleDuplicate(container)}>Duplicate</button>
+                        <button onClick={() => handleExport(container)}>Export info</button>
+                        <button onClick={() => handleViewLogs(container)}>Logs</button>
+                        {deletingId === container.id
+                          ? <button onClick={() => handleCancelDelete(container)}>Cancel delete</button>
+                          : <button className="danger" onClick={() => handleDelete(container)}>Delete</button>}
+                      </div>
+                    </details>
                   </div>
                 </div>
               ))
@@ -827,7 +808,7 @@ export default function ContainerManager() {
                 <option key={entry.id} value={entry.id}>{entry.name || entry.id}</option>
               ))}
             </select>
-            <label className="muted" htmlFor="tweak-args">Launch arguments (passed to the app inside its VM)</label>
+            <label className="muted" htmlFor="tweak-args">Launch arguments</label>
             <input id="tweak-args" type="text" placeholder="e.g. --safe-mode" value={tweakArgs} onChange={(event) => setTweakArgs(event.target.value)} />
             <label className="muted" htmlFor="tweak-memory">Memory cap (MB, 256–32768)</label>
             <input id="tweak-memory" type="number" min="512" max="32768" value={tweakMemory} onChange={(event) => setTweakMemory(event.target.value)} />
@@ -837,7 +818,7 @@ export default function ContainerManager() {
             <div className="detail-actions">
               <button className="settings-button" onClick={() => handleSaveTweaks(appContainers.find((entry) => entry.id === tweakAppId))} disabled={!tweakAppId}>Save tweaks</button>
             </div>
-            <p className="muted">Memory and CPU caps apply at the next Run (RCVM) or after Reset (Hyper-V VM). Network changes apply to Hyper-V VMs after Reset; RCVM cannot cut network access.</p>
+            <p className="muted">Memory and CPU caps apply at the next Run. Network changes apply to a VM backend after Reset; containment cannot cut network access.</p>
           </div>
         </div>
       )}
@@ -878,64 +859,18 @@ export default function ContainerManager() {
       {activeTab === "Settings" && (
         <div className="placeholder-panel">
           <h3>Settings</h3>
-          <p>How RunContainer isolates each app.</p>
-          <div className="detail-actions">
-            <button className="settings-button" onClick={refreshHypervStatus}>Check Hyper-V readiness</button>
-            <button className="settings-button ghost" onClick={handleProvisionCredential}>Provision guest credential</button>
-          </div>
-          {hypervStatus && (
-            <div className="profile-list">
-              <div className={`profile-card ${hypervStatus.ready ? 'active' : ''}`}>
-                <strong>Hyper-V readiness: {hypervStatus.ready ? 'ready' : 'not ready'}</strong>
-                <span>
-                  {hypervStatus.ready
-                    ? `VMs can be provisioned. Base image: ${hypervStatus.baseImage || '(RUNCONTAINER_HYPERV_BASE_IMAGE not set)'}.`
-                    : `Missing: ${(hypervStatus.missing || []).join(' ')}`}
-                </span>
-              </div>
-            </div>
-          )}
+          <p>RunContainer picks the strongest backend this PC supports. Isolation is always on — there is nothing to configure before you press Run.</p>
           <div className="profile-list">
-            <div className="profile-card active">
-              <strong>QEMU genuine VM (default backend)</strong>
-              <span>{qemuStatus ? (qemuStatus.available ? `Ready: QEMU ${qemuStatus.version || ''} (${qemuStatus.accel || 'unknown accel'}), base image set.` : `Not ready: ${(qemuStatus.missing || []).join(' ')}`) : 'Detecting QEMU…'}</span>
+            <div className={`profile-card ${qemuStatus?.available ? 'active' : ''}`}>
+              <strong>{qemuStatus?.available ? 'Backend: VM (QEMU)' : 'Backend: containment (RCVM)'}</strong>
+              <span>
+                {qemuStatus?.available
+                  ? `Apps run inside a managed QEMU VM (${qemuStatus.accel || 'accelerated'}), with a separate disk per app.`
+                  : 'Apps run contained on this PC: Windows Job Object caps for lifetime, memory, CPU and process count, plus a private profile folder per app. No admin rights, no reboot, works on every Windows edition. This is process containment, not a hardware VM, and it does not cut network access.'}
+              </span>
               <div className="detail-actions">
-                <button className="settings-button" onClick={handleDetectQemu}>Detect QEMU</button>
-                <button className="settings-button ghost" onClick={handleBrowseBase}>Select base image</button>
-                <button className="settings-button ghost" onClick={handleProvisionCreate}>Create staging disk</button>
+                <button className="settings-button ghost" onClick={handleDetectQemu}>Recheck backend</button>
               </div>
-              <div className="source-form">
-                <label className="muted" htmlFor="qemu-iso">Windows ISO you own (first-time provisioning only)</label>
-                <input id="qemu-iso" type="text" placeholder="C:\\ISOs\\windows.iso" value={qemuIso} onChange={(event) => setQemuIso(event.target.value)} />
-                <div className="detail-actions">
-                  <button className="settings-button ghost" onClick={handleProvisionBoot}>Boot provisioning VM</button>
-                </div>
-              </div>
-              <span className="muted">QEMU is detected, never bundled (GPLv2). Windows media and licence are yours; nothing is downloaded. WHPX acceleration when available, TCG fallback otherwise. Install Windows + virtio drivers + qemu-guest-agent in the provisioning VM, shut it down, then select its disk as the base image.</span>
-            </div>
-            <div className="profile-card">
-              <strong>RCVM containment (default until a VM is provisioned, not a VM)</strong>
-              <span>Job Object caps (lifetime, memory, CPU, process count) with per-app profile folders, verified on this machine after every launch. No admin rights, works on Home and Pro — this is what Run uses until you provision a QEMU base image. Process containment, explicitly not a virtual machine, and it does not cut network access.</span>
-            </div>
-            <div className="profile-card">
-              <strong>VM isolation as a full Hyper-V VM (optional, no Sandboxie)</strong>
-              <span>For arbitrary software, switch an app to its own Hyper-V guest VM: installer executes in the guest, app launches in the guest, guest PID verified in-guest with zero host processes. Needs Windows 10/11 Pro/Enterprise/Education, firmware virtualization, Hyper-V enabled, a provisioned base VHDX (RUNCONTAINER_HYPERV_BASE_IMAGE), and a provisioned guest credential. Failures refuse the launch — never AppContainer, never host.</span>
-            </div>
-            <div className="profile-card active">
-              <strong>Setup guide: make this PC VM-ready</strong>
-              <span>1. Use Windows 10/11 Pro, Enterprise, or Education (Home has no Hyper-V). 2. Enable virtualization in firmware (Intel VT-x / AMD-V). 3. Run as Administrator: DISM /Online /Enable-Feature /All /FeatureName:Microsoft-Hyper-V — then reboot. 4. Start the Hyper-V Virtual Machine Management service (vmms). 5. Build a sysprepped Generation-2 Windows base VHDX and set RUNCONTAINER_HYPERV_BASE_IMAGE to its path. 6. Press “Provision guest credential” above (one time, DPAPI-encrypted). 7. Press “Check Hyper-V readiness” — Run is refused until every check passes, so nothing ever runs unisolated.</span>
-            </div>
-            <div className="profile-card">
-              <strong>Why RCVM instead of a bundled hypervisor</strong>
-              <span>Shipping a separate hypervisor would not remove the requirements — any real VM engine still needs hardware virtualization, an admin-installed driver, and a licensed Windows guest image, and emulation without virtualization is orders of magnitude too slow for real apps. So RCVM contains apps with built-in Windows primitives that work everywhere, and the full Hyper-V VM stays for software that needs a guest OS.</span>
-            </div>
-            <div className="profile-card">
-              <strong>Optional AppContainer mode (NOT a VM)</strong>
-              <span>A lighter token-boundary mode stays available only by explicit per-app opt-in, for compatible apps that do not need admin rights, drivers, or services. It is never selected when VM isolation is required and never used as a fallback. There is no unguarded mode at all.</span>
-            </div>
-            <div className="profile-card">
-              <strong>Windows inside RunContainer</strong>
-              <span>Run also tries to host the app’s window inside RunContainer’s own window, which is how an app appears to run “inside” RunContainer. This is presentation only: it adds no isolation, and Windows often refuses to re-parent a window at a lower integrity level, in which case the app opens in its own window. Turn it off per app in Manage.</span>
             </div>
             <div className="profile-card">
               <strong>App storage</strong>
@@ -946,21 +881,53 @@ export default function ContainerManager() {
               <span>Launch, stop, and exit events are written to each app’s log, which you can open with the Logs button.</span>
             </div>
           </div>
+          <details className="advanced-settings">
+            <summary>Advanced</summary>
+            <p className="muted">Only needed for apps that ask for a specific backend. Normal use needs none of this.</p>
+            <div className="profile-list">
+              <div className="profile-card">
+                <strong>QEMU VM</strong>
+                <span>
+                  {qemuStatus
+                    ? (qemuStatus.available
+                      ? `Detected QEMU ${qemuStatus.version || ''} (${qemuStatus.accel || 'unknown accel'}) with a base image set.`
+                      : `Not available: ${(qemuStatus.missing || []).join(' ')}`)
+                    : 'Checking…'}
+                </span>
+                <span className="muted">RunContainer never downloads or bundles Windows. If you already keep a prepared image, point at it and apps that request a VM use it.</span>
+                <div className="detail-actions">
+                  <button className="settings-button ghost" onClick={handleBrowseBase}>Use prepared image</button>
+                </div>
+              </div>
+              <div className="profile-card">
+                <strong>Hyper-V VM</strong>
+                <span>{hypervStatus ? (hypervStatus.ready ? `Ready. Base image: ${hypervStatus.baseImage || 'set'}.` : `Not ready: ${(hypervStatus.missing || []).join(' ')}`) : 'Optional full-VM backend on Pro, Enterprise and Education.'}</span>
+                <div className="detail-actions">
+                  <button className="settings-button ghost" onClick={refreshHypervStatus}>Check readiness</button>
+                  <button className="settings-button ghost" onClick={handleProvisionCredential}>Guest credential</button>
+                </div>
+              </div>
+              <div className="profile-card">
+                <strong>AppContainer</strong>
+                <span>Lightweight token boundary for compatible apps, only when an app opts in. NOT a VM.</span>
+              </div>
+            </div>
+          </details>
         </div>
       )}
 
       {activeTab === "Info" && (
         <div className="placeholder-panel info-panel">
           <h3>What RunContainer is</h3>
-          <p>RunContainer is a container-style manager for Windows apps: each app gets its own managed environment and always runs contained inside it. RCVM containment works on every edition; full Hyper-V VMs cover arbitrary software on Pro and up.</p>
+          <p>RunContainer is a container-style launcher for Windows apps. Each app gets its own managed folder and always runs inside it, never directly on your PC.</p>
           <div className="profile-list">
             <div className="profile-card active">
               <strong>How it works</strong>
-<span>Each app is copied into its own environment folder and always runs contained inside it: RCVM (Job Object caps + per-app profile) by default, Hyper-V guest VM for arbitrary software, AppContainer (verified token) for compatible apps. Window hosting only re-parents the app window for display (experimental, unverified) and is never the isolation.</span>
+<span>Install an app and press Run. RunContainer starts it inside its environment: in a managed VM when this PC has a VM backend, otherwise contained with Job Object caps and a private profile folder. Installers, popups and child processes stay inside the same boundary.</span>
             </div>
             <div className="profile-card">
               <strong>What isolation you actually get</strong>
-<span>RCVM: lifetime/resource caps with a per-app profile (all editions; not a hardware VM, no network cut-off). AppContainer: restricted container token (verified before reporting). Hyper-V: separate guest OS per environment. Failed containment refuses the launch; nothing ever runs silently unguarded.</span>
+<span>VM backend: a separate virtual machine with its own disk. Containment: lifetime, memory, CPU and process caps plus private app data. AppContainer is an optional light boundary for compatible apps. If a boundary cannot be established, Run refuses — nothing ever runs unguarded.</span>
             </div>
             <div className="profile-card">
               <strong>Use cases</strong>
@@ -1149,34 +1116,41 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div>
-                <h4>Isolation (fail-closed)</h4>
+                <h4>Isolation</h4>
                 <p className="muted">
                   {selectedApp.isolationEngine === 'appcontainer'
-                    ? 'OPTIONAL AppContainer mode: verified token boundary only — NOT a virtual machine. Compatible apps only; admin installers, drivers, and services cannot run here.'
+                    ? 'AppContainer: light token boundary, NOT a VM. Compatible apps only.'
                     : selectedApp.isolationEngine === 'hyperv'
-                      ? 'Hyper-V VM (full guest OS): installer and app run inside this environment\'s own guest VM. Needs Pro/Enterprise/Education + firmware virtualization + provisioned base image + guest credential.'
+                      ? 'Hyper-V VM: the app runs inside its own guest OS.'
                       : selectedApp.isolationEngine === 'rcvm'
-                        ? 'RCVM containment: Job Object caps with a per-app profile, verified post-launch on this machine. Process containment — explicitly NOT a virtual machine, no network cut-off.'
-                        : 'QEMU genuine VM (default): per-environment virtual machine with overlay disk and guest agent. Needs detected QEMU + provisioned base image (see Settings).'}
+                        ? 'Containment (RCVM): Job Object caps and a private profile. Not a VM.'
+                        : selectedApp.isolationEngine === 'qemu'
+                          ? 'VM backend: the app runs inside its own virtual machine.'
+                          : 'Automatic: a VM backend when this PC has one, otherwise containment. Nothing runs unguarded.'}
                 </p>
-                <div className="detail-actions">
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'qemu')}>QEMU VM (genuine)</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'rcvm')}>RCVM containment (not a VM)</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM (full)</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer (optional, not a VM)</button>
-                </div>
-                <div className="source-form">
-                  <label className="muted" htmlFor="guest-exe">Guest exe path (QEMU VMs: where the app installed inside the guest)</label>
-                  <input id="guest-exe" type="text" placeholder="C:\\Program Files\\App\\app.exe" value={guestExePath} onChange={(event) => setGuestExePath(event.target.value)} />
+                <details className="advanced-settings">
+                  <summary>Override backend</summary>
                   <div className="detail-actions">
-                    <button className="settings-button ghost" onClick={() => handleSetGuestExe(selectedApp)}>Save guest path</button>
+                    <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'qemu')}>VM backend</button>
+                    <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'rcvm')}>Containment</button>
+                    <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM</button>
+                    <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer</button>
                   </div>
-                </div>
+                  <div className="source-form">
+                    <label className="muted" htmlFor="guest-exe">Guest exe path (VM backend only)</label>
+                    <input id="guest-exe" type="text" placeholder="C:\\Program Files\\App\\app.exe" value={guestExePath} onChange={(event) => setGuestExePath(event.target.value)} />
+                    <div className="detail-actions">
+                      <button className="settings-button ghost" onClick={() => handleSetGuestExe(selectedApp)}>Save guest path</button>
+                    </div>
+                  </div>
+                </details>
                 <p className="muted">Profile: {selectedApp.profile || 'default'}. Change it in the Profiles tab.</p>
               </div>
               <div>
                 <h4>Display</h4>
-                {(selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv') ? (
+                {(selectedApp.activeEngine === 'qemu' || selectedApp.isolationEngine === 'qemu') ? (
+                  <p className="muted">VM apps show their window in the VM display while they run. Close removes the app from that VM.</p>
+                ) : (selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv') ? (
                   <div>
                     <p className="muted">VM apps are viewed through the supported guest console (VMConnect): a separate display window, not embedding. Guest windows cannot appear inside RunContainer&apos;s window.</p>
                     <div className="detail-actions">

@@ -148,7 +148,10 @@ body {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-bottom: 8px;
+    /* Overlay scrollbars sit on top of content; this gutter keeps text clear of
+       them instead of letting the last characters hide under the thumb. */
+    padding: 0 12px 8px 0;
+    scrollbar-gutter: stable;
     box-sizing: border-box;
 }
 
@@ -747,4 +750,84 @@ body {
 .update-banner .detail-actions {
   margin: 0;
   flex-shrink: 0;
+}
+
+/* Collapsed controls keep the main views short: advanced backends and the
+   per-app secondary actions stay one click away instead of forming a wall. */
+details.advanced-settings {
+    margin-top: 12px;
+    padding: 2px 12px 8px;
+    border: 1px solid rgba(96, 165, 250, 0.22);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.65);
+}
+
+details.advanced-settings > summary {
+    cursor: pointer;
+    padding: 8px 0;
+    color: #93c5fd;
+    font-size: 13px;
+    list-style: none;
+}
+
+details.advanced-settings > summary::-webkit-details-marker {
+    display: none;
+}
+
+details.advanced-settings > summary::before {
+    content: '▸';
+    margin-right: 8px;
+}
+
+details.advanced-settings[open] > summary::before {
+    content: '▾';
+}
+
+.more-menu {
+    position: relative;
+}
+
+.more-menu > summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-block;
+}
+
+.more-menu > summary::-webkit-details-marker {
+    display: none;
+}
+
+.more-menu-panel {
+    position: absolute;
+    right: 0;
+    top: 40px;
+    z-index: 20;
+    min-width: 184px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    background: #1f2937;
+    border: 1px solid rgba(96, 165, 250, 0.35);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+
+.more-menu-panel button {
+    border: none;
+    background: transparent;
+    color: #e5e7eb;
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.more-menu-panel button:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.more-menu-panel button.danger {
+    color: #fca5a5;
 }

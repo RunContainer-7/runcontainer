@@ -1346,7 +1346,7 @@ async function refreshQemuStatus() {
   }
   const baseImage = store.baseImage && fs.existsSync(store.baseImage) ? store.baseImage : null;
   if (!baseImage) {
-    missing.push('No base image provisioned. Supply a Windows disk image you own (Settings → QEMU VM setup); QEMU ships no guest OS or licence.');
+    missing.push('No VM image is set on this PC. Apps run contained until one is available (Settings → Advanced → Use prepared image).');
   }
   const status = {
     available: missing.filter((m) => !m.startsWith('WHPX')).length === 0,
@@ -1451,7 +1451,7 @@ async function ensureQemuEnvDisk(appRecord, vmConfig) {
   const qemu = require('./qemu-runtime');
   const store = loadQemuStore();
   if (!store.baseImage || !fs.existsSync(store.baseImage)) {
-    throw new Error('No base image provisioned. Open Settings → QEMU VM setup and provision one from Windows media you own.');
+    throw new Error('No VM image is set on this PC. Add a prepared image in Settings → Advanced, or let the app run contained.');
   }
   const paths = qemu.qemuEnvPaths(appRecord.sandboxRoot);
   fs.mkdirSync(paths.qemuDir, { recursive: true });

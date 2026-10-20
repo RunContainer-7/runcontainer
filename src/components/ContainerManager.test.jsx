@@ -84,26 +84,37 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows settings controls in Settings", () => {
+  it("shows the automatic backend and storage in Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("VM isolation");
-    expect(container.textContent).toContain("Windows inside RunContainer");
+    expect(container.textContent).toContain("Backend:");
     expect(container.textContent).toContain("App storage");
+    expect(container.textContent).toContain("Logs");
     expect(container.textContent).not.toContain("Auto-isolate APPDATA");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
   });
 
-  it("requires the VM path and marks AppContainer as not a VM", () => {
+  it("keeps ISO and provisioning clutter out of Settings", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("VM isolation");
+    // A container launcher should not make users provision a VM by hand.
+    expect(container.textContent).not.toContain("Windows ISO");
+    expect(container.textContent).not.toContain("staging disk");
+    expect(container.textContent).not.toContain("Boot provisioning VM");
+    expect(container.textContent).not.toContain("RUNCONTAINER_HYPERV_BASE_IMAGE");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("labels every non-VM backend as not a VM", () => {
+    const container = render();
+    openTab(container, "Settings");
     expect(container.textContent).toContain("Hyper-V");
     expect(container.textContent).toContain("NOT a VM");
-    expect(container.textContent).toContain("no Sandboxie");
-    expect(container.textContent).not.toContain("Sandboxie-Plus box");
+    expect(container.textContent).not.toContain("Sandboxie");
     expect(container.textContent).not.toContain("Run unguarded instead");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
@@ -126,7 +137,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.6.2");
+    expect(container.textContent).toContain("RunContainer v0.6.3");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -183,12 +194,14 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows the VM setup guide in Settings", () => {
+  it("keeps backend overrides behind the Advanced disclosure", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("Setup guide");
-    expect(container.textContent).toContain("RUNCONTAINER_HYPERV_BASE_IMAGE");
-    expect(container.textContent).toContain("Provision guest credential");
+    const advanced = container.querySelector("details.advanced-settings");
+    expect(advanced).not.toBeNull();
+    expect(advanced.open).toBe(false);
+    expect(advanced.textContent).toContain("Use prepared image");
+    expect(advanced.textContent).toContain("Check readiness");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -235,13 +248,12 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("presents the QEMU genuine VM as the default engine", () => {
+  it("presents the QEMU VM as a backend RunContainer picks automatically", () => {
     const container = render();
     openTab(container, "Settings");
-    expect(container.textContent).toContain("QEMU genuine VM");
-    expect(container.textContent).toContain("Detect QEMU");
-    expect(container.textContent).toContain("Select base image");
-    expect(container.textContent).toContain("RCVM containment (default until a VM is provisioned");
+    expect(container.textContent).toContain("picks the strongest backend");
+    expect(container.textContent).toContain("Recheck backend");
+    expect(container.textContent).toContain("not a hardware VM");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

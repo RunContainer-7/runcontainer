@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.6.3',
+    date: '2026-10-20',
+    title: 'A tidier launcher with an automatic isolation backend',
+    changes: [
+      'Settings no longer asks you to handle Windows ISOs, staging disks or base images: RunContainer detects the strongest backend this PC supports and shows it in one line.',
+      'The app list is shorter: Manage, Run and Close stay on the row, and Reset, Duplicate, Export, Logs and Delete move into a More menu.',
+      'The Info and Manage wording now matches what the app actually does: apps run in a managed VM when one is available, otherwise contained with Job Object caps and a private profile.',
+      'Backend overrides and Hyper-V readiness moved behind an Advanced disclosure, so the everyday screens stay short.',
+    ],
+  },
+  {
     version: '0.6.2',
     date: '2026-10-20',
     title: 'Documentation and Discord links in the Info tab',

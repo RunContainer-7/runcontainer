@@ -56,7 +56,7 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
       const detail = (qemuMissing || []).filter(Boolean).join(' ');
       return {
         engine: 'qemu-unavailable',
-        reason: `The genuine RCVM virtual machine was requested but is not provisioned yet. ${detail || 'Install QEMU and provision a base image from Windows media you own.'} Open Settings → QEMU VM setup. RunContainer did not launch anything, and did not fall back to any other mode.`,
+        reason: `A VM backend was requested for this app, but this PC has no prepared VM image.${detail ? ` ${detail}` : ''} Add one in Settings → Advanced → Use prepared image. RunContainer did not launch anything, and did not fall back to any other mode.`,
       };
     }
     return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
@@ -64,7 +64,7 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
   // Default and 'auto': genuine VM when provisioned, honest process containment
   // otherwise. Both paths verify before reporting; nothing runs uncontained.
   if (!qemuReady) {
-    return { engine: 'rcvm', reason: 'No provisioned VM yet, so this app runs under RCVM process containment (Job Object caps, verified post-launch) until a QEMU base image is provisioned in Settings. This is NOT a virtual machine.' };
+    return { engine: 'rcvm', reason: 'No VM image is available on this PC, so this app runs under RCVM process containment (Job Object caps, verified post-launch) until one is. This is NOT a virtual machine.' };
   }
   return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
 }
