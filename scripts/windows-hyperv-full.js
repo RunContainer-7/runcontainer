@@ -61,8 +61,8 @@ async function main() {
     if (missing.length) throw new Error('Hyper-V not ready: ' + missing.join(' | '));
     if (!baseImage || !fs.existsSync(baseImage)) throw new Error('set RUNCONTAINER_HYPERV_BASE_IMAGE to an existing sysprepped Gen-2 VHDX');
     if (!fs.existsSync(credFile)) throw new Error(`guest credential missing at ${credFile}; provision it from RunContainer Settings first`);
-    const sel = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: true });
-    if (sel.engine !== 'hyperv') throw new Error('default selection is not the VM path');
+    const sel = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'hyperv' }, hypervReady: true });
+    if (sel.engine !== 'hyperv') throw new Error('explicit Hyper-V selection is not the VM path');
     pass('host ready (admin, Hyper-V, base image, credential, VM-first selection)');
   } catch (e) { fail('host ready', e.message); return done(root, false); }
   const baseStatBefore = fs.statSync(baseImage);

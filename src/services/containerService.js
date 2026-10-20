@@ -119,6 +119,71 @@ export async function getAppVersion() {
   }
 }
 
+export async function checkAppUpdates(options = {}) {
+  if (!ipcRenderer) return { status: 'unavailable' };
+  try {
+    return await ipcRenderer.invoke('check-app-updates', options);
+  } catch (error) {
+    return { status: 'unavailable' };
+  }
+}
+
+export async function snoozeUpdate({ version, untilMs } = {}) {
+  if (!ipcRenderer) return { snoozed: false };
+  try {
+    return await ipcRenderer.invoke('snooze-update', { version, untilMs });
+  } catch (error) {
+    return { snoozed: false };
+  }
+}
+
+export async function downloadUpdate() {
+  return requireIpc('Downloading updates').invoke('download-update');
+}
+
+export async function installDownloadedUpdate() {
+  return requireIpc('Installing updates').invoke('install-downloaded-update');
+}
+
+export function onUpdateDownloadProgress(callback) {
+  if (!ipcRenderer) return () => {};
+  const listener = (_event, progress) => callback(progress);
+  ipcRenderer.on('update-download-progress', listener);
+  return () => ipcRenderer.removeListener('update-download-progress', listener);
+}
+
+export async function getQemuStatus() {
+  return requireIpc('Checking QEMU').invoke('qemu-status');
+}
+
+export async function detectQemu() {
+  return requireIpc('Checking QEMU').invoke('qemu-detect');
+}
+
+export async function browseQemuBase() {
+  return requireIpc('Selecting base images').invoke('qemu-browse-base');
+}
+
+export async function setQemuBase(imagePath) {
+  return requireIpc('Selecting base images').invoke('qemu-set-base', imagePath);
+}
+
+export async function createQemuProvisionDisk({ sizeGB } = {}) {
+  return requireIpc('Provisioning base images').invoke('qemu-provision-create', { sizeGB });
+}
+
+export async function bootQemuProvision({ isoPath } = {}) {
+  return requireIpc('Provisioning base images').invoke('qemu-provision-boot', { isoPath });
+}
+
+export async function setGuestExePath(container) {
+  return requireIpc('Setting guest paths').invoke('qemu-set-guest-exe', container);
+}
+
+export async function openUpdateLink(which) {
+  return requireIpc('Opening update links').invoke('open-update-link', which);
+}
+
 export async function stopContainer(container) {
   return killContainer(container);
 }

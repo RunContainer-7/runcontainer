@@ -1,0 +1,61 @@
+name: Stable release
+
+# How users get updates:
+# - Installed users: the app checks the latest stable GitHub Release and shows
+#   an in-app notice with a one-click installer download.
+# - New users: the installer exe is attached to the GitHub Release itself, so
+#   the docs and the release page always point at the newest Setup file.
+#
+# Cut a stable release by tagging: git tag v0.5.1 && git push origin v0.5.1
+# Tags must match package.json. Pre-releases are manual (mark the release
+# "pre-release" on GitHub); this workflow only publishes what you tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check tag matches package.json
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          if ($pkg -ne $tag) { throw "Tag v$tag does not match package.json version $pkg." }
+
+      - name: Unit tests
+        run: npm test -- --watchAll=false
+
+      - name: Production build
+        run: npm run build
+
+      - name: Package app
+        run: npm run package
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /DMyAppVersion=$ver installer\RunContainer.iss
+
+      - name: Attach installer to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/RunContainer-Setup-*.exe
+          generate_release_notes: true

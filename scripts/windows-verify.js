@@ -21,6 +21,8 @@ const isolation = require('../public/isolation-runtime');
 const launch = require('../public/isolated-launch');
 const hyperv = require('../public/hyperv-runtime');
 const { selectIsolationEngine } = require('../public/engine-select');
+const rcvm = require('../public/rcvm-runtime');
+const updateCheck = require('../public/update-check');
 
 const results = [];
 let failed = 0;
@@ -414,8 +416,29 @@ function checkHyperVReport() {
   if (plan.indexOf('remove-env-vhd') < plan.indexOf('verify-vm-absent')) throw new Error('disk must only be removed after the VM is verified absent');
   const selDefault = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false });
   const selReady = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: true });
-  if (selDefault.engine !== 'hyperv-unavailable') throw new Error('default without Hyper-V must fail closed, not pick AppContainer');
-  if (selReady.engine !== 'hyperv') throw new Error('default with Hyper-V ready must select the VM path');
+  if (selDefault.engine !== 'rcvm') throw new Error('default must be RCVM containment (all editions), not a Hyper-V gate');
+  if (selReady.engine !== 'rcvm') throw new Error('default with Hyper-V ready is still RCVM; the VM is opt-in');
+  const selVmCold = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'hyperv' }, hypervReady: false });
+  const selVmReady = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'hyperv' }, hypervReady: true });
+  if (selVmCold.engine !== 'hyperv-unavailable') throw new Error('explicit Hyper-V without readiness must fail closed');
+  if (selVmReady.engine !== 'hyperv') throw new Error('explicit Hyper-V with readiness must select the VM path');
+  // RCVM builders: limits validated, launcher contains + redirects + reports.
+  if (!rcvm.validateRcvmLimits({}).ok) throw new Error('RCVM defaults must validate');
+  if (rcvm.validateRcvmLimits({ memoryMB: 64 }).ok) throw new Error('tiny RCVM memory cap must be rejected');
+  const rcvmScript = rcvm.buildRcvmLaunchScript({
+    jobName: 'verify', executablePath: 'C:\\a.exe', workingDirectory: 'C:\\w',
+    appDataDir: 'C:\\w\\p\\Roaming', localAppDataDir: 'C:\\w\\p\\Local', tempDir: 'C:\\w\\p\\Temp',
+    memoryCapBytes: 1024 * 1024 * 1024, cpuRate: 2500, maxProcesses: 32,
+  });
+  for (const token of ['CreateJobObjectW', 'AssignProcessToJobObject', 'LIMIT_KILL_ON_JOB_CLOSE', 'APPDATA', 'WaitForExit']) {
+    if (!rcvmScript.includes(token)) throw new Error(`RCVM launcher is missing ${token}`);
+  }
+  if (rcvm.parseRcvmLauncherOutput('{"pid":7}').pid !== 7) throw new Error('RCVM pid line must parse');
+  // Update checks: stable-only endpoint, numeric compare, installer picking.
+  if (!updateCheck.buildLatestReleaseUrl('o/r').endsWith('/repos/o/r/releases/latest')) throw new Error('update endpoint must be releases/latest');
+  if (!updateCheck.isNewerVersion('0.5.1', '0.5.10')) throw new Error('versions must compare numerically');
+  if (updateCheck.isNewerVersion('0.5.1', '0.5.1')) throw new Error('equal versions are not an update');
+  if (updateCheck.isUpdateRepoConfigured(updateCheck.DEFAULT_UPDATE_REPO)) throw new Error('placeholder repo must read as unconfigured');
   // Read-only host probe (never creates anything).
   let probe = 'Hyper-V PowerShell module not present here (expected on CI)';
   try {

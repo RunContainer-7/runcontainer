@@ -1,109 +1,53 @@
-# README.md
-
 # RunContainer
 
-RunContainer is a Windows-based container management application that allows users to install, run, and manage applications in a sandboxed environment. This project is designed to provide a seamless experience for managing applications without affecting the host system.
+RunContainer runs Windows apps contained: each app gets its own environment folder and always launches inside it — never loose on your system. Free forever, no accounts, no paid tiers.
 
-## Features
+## Download & install
 
-- **File Explorer Integration**: Open a file explorer to select an executable (EXE) file for installation.
-- **Container Installation**: Install selected applications into a managed per-app folder.
-- **Container Management**: View installed applications with their icons and names, and manage their lifecycle.
-- **Sandbox Execution**: Run applications inside a real isolation engine, with the ability to terminate them easily.
-- **State Management**: Efficiently manage the state of containers using custom hooks.
-- **Responsive Design**: Styled components for a user-friendly interface.
+- **New users:** download the latest `RunContainer-Setup-<version>.exe` from the **[Releases page](../../releases)** and run it. Always get it from a release, never from anywhere else.
+- **Installed users:** you don't need to watch releases. When a new stable version is out, the app shows a notice banner with a **Download installer** button, and the Updates tab lists what changed.
 
-## Project Structure
+Requirements: Windows 10/11 (Home works), 64-bit. No admin rights needed for the default containment.
 
-```
-runcontainer
-├── public
-│   └── index.html
-├── src
-│   ├── App.jsx
-│   ├── main.jsx
-│   ├── components
-│   │   └── ContainerManager.jsx
-│   ├── hooks
-│   │   └── useContainers.js
-│   ├── services
-│   │   └── containerService.js
-│   ├── styles
-│   │   └── index.css
-│   └── utils
-│       └── index.js
-├── package.json
-└── README.md
-```
+## QEMU setup (first run)
 
-## Installation
+1. Install QEMU for Windows (https://www.qemu.org/download/) — it is detected, never bundled.
+2. Settings → QEMU VM setup → Detect QEMU (WHPX acceleration when available, TCG fallback otherwise).
+3. Create a staging disk, boot it with your own licensed Windows ISO, install Windows + virtio drivers + qemu-guest-agent inside the VM window, shut Windows down.
+4. Select the staging disk as the base image. Each app then gets its own overlay disk; the base is never modified.
 
-1. Clone the repository:
-   ```
-   git clone <repository-url>
-   cd runcontainer
-   ```
+## Updating
 
-2. Install dependencies:
-   ```
-   npm install
-   ```
+When a stable release is out, a notice banner appears with an **Update…** wizard: release notes, installer download with progress, then **Install & restart** (installs over your copy; apps and settings are kept). **Remind tomorrow** snoozes that version for a day. If the check fails, the Updates tab says why (not configured, rate-limited, offline) instead of staying silent.
 
-3. Start the application:
-   ```
-   npm start
-   ```
+## Using it
 
-## Usage
+1. **Apps tab, ＋ button:** Install EXE or import from URL.
+2. **Run** launches the app contained; **Close** stops it; **Delete** removes it with its folder.
+3. **Tweaks tab:** per-app launch arguments, memory cap, CPU share.
+4. **Profiles tab:** default / relaxed / locked presets (locked takes network off Hyper-V VMs; RCVM cannot cut network).
+5. **Settings tab:** containment overview, Hyper-V readiness check, guest credential setup.
+6. **Updates tab:** installed version, changelog, Check for updates.
 
-1. Launch the application.
-2. Click on the "Install EXE" option to open the file explorer.
-3. Select the desired EXE file to install it in a sandbox.
-4. The installed application will appear in the container list.
-5. Click "Run" to start the application inside a container.
-6. To return to the Container Manager, simply terminate the running application.
+## How apps are contained
 
-## Architecture decision (audited, not assumed)
+| Mode | What it does | Needs |
+| --- | --- | --- |
+| **QEMU genuine VM (default)** | Each app runs in its own real virtual machine (overlay disk, guest agent, no virtual network). | Installed QEMU 8+, a provisioned base image from Windows media you own |
+| **Hyper-V VM (per-app opt-in)** | The app runs in its own guest Windows VM. For software RCVM can't hold. | Pro/Enterprise/Education, firmware virtualization on, Hyper-V enabled, a sysprepped base image (`RUNCONTAINER_HYPERV_BASE_IMAGE`), one-time guest credential |
+| **AppContainer (per-app opt-in)** | Verified container token for compatible apps. Not a VM. | Windows 10/11 |
 
-RunContainer must isolate arbitrary Windows installers and desktop apps with VM-like
-management (install into an environment, run/stop inside it, delete the environment),
-with no Sandboxie dependency and no silent unguarded fallback. The committed code was
-audited against three options:
+QEMU VMs have no virtual network by default and are managed over localhost only. Legacy RCVM process containment remains as an explicitly labelled non-VM fallback (it doesn't cut network access). Anything that can't run in a VM refuses to launch instead of running loose.
 
-- **A. Windows AppContainer (kept, lightweight tier).** Genuine OS boundary: the child
-  gets a container token via `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`,
-  and RunContainer reports `isolated` only when the new process token carries
-  `TokenIsAppContainer` (29) **and** the `TokenAppContainerSid` (31) equals the profile
-  SID. Free and built into Windows 10/11 (all editions). Limitation, stated openly:
-  it was designed for packaged apps. Arbitrary installers routinely fail inside it —
-  no administrator rights, no drivers/services, no writes outside container locations,
-  low integrity breaks many Win32 apps. It cannot cover the full "arbitrary software"
-  range, so it is offered only for compatible apps, fail-closed.
-- **B. Hyper-V virtual machine (new, full tier).** The only built-in Windows technology
-  that isolates arbitrary installers/desktop software with a VM boundary: separate
-  guest OS per environment (differencing VHDX off a base image), installer executes in
-  the guest via `Copy-VMFile` + PowerShell Direct `Invoke-Command`, app launches in
-  the guest, host only manages the VM. Requirements (not hidden): Windows 10/11
-  **Pro/Enterprise/Education** (Home has no Hyper-V), virtualization enabled in
-  firmware (Intel VT-x / AMD-V, SLAT), Hyper-V feature + `vmms` running, a sysprepped
-  Windows base VHDX (Generation 2, set `RUNCONTAINER_HYPERV_BASE_IMAGE`), admin rights
-  for VM/switch setup, and disk/RAM per environment (tens of GB + GBs of RAM).
-  If Hyper-V is not ready, Run refuses to launch and names the exact missing piece.
-- **C. Other built-in options (rejected as the boundary).** Windows Sandbox is an
-  ephemeral lightweight VM (no persistent per-app environments, Pro+ only). Windows
-  containers are server-side with no GUI desktop apps. Restricted-token/job-object
-  sandboxes (Chrome-style) are real mitigations but share AppContainer's compatibility
-  ceiling and are not a VM. A normal child process with redirected env vars is **not**
-  isolation and is no longer a launch path. None of these is interchangeable with a
-  full VM, and RunContainer does not pretend otherwise.
+Hyper-V setup (only if you opt an app into the full VM): enable virtualization in firmware, run as admin `DISM /Online /Enable-Feature /All /FeatureName:Microsoft-Hyper-V`, reboot, build a sysprepped Gen-2 base VHDX, set `RUNCONTAINER_HYPERV_BASE_IMAGE` to its path, then provision the guest credential from Settings.
 
-Required path: the Hyper-V VM. AppContainer stays ONLY as an explicit per-app
-opt-in for compatible apps, labeled as NOT a VM and never used as a fallback.
-Both are free with no third-party paid feature. Sandboxie is not used as a
-backend (legacy boxes are only best-effort cleaned on Delete); unguarded
-execution was removed entirely.
+## Reset vs Delete
 
-## How isolation actually works now
+`Reset` stops the app and returns the environment to a fresh state, keeping data. `Delete` stops everything and removes the app with its folder. There is no unguarded mode and no Sandboxie backend.
+
+## (Old engineering notes below — kept for developers)
+
+## How isolation actually works now (developer reference)
 
 - **Hyper-V VM (REQUIRED path).** Per-environment VM (`RunContainer-<appId>`,
   differencing VHDX under the environment's `hyperv/` folder, shared base image
@@ -156,90 +100,13 @@ There is no unguarded mode. There is no Sandboxie path.
 
 ## Versioning
 
-`package.json` is the single source of truth for the version. npm prints `RunContainer@<version>`
-from it, the packaged installers and `electron-builder` artefact names derive from it, Electron's
-`app.getVersion()` returns it, and the UI asks the main process for it over IPC instead of
-hard-coding a number. Change it in `package.json` and in the two root entries of
-`package-lock.json` (`version` and `packages[""].version`) and every place updates together.
+`package.json` is the single source of truth. Stable releases are tags like `v0.5.1` with the installer attached (see `.github/workflows/release.yml`). The in-app Updates tab only tracks stable releases. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
 
-## Verifying on Windows
+## For developers
 
-Nothing in the isolation or deletion paths can be verified on Linux. On a Windows machine run:
+- `npm install`, `npm start` (Electron), `npm run build`.
+- `npm test`, plus on Windows `node scripts/windows-verify.js`.
+- App states: Running, Stopped, Failed, Unknown. One operation per environment at a time.
+- Hyper-V internals (differencing disks, PowerShell Direct, VMConnect display) live in `public/hyperv-runtime.js`; RCVM builders in `public/rcvm-runtime.js`; update checks in `public/update-check.js`.
 
-```
-node scripts/windows-verify.js
-```
-
-`scripts/windows-verify.js` needs no administrator rights and only touches its own
-temp folder: launchers parse; AppContainer launch + verified token + profile
-delete; boundary evidence; fail-closed selection; scoping; installer lineage;
-host deletion cases; and a Hyper-V PROBE (read-only capability report + static
-audits that builders are credential-wired, never assign `$pid`, shut down
-graceful-first, select VM-first). CI (`windows-latest`) has no nested
-virtualization, so it CANNOT create VMs — the probe passing there proves the
-contract statically, not a live VM.
-
-Live-VM proof runs on a capable host only:
-
-```
-# elevated PowerShell, base image + credential provisioned (see below)
-node scripts/windows-hyperv-full.js
-```
-
-It creates two VMs from the base image, proves in-guest installer execution
-(guest-written marker) and in-guest launch (guest PID in-guest, payload absent
-on host), deletes one environment in order (VM absent, env disk absent, sibling
-+ base intact), exercises a locked host file, and cleans up.
-
-## Provisioning a host for VM isolation (do this on your Windows PC)
-
-1. **Host OS:** Windows 10/11 Pro, Enterprise, or Education (Home has no
-   Hyper-V). Firmware virtualization on (Intel VT-x / AMD-V, SLAT).
-2. **Enable Hyper-V** (elevated): `DISM /Online /Enable-Feature /All
-   /FeatureName:Microsoft-Hyper-V`, reboot, ensure `vmms` is Running.
-3. **Base image:** build a reference VM (Gen 2, Windows 10/11 Pro/Enterprise),
-   install guest Windows + updates + Hyper-V Integration Services, create the
-   local admin account the guest credential will use, `sysprep /generalize
-   /oobe /shutdown`, then copy its VHDX aside as the read-only base, e.g.
-   `C:\VMs\base\win11-sysprepped.vhdx`. Set
-   `RUNCONTAINER_HYPERV_BASE_IMAGE` to that path. Keep one licensed guest per
-   base image: each environment is a differencing child of it, and guest
-   Windows licensing follows your Microsoft license terms (check them for
-   virtualization use).
-4. **Guest credential:** RunContainer Settings → provision (or the
-   `hyperv-provision-credential` IPC): shows `Get-Credential` once and stores
-   it DPAPI-encrypted at `%APPDATA%\RunContainer\hyperv-guest-cred.xml`
-   (same user, same host only). PowerShell Direct requires it.
-5. **Network:** RunContainer ensures an Internal switch (`RunContainer-NAT`)
-   idempotently; guest file copy and PowerShell Direct do not need a NAT, and
-   no host folder sharing is configured (verify: no `New-SmbShare`/enhanced
-   session file sharing is created by these scripts).
-6. **Per environment:** ~20–40 GB disk for the differencing VHDX growth +
-   4 GB RAM default. Delete removes the VM config + env VHDX only.
-
-Six bottom tabs are back: Sources, Apps, Tweaks, Settings, Profiles, Info. Tweaks
-(launch arguments, VM memory/CPU, guest networking — all validated server-side) and
-Profiles (default/relaxed/locked: real network-attachment and capability settings,
-enforced at next boot/Reset) were removed by an earlier cleanup and are restored as
-backed features, not placeholders. The guest display opens in VMConnect (a separate
-supported console window); guest windows are never claimed to be embedded.
-
-App states are Running, Stopped, Failed, and Unknown (RunContainer restarted, or the
-guest stopped answering — Run reconciles, Stop attempts a clean stop, Reset reboots).
-One run/install/delete/reset operation per environment at a time; concurrent attempts
-are refused with a message instead of corrupting state. Installers reporting reboot
-codes (3010/1641) record `InstalledNeedsReboot` and direct you to Reset before Run.
-
-No promise is made that an arbitrary installer works unmodified in the guest —
-it runs a real Windows, so most do, but guest requirements (drivers,
-antivirus, licensing) are the app's own. Window hosting (re-parenting guest
-app windows into Electron) is NOT implemented as guest UI integration and is
-not claimed; the app's windows appear via the VM's normal display path.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any enhancements or bug fixes.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
+MIT License.

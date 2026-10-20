@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
-import { onContainerStatus, getAppVersion } from "../services/containerService";
+import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -22,7 +22,20 @@ jest.mock("../services/containerService", () => ({
   openGuestDisplay: jest.fn(),
   getHyperVStatus: jest.fn(async () => null),
   provisionGuestCredential: jest.fn(),
-  getAppVersion: jest.fn(async () => "0.5.0"),
+  getAppVersion: jest.fn(async () => "0.6.0"),
+  checkAppUpdates: jest.fn(async () => ({ status: "up-to-date" })),
+  openUpdateLink: jest.fn(async () => ({ opened: true })),
+  snoozeUpdate: jest.fn(async () => ({ snoozed: true })),
+  downloadUpdate: jest.fn(async () => ({ downloaded: true })),
+  installDownloadedUpdate: jest.fn(async () => ({ started: true })),
+  onUpdateDownloadProgress: jest.fn(() => () => {}),
+  getQemuStatus: jest.fn(async () => null),
+  detectQemu: jest.fn(),
+  browseQemuBase: jest.fn(),
+  setQemuBase: jest.fn(),
+  createQemuProvisionDisk: jest.fn(),
+  bootQemuProvision: jest.fn(),
+  setGuestExePath: jest.fn(),
   listContainers: jest.fn(async () => []),
   onContainerStatus: jest.fn(() => () => {}),
 }));
@@ -111,7 +124,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.5.0");
+    expect(container.textContent).toContain("RunContainer v0.6.0");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -128,9 +141,9 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("restores all six tabs including Tweaks and Profiles", () => {
+  it("restores all seven tabs including Tweaks, Profiles, and Updates", () => {
     const container = render();
-    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info"]) {
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"]) {
       expect(container.textContent).toContain(tab);
     }
     openTab(container, "Tweaks");
@@ -144,10 +157,118 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("shows the Updates feed with the installed version and changelog", async () => {
+    getAppVersion.mockResolvedValue("0.6.0");
+    const container = render();
+    openTab(container, "Updates");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("RunContainer v0.6.0");
+    expect(container.textContent).toContain("Installed");
+    expect(container.textContent).toContain("VM-first Hyper-V isolation");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("offers a Refresh action in the header instead of tab redirects", () => {
+    const container = render();
+    const headerButtons = Array.from(container.querySelectorAll(".header-actions button"));
+    expect(headerButtons.some((entry) => entry.getAttribute("aria-label") === "Refresh app list")).toBe(true);
+    expect(headerButtons.some((entry) => entry.textContent.includes("🔗"))).toBe(false);
+    expect(headerButtons.some((entry) => entry.textContent.includes("📦"))).toBe(false);
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows the VM setup guide in Settings", () => {
+    const container = render();
+    openTab(container, "Settings");
+    expect(container.textContent).toContain("Setup guide");
+    expect(container.textContent).toContain("RUNCONTAINER_HYPERV_BASE_IMAGE");
+    expect(container.textContent).toContain("Provision guest credential");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("does not render the old fake container desktop", () => {
     const container = render();
     expect(container.textContent).not.toContain("RunContainer OS");
     expect(container.textContent).not.toContain("Sandbox Console");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows an update banner with a download action when a release is newer", async () => {
+    checkAppUpdates.mockResolvedValue({
+      status: "update-available",
+      currentVersion: "0.5.1",
+      latestVersion: "0.5.2",
+      installerUrl: "https://github.com/acme/RunContainer/releases/download/v0.5.2/RunContainer-Setup-0.5.2.exe",
+      releaseUrl: "https://github.com/acme/RunContainer/releases/tag/v0.5.2",
+    });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("v0.5.2 is available");
+    expect(container.textContent).toContain("Update…");
+    expect(container.textContent).toContain("Remind tomorrow");
+    openTab(container, "Updates");
+    expect(container.textContent).toContain("Check for updates");
+    expect(container.textContent).toContain("Download installer");
+    expect(container.textContent).toContain("View release");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("stays quiet about updates when the check is unavailable", async () => {
+    checkAppUpdates.mockResolvedValue({ status: "unavailable" });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).not.toContain("is available (you have");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("presents the QEMU genuine VM as the default engine", () => {
+    const container = render();
+    openTab(container, "Settings");
+    expect(container.textContent).toContain("QEMU genuine VM");
+    expect(container.textContent).toContain("Detect QEMU");
+    expect(container.textContent).toContain("Select base image");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("opens the update wizard from the banner", async () => {
+    checkAppUpdates.mockResolvedValue({
+      status: "update-available",
+      currentVersion: "0.6.0",
+      latestVersion: "0.6.1",
+      installerUrl: "https://github.com/acme/RunContainer/releases/download/v0.6.1/RunContainer-Setup-0.6.1.exe",
+      releaseUrl: "https://github.com/acme/RunContainer/releases/tag/v0.6.1",
+      releaseNotes: "Faster boots.",
+    });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    const updateButton = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Update…");
+    expect(updateButton).not.toBeUndefined();
+    act(() => {
+      updateButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("Update to v0.6.1");
+    expect(container.textContent).toContain("Faster boots.");
+    downloadUpdate.mockResolvedValue({ downloaded: true });
+    const downloadButton = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Download installer");
+    act(() => {
+      downloadButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("Install & restart");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

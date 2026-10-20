@@ -1,13 +1,16 @@
+#ifndef MyAppVersion
+#define MyAppVersion "0.6.0"
+#endif
 #define MyAppRoot "C:\RunContainer\runcontainer"
 #define MyAppSource "C:\RunContainer\runcontainer\out\RunContainer-win32-x64"
 #define MyOutDir "C:\RunContainer\runcontainer\out"
 
 [Setup]
 AppName=RunContainer
-AppVersion=1.0.0
+AppVersion={#MyAppVersion}
 DefaultDirName={autopf}\RunContainer
 DefaultGroupName=RunContainer
-OutputBaseFilename=RunContainer-Setup
+OutputBaseFilename=RunContainer-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64

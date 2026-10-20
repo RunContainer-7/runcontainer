@@ -1,15 +1,13 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const https = require('https');
 const crypto = require('crypto');
-const {
-  sandboxBoxName,
-  findSandboxieTools,
-  deleteSandboxieBox,
-  isWithinDirectory,
-} = require('./sandboxie-runtime');
+const os = require('os');
+// No Sandboxie backend: RunContainer's only isolation engines are Hyper-V VMs
+// (arbitrary software) and AppContainer (compatible apps, explicit opt-in).
+// isWithinDirectory comes from isolated-launch (pure path validation).
 const {
   vmName,
   vmFileNames,
@@ -43,6 +41,7 @@ const {
   buildClearReadOnlyArgs,
   buildAclRepairPlan,
   CleanupCancelledError,
+  isWithinDirectory,
 } = require('./isolated-launch');
 const {
   buildWindowHostScript,
@@ -975,15 +974,812 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
 }
 
 // Fail-closed engine selection. There is no 'profile' (unguarded) or 'sandboxie' launch
-// path: unisolated execution is never selected, even on request. 'hyperv' means the live
-// Hyper-V readiness check still has to pass inside runWithHyperV; anything else refuses.
+// path: unisolated execution is never selected, even on request. 'rcvm' is the default
+// (works on all editions); 'hyperv' means the live Hyper-V readiness check still has to
+// pass inside runWithHyperV; anything else refuses.
 function selectEngine(appRecord) {
   // hypervReady:true here marks VM eligibility; the LIVE readiness + credential
-  // checks run inside runWithHyperV and fail closed (never fall back).
-  const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
+  // checks run inside runWithHyperV and fail closed (never fall back). qemuReady
+  // is a cheap sync store check; runWithQemu re-verifies live and fails closed.
+  const decision = selectIsolationEngine({
+    platform: process.platform,
+    appRecord,
+    hypervReady: true,
+    qemuReady: isQemuProvisioned(),
+  });
   if (decision.engine === 'appcontainer') return 'appcontainer';
+  if (decision.engine === 'rcvm') return 'rcvm';
+  if (decision.engine === 'qemu' || decision.engine === 'qemu-unavailable') return 'qemu';
   if (decision.engine === 'hyperv' || decision.engine === 'hyperv-unavailable') return 'hyperv';
   return 'refused';
+}
+
+// RCVM launchers stay alive holding the app's Job Object, so caps apply for the app's
+// lifetime. Killing a launcher ends its whole app tree (kill-on-job-close).
+const rcvmLaunchers = new Map();
+
+function rcvmProfileDirs(sandboxRoot) {
+  const profileRoot = path.join(sandboxRoot, 'profile');
+  return {
+    profileRoot,
+    appData: path.join(profileRoot, 'Roaming'),
+    localAppData: path.join(profileRoot, 'Local'),
+    temp: path.join(profileRoot, 'Temp'),
+  };
+}
+
+function ensureRcvmProfile(sandboxRoot) {
+  const dirs = rcvmProfileDirs(sandboxRoot);
+  for (const dir of Object.values(dirs)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dirs;
+}
+
+// Ends the RCVM launcher (which ends the contained tree via kill-on-job-close).
+// Safe to call for non-RCVM apps: without a launcher it only taskkills a stale PID.
+async function stopRcvmLauncher(appRecord, logPath) {
+  if (!appRecord) return;
+  const child = rcvmLaunchers.get(appRecord.id);
+  if (child) {
+    try {
+      child.kill();
+    } catch (error) {
+      if (logPath) appendLog(logPath, `RCVM launcher was already gone: ${error.message}`);
+    }
+    rcvmLaunchers.delete(appRecord.id);
+  }
+  const launcherPid = appRecord.rcvmLauncherPid;
+  if (Number.isSafeInteger(launcherPid) && launcherPid > 0) {
+    try {
+      await executeFile('taskkill.exe', ['/F', '/PID', String(launcherPid)]);
+      if (logPath) appendLog(logPath, `Ended the RCVM launcher (PID ${launcherPid}); its job object ends the app tree with it.`);
+    } catch (error) {
+      // Already gone: the tree is verified separately by stopProcessesUnder.
+    }
+  }
+}
+
+// Launches the app inside RCVM containment: suspended start, Job Object assignment
+// (kill-on-close, memory/CPU/process caps), resume, per-app profile folders.
+// Anything that cannot be contained fails closed; nothing runs uncontained.
+async function runWithRcvm(appRecord, sandboxRoot, logPath) {
+  const rcvm = require('./rcvm-runtime');
+  let launcherChild = null;
+  try {
+    const limitCheck = rcvm.validateRcvmLimits({
+      memoryMB: appRecord.vmMemoryMB,
+      cpuCount: appRecord.vmCpuCount,
+      maxProcesses: 32,
+      processorCount: os.cpus().length,
+    });
+    if (!limitCheck.ok) throw new Error(`Saved tweaks are invalid for RCVM containment: ${limitCheck.reason} Nothing was launched.`);
+    const argCheck = require('./hyperv-runtime').validateLaunchArgs(appRecord.launchArgs);
+    if (!argCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argCheck.reason} Nothing was launched.`);
+    const profile = ensureRcvmProfile(sandboxRoot);
+    const scriptText = rcvm.buildRcvmLaunchScript({
+      jobName: rcvm.rcvmJobName(appRecord.id),
+      executablePath: appRecord.source,
+      workingDirectory: sandboxRoot,
+      appDataDir: profile.appData,
+      localAppDataDir: profile.localAppData,
+      tempDir: profile.temp,
+      launchArgs: argCheck.args || '',
+      memoryCapBytes: limitCheck.limits.memoryCapBytes,
+      cpuRate: limitCheck.limits.cpuRate,
+      maxProcesses: limitCheck.limits.maxProcesses,
+    });
+    const scriptPath = path.join(app.getPath('userData'), `runcontainer-rcvm-${appRecord.id}.ps1`);
+    fs.writeFileSync(scriptPath, scriptText, 'utf8');
+
+    launcherChild = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], { windowsHide: true });
+    const launcherPid = launcherChild.pid;
+    rcvmLaunchers.set(appRecord.id, launcherChild);
+    let launcherOutput = '';
+    const pidPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('The RCVM launcher did not report a process in time.')), 60000);
+      launcherChild.stdout.on('data', (chunk) => {
+        launcherOutput += String(chunk);
+        const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
+        if (parsed.error) {
+          clearTimeout(timer);
+          reject(new Error(parsed.error));
+        } else if (parsed.pid) {
+          clearTimeout(timer);
+          resolve(parsed.pid);
+        }
+      });
+      launcherChild.once('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      launcherChild.once('exit', (code) => {
+        clearTimeout(timer);
+        const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
+        reject(new Error(parsed.error || `The RCVM launcher exited before the app started (code ${code}).`));
+      });
+    });
+    launcherChild.stderr.on('data', (chunk) => appendLog(logPath, `RCVM launcher: ${String(chunk).trim()}`));
+    launcherChild.on('exit', (code) => {
+      rcvmLaunchers.delete(appRecord.id);
+      appendLog(logPath, `RCVM launcher exited (code ${code}); its job object ends the app tree with it.`);
+    });
+
+    const pid = await pidPromise;
+
+    let pids = [];
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      pids = findAppProcessIds(await listProcessTable(), sandboxRoot, [pid]);
+      if (pids.length > 0) break;
+      await delay(400);
+    }
+    if (pids.length === 0) throw new Error('The contained process exited before RunContainer could confirm it.');
+
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const updatedApp = {
+      ...withTrackedPids(base, pids),
+      status: 'Running',
+      launchMode: 'rcvm',
+      activeEngine: 'rcvm',
+      isolated: true,
+      isolationLevel: 'container',
+      rcvmJob: rcvm.rcvmJobName(appRecord.id),
+      rcvmLauncherPid: launcherPid,
+      pid,
+      sandboxPids: pids,
+      lastLaunchedAt: new Date().toISOString(),
+      launchCleanupPending: false,
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
+    appendLog(logPath, `Launched contained (RCVM job ${updatedApp.rcvmJob}, memory cap ${limitCheck.limits.memoryMB} MB, ${limitCheck.limits.cpuCount} CPUs of compute, ${limitCheck.limits.maxProcesses} processes), PID ${pid}. Profile folders redirected under the environment.`);
+    monitorAppProcesses(appRecord.id, logPath);
+    broadcastContainerStatus(updatedApp);
+    // Hosting is presentation only and must never hold up the launch or fail it, so it runs
+    // after the launch result is already decided.
+    hostAppWindow(updatedApp, pid, logPath).then(() => {
+      const latest = getStoredApp(appRecord.id);
+      if (latest) broadcastContainerStatus(latest);
+    }).catch(() => {});
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid,
+      sandboxPids: pids,
+      launchMode: 'rcvm',
+      activeEngine: 'rcvm',
+      isolated: true,
+      isolationLevel: 'container',
+      embedded: false,
+      reason: `Running contained (RCVM): Job Object caps hold its lifetime and resources, and its profile folders stay inside its environment. Works on all Windows editions. This is process containment, not a hardware VM, and it does not cut network access.`,
+    };
+  } catch (error) {
+    appendLog(logPath, `RCVM launch failed: ${error.message}`);
+    if (launcherChild) {
+      try {
+        launcherChild.kill();
+      } catch (killError) {
+        appendLog(logPath, `RCVM launcher cleanup: ${killError.message}`);
+      }
+      rcvmLaunchers.delete(appRecord.id);
+    }
+    const remaining = await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath }).catch(() => []);
+    return failedLaunch(appRecord, remaining.length > 0
+      ? `${error.message} A process may still be running; Delete this app or close it before retrying. Nothing was launched without containment.`
+      : `${error.message} Nothing was launched without containment.`);
+  }
+}
+
+// --- RCVM genuine-VM backend (QEMU) ------------------------------------------
+// A REAL virtual machine per environment, managed by RunContainer with QEMU as
+// the engine. Per-env overlay disk on a read-only base image, QMP management on
+// localhost, guest-agent channel for readiness/install/exec/shutdown, no virtual
+// network by default. QEMU is a detected dependency (not bundled); the Windows
+// guest image and licence always come from media the user owns.
+const qemuProcs = new Map();
+const qemuMonitors = new Map();
+const qemuAgentHolders = new Map();
+
+function qemuStorePath() {
+  return path.join(app.getPath('userData'), 'runcontainer-qemu.json');
+}
+
+function loadQemuStore() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(qemuStorePath(), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveQemuStore(store) {
+  fs.writeFileSync(qemuStorePath(), JSON.stringify(store || {}, null, 2), 'utf8');
+}
+
+function isQemuEnv(appRecord) {
+  if (!appRecord) return false;
+  if (appRecord.launchMode === 'qemu' || appRecord.activeEngine === 'qemu') return true;
+  if (appRecord.isolationEngine === 'qemu') return true;
+  try {
+    const qemu = require('./qemu-runtime');
+    return fs.existsSync(qemu.qemuEnvPaths(appRecord.sandboxRoot || '').diskPath);
+  } catch (error) {
+    return false;
+  }
+}
+
+// Provisioned = detected QEMU binary (supported version) + base image file.
+function isQemuProvisioned() {
+  try {
+    const store = loadQemuStore();
+    if (!store.qemuSystem || !store.qemuImg || !store.baseImage) return false;
+    if (!fs.existsSync(store.qemuSystem) || !fs.existsSync(store.qemuImg)) return false;
+    if (!fs.existsSync(store.baseImage)) return false;
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function discoverQemu() {
+  const qemu = require('./qemu-runtime');
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const bundled = path.join(process.resourcesPath || '', 'qemu');
+  for (const dir of qemu.candidateQemuDirs({ bundledDir: bundled, programFiles, programFilesX86 })) {
+    try {
+      const system = path.join(dir, qemu.QEMU_SYSTEM_BINARY);
+      const img = path.join(dir, qemu.QEMU_IMG_BINARY);
+      if (!fs.existsSync(system) || !fs.existsSync(img)) continue;
+      return { qemuSystem: system, qemuImg: img };
+    } catch (error) {
+      // Try the next candidate.
+    }
+  }
+  // Last resort: PATH lookup for qemu-img (proves a usable install).
+  return null;
+}
+
+async function qemuBinaryVersion(qemuSystem) {
+  const qemu = require('./qemu-runtime');
+  const { stdout } = await executeFile(qemuSystem, ['--version'], { timeout: 15000 });
+  return qemu.parseQemuVersion(stdout);
+}
+
+async function probeQemuAccel(qemuSystem, accel) {
+  const qemu = require('./qemu-runtime');
+  return new Promise((resolve) => {
+    const child = spawn(qemuSystem, qemu.buildAccelProbeArgs({ accel }), { windowsHide: true });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      try { child.kill(); } catch (error) { /* already gone */ }
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(qemu.parseAccelProbe({ accel, timedOut: true, stderr })), 12000);
+    child.on('error', () => {
+      clearTimeout(timer);
+      finish({ supported: false, reason: `${accel}: QEMU could not be started.` });
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      finish(qemu.parseAccelProbe({ accel, timedOut: false, exitCode: code, stderr }));
+    });
+  });
+}
+
+async function refreshQemuStatus() {
+  const qemu = require('./qemu-runtime');
+  const store = loadQemuStore();
+  const missing = [];
+  let { qemuSystem, qemuImg, version } = store;
+  if (!qemuSystem || !fs.existsSync(qemuSystem)) {
+    const found = discoverQemu();
+    if (found) {
+      qemuSystem = found.qemuSystem;
+      qemuImg = found.qemuImg;
+    } else {
+      missing.push('QEMU is not installed. Install it (https://www.qemu.org/download/ — Windows builds) or set QEMU_HOME, then press Detect.');
+    }
+  }
+  if (qemuSystem && (!version || !qemu.isSupportedQemuVersion(version))) {
+    try {
+      version = await qemuBinaryVersion(qemuSystem);
+    } catch (error) {
+      version = null;
+    }
+    if (!qemu.isSupportedQemuVersion(version)) {
+      missing.push(`QEMU ${version || 'unknown'} is too old or unreadable (need ${qemu.QEMU_MIN_VERSION}+).`);
+    }
+  }
+  let accel = store.accel;
+  if (qemuSystem && qemu.isSupportedQemuVersion(version) && !qemu.QEMU_ACCELS.includes(accel)) {
+    const whpx = await probeQemuAccel(qemuSystem, 'whpx');
+    accel = whpx.supported ? 'whpx' : 'tcg';
+    if (accel === 'tcg') {
+      missing.push(`WHPX acceleration is unavailable (${whpx.reason}); TCG software emulation will be used and a Windows guest will feel slow.`);
+    }
+  }
+  const baseImage = store.baseImage && fs.existsSync(store.baseImage) ? store.baseImage : null;
+  if (!baseImage) {
+    missing.push('No base image provisioned. Supply a Windows disk image you own (Settings → QEMU VM setup); QEMU ships no guest OS or licence.');
+  }
+  const status = {
+    available: missing.filter((m) => !m.startsWith('WHPX')).length === 0,
+    qemuSystem: qemuSystem || null,
+    qemuImg: qemuImg || null,
+    version: version || null,
+    accel: accel || null,
+    baseImage,
+    missing,
+  };
+  saveQemuStore({ ...store, qemuSystem, qemuImg, version, accel, baseImage: baseImage || store.baseImage || null });
+  return status;
+}
+
+// One-shot QMP request: connect, handshake, command, close. Localhost only.
+function qmpRequest({ port, command, args, timeoutMs = 15000 }) {
+  const qemu = require('./qemu-runtime');
+  const net = require('net');
+  return new Promise((resolve, reject) => {
+    const sock = new net.Socket();
+    let buf = '';
+    let step = 'greeting';
+    const id = Math.floor(Math.random() * 1000000) + 1;
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error(`QMP ${command} timed out.`));
+    }, timeoutMs);
+    const finish = (fn) => { clearTimeout(timer); try { sock.destroy(); } catch (error) { /* closed */ } fn(); };
+    sock.on('data', (chunk) => {
+      buf += chunk.toString();
+      const { messages, rest } = qemu.parseQmpStream(buf);
+      buf = rest;
+      for (const msg of messages) {
+        if (msg.QMP && step === 'greeting') {
+          step = 'capabilities';
+          sock.write(`${JSON.stringify({ execute: 'qmp_capabilities' })}\n`);
+        } else if (step === 'capabilities' && msg.return !== undefined) {
+          step = 'command';
+          const frame = { execute: command, id };
+          if (args) frame.arguments = args;
+          sock.write(`${JSON.stringify(frame)}\n`);
+        } else if (step === 'command' && msg.id === id) {
+          if (msg.error) finish(() => reject(new Error(`QMP ${command} failed: ${msg.error.desc || JSON.stringify(msg.error)}`)));
+          else finish(() => resolve(msg.return));
+        }
+      }
+    });
+    sock.on('error', (error) => finish(() => reject(error)));
+    sock.connect(port, '127.0.0.1');
+  });
+}
+
+async function waitQemuQmp(port, timeoutMs = 120000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const status = await qmpRequest({ port, command: 'query-status', timeoutMs: 8000 });
+      if (status && (status.status === 'running' || status.status === 'prelaunch')) return status;
+      lastError = new Error(`VM status is ${status?.status || 'unknown'}.`);
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(2000);
+  }
+  throw lastError || new Error('QMP did not answer.');
+}
+
+async function waitQemuAgent(port, timeoutMs = 300000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await qmpRequest({ port, command: 'guest-ping', timeoutMs: 10000 });
+      return true;
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(5000);
+  }
+  throw new Error(`Guest agent did not answer: ${lastError?.message || 'no agent'}. Install Windows with qemu-guest-agent in the base image first.`);
+}
+
+function qemuVmConfigFor(appRecord) {
+  const qemu = require('./qemu-runtime');
+  const stored = (() => {
+    try {
+      const raw = fs.readFileSync(qemu.qemuEnvPaths(appRecord.sandboxRoot || '').vmConfigPath, 'utf8');
+      return JSON.parse(raw);
+    } catch (error) {
+      return {};
+    }
+  })();
+  return qemu.validateQemuVmConfig({
+    memoryMB: stored.memoryMB ?? appRecord.vmMemoryMB ?? 4096,
+    cpuCount: stored.cpuCount ?? appRecord.vmCpuCount ?? 2,
+    diskGB: stored.diskGB ?? 40,
+  });
+}
+
+async function ensureQemuEnvDisk(appRecord, vmConfig) {
+  const qemu = require('./qemu-runtime');
+  const store = loadQemuStore();
+  if (!store.baseImage || !fs.existsSync(store.baseImage)) {
+    throw new Error('No base image provisioned. Open Settings → QEMU VM setup and provision one from Windows media you own.');
+  }
+  const paths = qemu.qemuEnvPaths(appRecord.sandboxRoot);
+  fs.mkdirSync(paths.qemuDir, { recursive: true });
+  fs.writeFileSync(paths.vmConfigPath, JSON.stringify({ ...vmConfig, accel: store.accel || 'tcg' }, null, 2), 'utf8');
+  if (fs.existsSync(paths.diskPath)) return paths;
+  await executeFile(store.qemuImg, qemu.buildImgCreateOverlayArgs({ overlayPath: paths.diskPath, basePath: store.baseImage }), { timeout: 120000 });
+  if (!fs.existsSync(paths.diskPath)) throw new Error('qemu-img did not create the environment disk.');
+  return paths;
+}
+
+function stopQemuMonitor(appId) {
+  const monitor = qemuMonitors.get(appId);
+  if (monitor) clearInterval(monitor);
+  qemuMonitors.delete(appId);
+}
+
+async function bootQemuEnv(appRecord, { display = 'sdl' } = {}) {
+  const qemu = require('./qemu-runtime');
+  const store = loadQemuStore();
+  const configCheck = qemuVmConfigFor(appRecord);
+  if (!configCheck.ok) throw new Error(`${configCheck.reason} Nothing was launched.`);
+  const paths = await ensureQemuEnvDisk(appRecord, configCheck.config);
+  const stored = JSON.parse(fs.readFileSync(paths.vmConfigPath, 'utf8'));
+  const port = qemu.qmpPortFor(appRecord.id);
+  // Stale state: a dead QEMU leaves a pidfile and record behind. Reap it.
+  try {
+    const stalePid = Number(fs.readFileSync(paths.pidfilePath, 'utf8'));
+    let alive = false;
+    if (Number.isSafeInteger(stalePid) && stalePid > 0) {
+      try { process.kill(stalePid, 0); alive = true; } catch (error) { alive = false; }
+    }
+    if (alive) {
+      try {
+        await qmpRequest({ port, command: 'query-status', timeoutMs: 5000 });
+        return { port, reused: true };
+      } catch (error) {
+        try { await executeFile('taskkill.exe', ['/F', '/PID', String(stalePid)]); } catch (killError) { /* gone */ }
+      }
+    }
+    fs.rmSync(paths.pidfilePath, { force: true });
+  } catch (error) {
+    // No pidfile: fresh boot.
+  }
+  const args = qemu.buildQemuBootArgs({
+    accel: stored.accel || store.accel || 'tcg',
+    memoryMB: configCheck.config.memoryMB,
+    cpuCount: configCheck.config.cpuCount,
+    diskPath: paths.diskPath,
+    qmpPort: port,
+    agentPipe: qemu.agentPipeFor(appRecord.id),
+    pidfilePath: paths.pidfilePath,
+    vmName: qemu.shortVmName(appRecord.id),
+    display,
+  });
+  const logPath = path.join(appRecord.logsRoot || path.join(appRecord.sandboxRoot, 'logs'), 'qemu.log');
+  appendLog(logPath, `Booting genuine VM (QEMU ${stored.accel || store.accel || 'tcg'}): ${store.qemuSystem} ${args.join(' ')}`);
+  const child = spawn(store.qemuSystem, args, { windowsHide: true });
+  qemuProcs.set(appRecord.id, child);
+  child.stderr.on('data', (chunk) => appendLog(logPath, `qemu: ${String(chunk).trim()}`));
+  child.on('exit', (code) => {
+    qemuProcs.delete(appRecord.id);
+    const holder = qemuAgentHolders.get(appRecord.id);
+    if (holder) {
+      try { holder.destroy(); } catch (error) { /* closed */ }
+      qemuAgentHolders.delete(appRecord.id);
+    }
+    appendLog(logPath, `QEMU exited (code ${code}).`);
+  });
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  // The pipe-backend agent channel stalls machine init until the host connects,
+  // so hold it open from boot until the VM stops (verified against real QEMU).
+  const agentSocket = await (async () => {
+    const net = require('net');
+    const pipePath = qemu.agentPipePath(qemu.agentPipeFor(appRecord.id));
+    const deadline = Date.now() + 30000;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      const connected = await new Promise((resolve) => {
+        const sock = new net.Socket();
+        sock.once('connect', () => resolve(sock));
+        sock.once('error', (error) => { lastError = error; sock.destroy(); resolve(null); });
+        sock.connect(pipePath);
+      });
+      if (connected) return connected;
+      await delay(500);
+    }
+    throw new Error(`Agent pipe did not accept the host connection: ${lastError?.message || 'pipe missing'}.`);
+  })();
+  qemuAgentHolders.set(appRecord.id, agentSocket);
+  agentSocket.once('error', () => {});
+  agentSocket.once('close', () => qemuAgentHolders.delete(appRecord.id));
+  const status = await waitQemuQmp(port);
+  appendLog(logPath, `VM QMP status: ${status.status}.`);
+  return { port, reused: false, qemuPid: child.pid };
+}
+
+async function qemuGuestExec(port, exePath, args = [], { timeoutMs = 1800000, captureOutput = false } = {}) {
+  const spawnResult = await qmpRequest({ port, command: 'guest-exec', args: { path: exePath, arg: args, 'capture-output': captureOutput }, timeoutMs: 30000 });
+  const guestPid = spawnResult?.pid;
+  if (!Number.isSafeInteger(guestPid)) throw new Error('Guest agent did not return a process id.');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await qmpRequest({ port, command: 'guest-exec-status', args: { pid: guestPid }, timeoutMs: 15000 });
+    if (state?.exited) return { guestPid, exitCode: state.exitcode, stdout: state['out-data'], stderr: state['err-data'] };
+    await delay(2000);
+  }
+  throw new Error(`Guest process ${guestPid} did not exit in time.`);
+}
+
+async function qemuTransferFile(port, hostPath, guestPath, logPath) {
+  const stat = fs.statSync(hostPath);
+  const MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
+  if (stat.size > MAX_TRANSFER_BYTES) {
+    throw new Error(`Installer is ${(stat.size / 1024 / 1024).toFixed(0)} MB; guest transfer supports up to 512 MB. Split it or install from ISO media.`);
+  }
+  const handle = await qmpRequest({ port, command: 'guest-file-open', args: { path: guestPath, mode: 'wb' }, timeoutMs: 30000 });
+  if (!Number.isSafeInteger(handle)) throw new Error('Guest agent refused the file transfer.');
+  try {
+    const fd = fs.openSync(hostPath, 'r');
+    try {
+      const CHUNK = 192 * 1024; // base64-safe multiple of 3
+      const buffer = Buffer.alloc(CHUNK);
+      let offset = 0;
+      let bytes = 0;
+      do {
+        bytes = fs.readSync(fd, buffer, 0, CHUNK, offset);
+        if (bytes > 0) {
+          await qmpRequest({ port, command: 'guest-file-write', args: { handle, 'buf-b64': buffer.subarray(0, bytes).toString('base64') }, timeoutMs: 60000 });
+          offset += bytes;
+          if (logPath && offset % (CHUNK * 16) === 0) appendLog(logPath, `Transfer ${(offset / 1024 / 1024).toFixed(0)} MB / ${(stat.size / 1024 / 1024).toFixed(0)} MB…`);
+        }
+      } while (bytes > 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } finally {
+    await qmpRequest({ port, command: 'guest-file-close', args: { handle }, timeoutMs: 30000 }).catch(() => {});
+  }
+}
+
+function stagedQemuInstaller(appRecord) {
+  const candidates = [];
+  if (appRecord.source && fs.existsSync(appRecord.source) && /\.exe$/i.test(appRecord.source)) {
+    candidates.push(appRecord.source);
+  }
+  const incoming = path.join(appRecord.sandboxRoot || '', 'incoming');
+  try {
+    for (const entry of fs.readdirSync(incoming)) {
+      if (/\.exe$/i.test(entry)) candidates.push(path.join(incoming, entry));
+    }
+  } catch (error) {
+    // No staged installer.
+  }
+  return candidates[0] || null;
+}
+
+async function qemuInstallApp(appRecord, logPath, port) {
+  const installerHostPath = stagedQemuInstaller(appRecord);
+  if (!installerHostPath) {
+    throw new Error('No staged installer found for guest installation. Reinstall the app so its installer is staged, then Run again.');
+  }
+  const guestDir = 'C:/RunContainer/incoming';
+  await qemuGuestExec(port, 'C:\\Windows\\System32\\cmd.exe', ['/c', 'mkdir', guestDir.replace(/\//g, '\\')], { timeoutMs: 60000 }).catch(() => {});
+  const guestPath = `${guestDir}/${path.win32.basename(installerHostPath)}`;
+  appendLog(logPath, `Copying installer into the guest (${(fs.statSync(installerHostPath).size / 1024 / 1024).toFixed(1)} MB)…`);
+  await qemuTransferFile(port, installerHostPath, guestPath.replace(/\//g, '\\'), logPath);
+  appendLog(logPath, `Running installer inside the guest with its display window. Complete any setup dialogs there.`);
+  const result = await qemuGuestExec(port, guestPath.replace(/\//g, '\\'), [], { timeoutMs: 1800000 });
+  appendLog(logPath, `Guest installer exited with code ${result.exitCode}.`);
+  const apps = loadApps().map((entry) => (entry.id === appRecord.id
+    ? { ...entry, qemuInstalledReceipt: { exitCode: result.exitCode, at: new Date().toISOString(), installer: guestPath } }
+    : entry));
+  saveApps(apps);
+  return result;
+}
+
+async function runWithQemu(appRecord, sandboxRoot, logPath) {
+  const qemu = require('./qemu-runtime');
+  try {
+    const status = await refreshQemuStatus();
+    if (!status.available) {
+      throw new Error(`QEMU backend is not ready: ${status.missing.join(' ')}`);
+    }
+    const { port } = await bootQemuEnv(appRecord);
+    appendLog(logPath, 'Waiting for the guest agent (Windows must be installed in the base image with qemu-guest-agent)…');
+    await waitQemuAgent(port);
+    const fresh = getStoredApp(appRecord.id) || appRecord;
+    if (!fresh.qemuInstalledReceipt) {
+      appendLog(logPath, 'First run: installing the app inside the guest.');
+      await qemuInstallApp(fresh, logPath, port);
+    }
+    const target = (getStoredApp(appRecord.id) || fresh).installedExeGuestPath;
+    if (!target) {
+      throw new Error('Guest installation finished, but no guest exe path is set. Open Manage → guest exe path and set where the app installed inside the guest (browse it in the VM window), then Run again.');
+    }
+    const argCheck = require('./hyperv-runtime').validateLaunchArgs(fresh.launchArgs);
+    if (!argCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argCheck.reason} Nothing was launched.`);
+    appendLog(logPath, `Launching inside the guest: ${target}`);
+    const launched = await qmpRequest({ port, command: 'guest-exec', args: { path: target, arg: argCheck.args ? [argCheck.args] : [] }, timeoutMs: 30000 });
+    if (!Number.isSafeInteger(launched?.pid)) throw new Error('Guest agent did not start the app.');
+    await delay(3000);
+    const state = await qmpRequest({ port, command: 'guest-exec-status', args: { pid: launched.pid }, timeoutMs: 15000 });
+    if (state?.exited) throw new Error(`Guest app exited immediately (code ${state.exitcode}).`);
+    const hostQemu = qemuProcs.get(appRecord.id);
+    const base = getStoredApp(appRecord.id) || appRecord;
+    const updatedApp = {
+      ...withTrackedPids(base, hostQemu?.pid ? [hostQemu.pid] : []),
+      status: 'Running',
+      launchMode: 'qemu',
+      activeEngine: 'qemu',
+      isolated: true,
+      isolationLevel: 'vm',
+      qemuPid: hostQemu?.pid || null,
+      qemuPort: port,
+      guestPid: launched.pid,
+      guestPids: [launched.pid],
+      pid: hostQemu?.pid || null,
+      sandboxPids: hostQemu?.pid ? [hostQemu.pid] : [],
+      lastLaunchedAt: new Date().toISOString(),
+      launchCleanupPending: false,
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
+    appendLog(logPath, `App running inside genuine VM (host QEMU PID ${updatedApp.qemuPid}, guest PID ${launched.pid}). View it in the VM window.`);
+    monitorQemuApp(appRecord.id, port, launched.pid, logPath);
+    broadcastContainerStatus(updatedApp);
+    return {
+      id: appRecord.id,
+      status: 'Running',
+      pid: updatedApp.qemuPid,
+      sandboxPids: updatedApp.sandboxPids,
+      launchMode: 'qemu',
+      activeEngine: 'qemu',
+      isolated: true,
+      isolationLevel: 'vm',
+      guestPid: launched.pid,
+      embedded: false,
+      reason: `Running inside a genuine QEMU virtual machine (guest PID ${launched.pid}, verified via the guest agent). The app executes in the guest OS, never on the host.`,
+    };
+  } catch (error) {
+    appendLog(logPath, `QEMU launch failed: ${error.message}`);
+    return failedLaunch(appRecord, `${error.message} Nothing was launched outside a VM.`);
+  }
+}
+
+function monitorQemuApp(appId, port, guestPid, logPath) {
+  stopQemuMonitor(appId);
+  const timer = setInterval(async () => {
+    try {
+      const state = await qmpRequest({ port, command: 'guest-exec-status', args: { pid: guestPid }, timeoutMs: 10000 });
+      if (state?.exited) {
+        stopQemuMonitor(appId);
+        const apps = loadApps().map((entry) => (entry.id === appId
+          ? { ...withTrackedPids(entry, []), status: 'Stopped', guestPid: null, guestPids: [], lastExitAt: new Date().toISOString() }
+          : entry));
+        saveApps(apps);
+        appendLog(logPath, `Guest app exited (code ${state.exitcode}).`);
+        const updated = apps.find((entry) => entry.id === appId);
+        if (updated) broadcastContainerStatus(updated);
+      }
+    } catch (error) {
+      // Guest unreachable: leave state alone; Run reconciles, Stop/Reset recover.
+    }
+  }, 15000);
+  qemuMonitors.set(appId, timer);
+}
+
+// Graceful shutdown first (guest agent, then ACPI), power-off escalation only
+// after timeouts, host kill last. Safe no-op for non-QEMU apps.
+async function stopQemuEnv(appRecord, logPath) {
+  if (!isQemuEnv(appRecord)) return { stopped: true, skipped: true };
+  const qemu = require('./qemu-runtime');
+  stopQemuMonitor(appRecord.id);
+  const port = appRecord.qemuPort || qemu.qmpPortFor(appRecord.id);
+  const child = qemuProcs.get(appRecord.id);
+  const recordPid = appRecord.qemuPid;
+  try {
+    try {
+      await qmpRequest({ port, command: 'guest-shutdown', args: { mode: 'powerdown' }, timeoutMs: 10000 });
+      if (logPath) appendLog(logPath, 'Guest shutdown requested via agent; waiting up to 120s.');
+    } catch (agentError) {
+      try {
+        await qmpRequest({ port, command: 'system_powerdown', timeoutMs: 10000 });
+        if (logPath) appendLog(logPath, 'Agent shutdown unavailable; ACPI powerdown requested; waiting up to 120s.');
+      } catch (acpiError) {
+        if (logPath) appendLog(logPath, `No graceful path answered (${acpiError.message}); terminating the VM process.`);
+      }
+    }
+    const deadline = Date.now() + 120000;
+    let off = false;
+    while (Date.now() < deadline) {
+      const alive = (() => {
+        if (child && child.exitCode === null) return true;
+        if (Number.isSafeInteger(recordPid) && recordPid > 0) {
+          try { process.kill(recordPid, 0); return true; } catch (error) { return false; }
+        }
+        return false;
+      })();
+      if (!alive) { off = true; break; }
+      try {
+        const st = await qmpRequest({ port, command: 'query-status', timeoutMs: 5000 });
+        if (st?.status === 'shutdown') { off = true; break; }
+      } catch (error) {
+        // QMP gone: process likely exiting; re-check liveness next loop.
+      }
+      await delay(3000);
+    }
+    if (!off) {
+      if (logPath) appendLog(logPath, 'VM did not shut down in 120s; forcing termination.');
+      try { await qmpRequest({ port, command: 'quit', timeoutMs: 8000 }); } catch (error) { /* closing */ }
+      await delay(3000);
+    }
+  } finally {
+    const holder = qemuAgentHolders.get(appRecord.id);
+    if (holder) {
+      try { holder.destroy(); } catch (error) { /* closed */ }
+      qemuAgentHolders.delete(appRecord.id);
+    }
+    if (child) {
+      try { child.kill(); } catch (error) { /* gone */ }
+      qemuProcs.delete(appRecord.id);
+    }
+    if (Number.isSafeInteger(recordPid) && recordPid > 0) {
+      try { await executeFile('taskkill.exe', ['/F', '/PID', String(recordPid)]); } catch (error) { /* gone */ }
+    }
+  }
+  return { stopped: true };
+}
+
+async function qemuDeleteEnv(appRecord, logPath) {
+  if (!isQemuEnv(appRecord)) return { deleted: false, skipped: true };
+  const qemu = require('./qemu-runtime');
+  await stopQemuEnv(appRecord, logPath);
+  const store = loadQemuStore();
+  const paths = qemu.qemuEnvPaths(appRecord.sandboxRoot || '');
+  for (const candidate of [paths.diskPath, path.join(paths.qemuDir, 'transfer.qcow2')]) {
+    if (!fs.existsSync(candidate)) continue;
+    const check = qemu.validateQemuDiskTarget({ candidate, envDir: appRecord.sandboxRoot, baseImagePath: store.baseImage });
+    if (!check.ok) throw new Error(check.reason);
+    fs.unlinkSync(candidate);
+    if (fs.existsSync(candidate)) throw new Error(`Could not confirm removal of ${candidate}.`);
+    if (logPath) appendLog(logPath, `Removed environment disk ${candidate} (base image untouched).`);
+  }
+  fs.rmSync(paths.vmConfigPath, { force: true });
+  fs.rmSync(paths.pidfilePath, { force: true });
+  return { deleted: true };
+}
+
+// Reset keeps the overlay disk (installed apps + data) and boots the guest fresh.
+async function resetQemuEnv(appRecord, appLog) {
+  try {
+    return await withOpLock(appRecord.id, 'reset', async () => {
+      await stopQemuEnv(appRecord, appLog);
+      const apps = loadApps().map((entry) => (entry.id === appRecord.id
+        ? { ...withTrackedPids(entry, []), status: 'Stopped', pid: null, sandboxPids: [], guestPid: null, guestPids: [], qemuPid: null, lastResetAt: new Date().toISOString() }
+        : entry));
+      saveApps(apps);
+      appendLog(appLog, 'Environment reset: VM stopped, overlay disk and data kept. Next Run boots fresh.');
+      const updated = apps.find((entry) => entry.id === appRecord.id);
+      if (updated) broadcastContainerStatus(updated);
+      return { id: appRecord.id, status: 'Stopped', reset: true };
+    });
+  } catch (error) {
+    appendLog(appLog, `QEMU reset failed: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', error: error.message };
+  }
 }
 
 function guestCredentialFile() {
@@ -1025,17 +1821,6 @@ async function runHyperVScript(scriptText, logPath) {
   } finally {
     try { fs.unlinkSync(tmp); } catch (cleanupError) {}
   }
-}
-
-// Sandboxie is not an allowed isolation backend. This stub exists so any legacy call
-// path fails closed instead of launching outside RunContainer's supported engines.
-async function runWithSandboxie(appRecord, tools, sandboxRoot, logPath) {
-  appendLog(logPath, 'Refused Sandboxie launch: Sandboxie is not an allowed isolation backend.');
-  return failedLaunch(appRecord, 'Sandboxie is not an allowed isolation backend for RunContainer. Use AppContainer (compatible apps) or a Hyper-V VM (arbitrary software). Nothing was launched.');
-}
-
-function resolveSandboxieTools() {
-  return findSandboxieTools(process.env);
 }
 
 function createWindow() {
@@ -1203,9 +1988,6 @@ async function installExe(exePath) {
     permissions: { network: profile.network, filesystem: profile.filesystem, registry: profile.registry },
     profile: 'default',
     sandboxConfig: profile,
-    sandboxieBox: sandboxBoxName(appId),
-    sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
-    sandboxieInitialized: false,
     createdAt: new Date().toISOString(),
   };
   saveApps([...loadApps(), record]);
@@ -1272,9 +2054,6 @@ ipcMain.handle('duplicate-container', async (_event, appRecord) => {
     programFilesRoot: layout.programFiles,
     programDataRoot: layout.programData,
     iconPath,
-    sandboxieBox: sandboxBoxName(appId),
-    sandboxieFileRoot: path.join(sandboxRoot, 'SandboxieFiles'),
-    sandboxieInitialized: false,
     createdAt: new Date().toISOString(),
     hypervVm: hv.vmName(appId),
     hypervVhd: clonedVhd,
@@ -1386,11 +2165,22 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
       appendLog(logPath, 'Isolation engine: Hyper-V virtual machine (full guest OS boundary).');
       return runWithHyperV(appRecord, sandboxRoot, logPath);
     }
-    if (!isAppContainerSupported()) {
-      return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. For arbitrary software use a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
+    if (lockedEngine === 'qemu') {
+      appendLog(logPath, 'Isolation engine: RCVM genuine VM (QEMU guest, overlay disk, guest agent).');
+      return runWithQemu(appRecord, sandboxRoot, logPath);
     }
-    appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
-    return runWithAppContainer(appRecord, sandboxRoot, logPath);
+    if (lockedEngine === 'appcontainer') {
+      if (!isAppContainerSupported()) {
+        return failedLaunch(appRecord, 'AppContainer isolation requires Windows 10/11. Use RCVM containment (all editions) or a Hyper-V VM (Pro/Enterprise/Education + virtualization). Nothing was launched.');
+      }
+      appendLog(logPath, 'Isolation engine: Windows AppContainer (verified container token).');
+      return runWithAppContainer(appRecord, sandboxRoot, logPath);
+    }
+    if (lockedEngine === 'rcvm') {
+      appendLog(logPath, 'Isolation engine: RCVM containment (Job Object caps + per-app profile, all Windows editions).');
+      return runWithRcvm(appRecord, sandboxRoot, logPath);
+    }
+    return failedLaunch(appRecord, 'No isolation engine is available for this app. Nothing was launched.');
   });
 });
 
@@ -1415,21 +2205,13 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
     await releaseAppWindow(appRecord, trackedPids(appRecord), errorLogPath);
     stopMonitor(appRecord.id);
     const seeds = trackedPids(appRecord);
-    // Legacy Sandboxie boxes (pre-refactor records only): best-effort cleanup, never a launch path.
+    // Pre-refactor records may still carry a legacy sandboxieBox name. RunContainer
+    // never executes Sandboxie (no backend, no tools lookup): the name is logged
+    // so nothing is silently skipped, and host-file removal below still runs.
     let legacySandboxieWarning = null;
-    if ((appRecord.sandboxieInitialized || appRecord.sandboxieCleanupPending) && appRecord.sandboxieBox) {
-      const tools = resolveSandboxieTools();
-      if (!tools) {
-        legacySandboxieWarning = 'A legacy Sandboxie box could not be cleared because Sandboxie is unavailable; host files are still removed below.';
-        appendLog(errorLogPath, `Sandbox cleanup warning for ${appRecord.name || appRecord.id}: ${legacySandboxieWarning}`);
-      } else {
-        try {
-          await deleteSandboxieBox({ tools, boxName: appRecord.sandboxieBox, execute: executeFile });
-        } catch (legacyError) {
-          legacySandboxieWarning = legacyError.message;
-          appendLog(errorLogPath, `Sandbox cleanup warning for ${appRecord.name || appRecord.id}: ${legacyError.message}`);
-        }
-      }
+    if (appRecord.sandboxieBox) {
+      legacySandboxieWarning = `Legacy Sandboxie box name ${appRecord.sandboxieBox} is ignored: RunContainer has no Sandboxie backend. Remove any Sandboxie data yourself if you created it outside RunContainer.`;
+      appendLog(errorLogPath, `Sandbox cleanup note for ${appRecord.name || appRecord.id}: ${legacySandboxieWarning}`);
     }
     // Ordered VM deletion: guest app -> graceful shutdown (wait Off) -> power-off
     // escalation only after timeout -> remove VM config (verify absent) -> remove
@@ -1493,6 +2275,10 @@ ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {
       throw new Error('This environment is a Hyper-V VM and can only be deleted on Windows. Nothing was removed.');
     }
     // Stop only this environment's processes: folder match + persisted installer lineage.
+    // The RCVM launcher goes first: killing it ends the contained tree via kill-on-job-close.
+    await stopQemuEnv(appRecord, appLogPath);
+    await qemuDeleteEnv(appRecord, appLogPath);
+    await stopRcvmLauncher(appRecord, appLogPath);
     let remainingPids = await stopProcessesUnder(sandboxRoot, seeds, { logPath: appLogPath });
     await removeSandboxDirectory(sandboxRoot, { shouldAbort: () => job.aborted, logPath: errorLogPath });
     if (legacySandboxieWarning) appendLog(errorLogPath, `Legacy Sandboxie note: ${legacySandboxieWarning}`);
@@ -1747,7 +2533,11 @@ ipcMain.handle('reset-environment', async (_event, requestedAppRecord) => {
     const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source || '');
     const appLog = path.join(appRecord.logsRoot || path.join(sandboxRoot, 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
     try {
+      if (isQemuEnv(appRecord)) {
+        return resetQemuEnv(appRecord, appLog);
+      }
       return await withOpLock(appRecord.id, 'reset', async () => {
+        await stopRcvmLauncher(appRecord, appLog);
         await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath: appLog });
         await deleteAppContainerProfile(appRecord, appLog).catch(() => ({}));
         const apps = loadApps().map((entry) => (entry.id === appRecord.id
@@ -1828,6 +2618,237 @@ ipcMain.handle('open-guest-display', async (_event, requestedAppRecord) => {
 // The UI asks the main process for the version, so package.json stays the single source.
 ipcMain.handle('get-app-version', async () => ({ version: app.getVersion() }));
 
+// Update checks against GitHub Releases (stable only). Cached so launch and the
+// Updates tab share one result; force:true re-checks. Never throws: failures
+// resolve to { status: 'unavailable' } and the UI simply hides the notice.
+let lastUpdateCheck = null;
+let downloadedUpdatePath = null;
+function updateStatePath() {
+  return path.join(app.getPath('userData'), 'runcontainer-updates.json');
+}
+function loadUpdateState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(updateStatePath(), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+function saveUpdateState(state) {
+  try {
+    fs.writeFileSync(updateStatePath(), JSON.stringify(state || {}, null, 2), 'utf8');
+  } catch (error) {
+    // Update state is a convenience; never fail the check for it.
+  }
+}
+function applySnooze(result) {
+  const state = loadUpdateState();
+  if (result?.status === 'update-available'
+    && state.snoozedVersion === result.latestVersion
+    && Number(state.snoozeUntil) > Date.now()) {
+    return { ...result, snoozed: true };
+  }
+  return result;
+}
+ipcMain.handle('check-app-updates', async (_event, options = {}) => {
+  const now = Date.now();
+  if (lastUpdateCheck && !options?.force && now - lastUpdateCheck.at < 15 * 60 * 1000) {
+    return applySnooze(lastUpdateCheck.result);
+  }
+  const updateCheck = require('./update-check');
+  const result = await updateCheck.checkForUpdates({ currentVersion: app.getVersion() });
+  lastUpdateCheck = { at: now, result };
+  saveUpdateState({ ...loadUpdateState(), lastCheck: lastUpdateCheck });
+  appendLog(
+    path.join(app.getPath('userData'), 'runcontainer-error.log'),
+    `Update check: repo=${updateCheck.resolveUpdateRepo()} installed=${app.getVersion()} status=${result.status}${result.latestVersion ? ` latest=${result.latestVersion}` : ''}${result.reason ? ` (${result.reason})` : ''}`,
+  );
+  return applySnooze(result);
+});
+
+ipcMain.handle('snooze-update', async (_event, { version, untilMs } = {}) => {
+  if (!version) return { snoozed: false };
+  saveUpdateState({ ...loadUpdateState(), snoozedVersion: version, snoozeUntil: Number(untilMs) || 0 });
+  if (lastUpdateCheck?.result) lastUpdateCheck.result = applySnooze(lastUpdateCheck.result);
+  return { snoozed: true };
+});
+
+function downloadViaHttps(url, destPath, redirectsLeft = 5) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, {
+      headers: { Accept: 'application/octet-stream', 'User-Agent': 'RunContainer' },
+      timeout: 30000,
+    }, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location && redirectsLeft > 0) {
+        response.resume();
+        resolve(downloadViaHttps(response.headers.location, destPath, redirectsLeft - 1));
+        return;
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(`Download answered HTTP ${response.statusCode}.`));
+        return;
+      }
+      const total = Number(response.headers['content-length']) || null;
+      let received = 0;
+      const file = fs.createWriteStream(destPath);
+      response.on('data', (chunk) => {
+        received += chunk.length;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('update-download-progress', { received, total });
+        }
+      });
+      response.pipe(file);
+      file.on('finish', () => file.close(() => resolve({ received, total })));
+      file.on('error', (error) => { try { fs.unlinkSync(destPath); } catch (cleanupError) { /* gone */ } reject(error); });
+    });
+    request.on('timeout', () => request.destroy(new Error('Download timed out.')));
+    request.on('error', reject);
+  });
+}
+
+ipcMain.handle('download-update', async () => {
+  const result = lastUpdateCheck?.result;
+  const url = result?.installerUrl;
+  if (result?.status !== 'update-available' || !url || !UPDATE_LINK_PREFIXES.some((prefix) => url.startsWith(prefix))) {
+    return { downloaded: false, error: 'No verified installer is available. Check for updates first.' };
+  }
+  const destPath = path.join(app.getPath('temp'), `RunContainer-Setup-${result.latestVersion}.exe`);
+  downloadedUpdatePath = null;
+  await downloadViaHttps(url, destPath);
+  downloadedUpdatePath = destPath;
+  return { downloaded: true };
+});
+
+ipcMain.handle('install-downloaded-update', async () => {
+  const destPath = downloadedUpdatePath;
+  const tempDir = path.resolve(app.getPath('temp'));
+  if (!destPath || path.resolve(destPath) !== path.join(tempDir, path.basename(destPath)) || !/\.exe$/i.test(destPath) || !fs.existsSync(destPath)) {
+    return { started: false, error: 'No downloaded installer is ready. Download it first.' };
+  }
+  // Same Inno AppId installs over the existing directory (update, not a second
+  // install). Launched visibly so the user sees the normal installer wizard.
+  const child = spawn(destPath, [], { detached: true, stdio: 'ignore', windowsHide: false });
+  child.unref();
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  app.quit();
+  return { started: true };
+});
+
+// The renderer never passes a URL: it only names which verified link to open, and
+// the main process opens a stored result limited to GitHub release hosts.
+const UPDATE_LINK_PREFIXES = ['https://github.com/', 'https://objects.githubusercontent.com/', 'https://release-assets.githubusercontent.com/'];
+// QEMU provisioning + status. The base image always comes from media the user
+// owns: provision a blank disk, boot it with the ISO for a manual Windows
+// install (drivers + qemu-guest-agent), shut the guest down, then set it as base.
+// QEMU ships no guest OS and no licence, and none is downloaded or bundled.
+ipcMain.handle('qemu-status', async () => refreshQemuStatus());
+
+ipcMain.handle('qemu-detect', async () => {
+  const store = loadQemuStore();
+  delete store.qemuSystem;
+  delete store.qemuImg;
+  delete store.version;
+  delete store.accel;
+  saveQemuStore(store);
+  return refreshQemuStatus();
+});
+
+ipcMain.handle('qemu-browse-base', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select provisioned base image (qcow2)',
+    filters: [{ name: 'QEMU disk images', extensions: ['qcow2'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { path: null };
+  return { path: result.filePaths[0] };
+});
+
+ipcMain.handle('qemu-set-base', async (_event, imagePath) => {
+  if (!imagePath || !fs.existsSync(imagePath)) {
+    return { saved: false, error: 'That image path does not exist.' };
+  }
+  if (!/\.qcow2$/i.test(imagePath)) {
+    return { saved: false, error: 'Base image must be a qcow2 file.' };
+  }
+  const store = loadQemuStore();
+  saveQemuStore({ ...store, baseImage: imagePath });
+  return { saved: true, ...(await refreshQemuStatus()) };
+});
+
+ipcMain.handle('qemu-provision-create', async (_event, { sizeGB } = {}) => {
+  const qemu = require('./qemu-runtime');
+  const status = await refreshQemuStatus();
+  if (!status.qemuImg) return { created: false, error: 'QEMU is not detected yet. Install it, then press Detect.' };
+  const size = Number(sizeGB) || 60;
+  if (!Number.isSafeInteger(size) || size < 20 || size > 500) {
+    return { created: false, error: 'Provisioning disk must be 20–500 GB.' };
+  }
+  const stageDir = path.join(app.getPath('userData'), 'qemu-base');
+  fs.mkdirSync(stageDir, { recursive: true });
+  const diskPath = path.join(stageDir, 'staged-disk.qcow2');
+  if (fs.existsSync(diskPath)) return { created: false, error: `Staging disk already exists at ${diskPath}. Set it as base or delete it first.` };
+  await executeFile(status.qemuImg, qemu.buildImgCreateArgs({ diskPath, sizeGB: size }), { timeout: 120000 });
+  return { created: true, diskPath };
+});
+
+ipcMain.handle('qemu-provision-boot', async (_event, { isoPath } = {}) => {
+  const qemu = require('./qemu-runtime');
+  const status = await refreshQemuStatus();
+  if (!status.qemuSystem) return { booted: false, error: 'QEMU is not detected yet.' };
+  if (!isoPath || !fs.existsSync(isoPath)) return { booted: false, error: 'Select your Windows ISO first (media and licence you own).' };
+  const diskPath = path.join(app.getPath('userData'), 'qemu-base', 'staged-disk.qcow2');
+  if (!fs.existsSync(diskPath)) return { booted: false, error: 'Create the staging disk first.' };
+  const args = qemu.buildQemuBootArgs({
+    accel: status.accel || 'tcg',
+    memoryMB: 4096,
+    cpuCount: 2,
+    diskPath,
+    qmpPort: 44999,
+    agentPipe: '\\\\.\\pipe\\rc-qemu-provision',
+    pidfilePath: path.join(app.getPath('userData'), 'qemu-base', 'provision.pid'),
+    vmName: 'RunContainer-provision',
+    display: 'sdl',
+    cdrom: isoPath,
+    bootOrder: 'd',
+  });
+  const child = spawn(status.qemuSystem, args, { detached: true, windowsHide: false });
+  child.unref();
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  return {
+    booted: true,
+    note: 'Install Windows in the VM window (your own ISO/licence), add virtio drivers and qemu-guest-agent, then shut Windows down. Afterwards set the staging disk as the base image.',
+  };
+});
+
+ipcMain.handle('qemu-set-guest-exe', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const guestPath = String(requestedAppRecord?.installedExeGuestPath || '').trim();
+  if (!guestPath || !/^[A-Za-z]:\\/.test(guestPath) || !/\.exe$/i.test(guestPath)) {
+    return { id: appRecord.id, status: 'Failed', error: 'Guest exe path must look like C:\\Program Files\\App\\app.exe.' };
+  }
+  const updated = { ...appRecord, installedExeGuestPath: guestPath };
+  saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
+  return { id: appRecord.id, status: updated.status, installedExeGuestPath: guestPath };
+});
+
+ipcMain.handle('open-update-link', async (_event, which) => {
+  const result = lastUpdateCheck?.result;
+  const url = which === 'installer' ? result?.installerUrl : result?.releaseUrl;
+  if (!url || !UPDATE_LINK_PREFIXES.some((prefix) => url.startsWith(prefix))) {
+    return { opened: false, error: 'No verified update link is available. Open the Updates tab and check again.' };
+  }
+  await shell.openExternal(url);
+  return { opened: true };
+});
+
 ipcMain.handle('cancel-delete', async (_event, requestedAppRecord) => {
   const job = deleteJobs.get(requestedAppRecord?.id);
   if (!job) return { id: requestedAppRecord?.id, cancelled: false, reason: 'No deletion is running for this app.' };
@@ -1836,16 +2857,20 @@ ipcMain.handle('cancel-delete', async (_event, requestedAppRecord) => {
 });
 
 // Fail-closed: 'profile' (unguarded) and 'sandboxie' are rejected, never saved. Allowed:
-// 'auto' (AppContainer unless the app needs a VM), 'appcontainer', 'hyperv' (prefer VM).
+// 'rcvm'/'auto' (RCVM containment, the default on all editions), 'hyperv' (full VM),
+// 'appcontainer' (explicit opt-in token mode).
 ipcMain.handle('set-isolation-engine', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
   const requested = requestedAppRecord?.isolationEngine;
   if (requested === 'profile' || requested === 'sandboxie') {
-    return { id: appRecord.id, status: 'Failed', error: 'That mode is not a security boundary and is no longer offered. Use AppContainer (compatible apps) or Hyper-V VM (arbitrary software). Nothing was changed.' };
+    return { id: appRecord.id, status: 'Failed', error: 'That mode is not a security boundary and is no longer offered. Use RCVM containment (all editions), Hyper-V VM (arbitrary software), or AppContainer (compatible apps). Nothing was changed.' };
   }
-  const engine = requested === 'hyperv' ? 'hyperv' : requested === 'appcontainer' ? 'appcontainer' : 'auto';
-  const updated = { ...appRecord, isolationEngine: engine, preferVm: engine === 'hyperv', requiresVm: Boolean(requestedAppRecord?.requiresVm ?? appRecord.requiresVm) };
+  if (requested !== 'hyperv' && requested !== 'appcontainer' && requested !== 'rcvm' && requested !== 'qemu' && requested !== 'auto' && requested !== undefined) {
+    return { id: appRecord.id, status: 'Failed', error: `Unknown isolation engine "${requested}". Use the QEMU VM, RCVM containment, Hyper-V VM, or AppContainer. Nothing was changed.` };
+  }
+  const engine = requested === 'hyperv' ? 'hyperv' : requested === 'appcontainer' ? 'appcontainer' : requested === 'rcvm' ? 'rcvm' : 'qemu';
+  const updated = { ...appRecord, isolationEngine: engine, preferVm: engine === 'hyperv', requiresVm: engine === 'hyperv' };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
   return { id: appRecord.id, status: updated.status, isolationEngine: engine, preferVm: updated.preferVm };
 });
@@ -1895,6 +2920,8 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
       if (updatedVm) broadcastContainerStatus(updatedVm);
       return { id: appRecord.id, status: 'Stopped' };
     }
+    await stopQemuEnv(appRecord, appLog);
+    await stopRcvmLauncher(appRecord, appLog);
     const remaining = await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath: appLog });
     if (remaining.length > 0) {
       throw new Error(describeCleanupFailure({
