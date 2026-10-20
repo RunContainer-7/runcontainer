@@ -8,9 +8,9 @@
 //   (see .github/workflows/release.yml), so the docs and release page always
 //   point at the newest Setup exe.
 //
-// The repo slug is resolved from RUNCONTAINER_UPDATE_REPO (owner/repo) so forks
-// and renames keep working without a code change. Until it is set to the real
-// repository, checks report 'unavailable' instead of guessing.
+// The repo slug defaults to the real RunContainer repository so installed apps
+// check for updates out of the box. RUNCONTAINER_UPDATE_REPO (owner/repo)
+// overrides it, so forks and renames keep working without a code change.
 //
 // Pure helpers (URL building, version compare, asset picking) are unit tested.
 // Network lives in fetchLatestRelease/checkForUpdates and never throws: any
@@ -19,7 +19,10 @@
 
 const https = require('https');
 
-const DEFAULT_UPDATE_REPO = 'OWNER/RunContainer';
+const DEFAULT_UPDATE_REPO = 'RunContainer-7/runcontainer';
+// The pre-wiring sentinel. If this ever resolves as the repo (stale env var,
+// old config), checks report 'unavailable' instead of querying a nonsense slug.
+const PLACEHOLDER_UPDATE_REPO = 'OWNER/RunContainer';
 const UPDATE_CHECK_TIMEOUT_MS = 8000;
 
 function resolveUpdateRepo() {
@@ -29,7 +32,7 @@ function resolveUpdateRepo() {
 }
 
 function isUpdateRepoConfigured(repo) {
-  return Boolean(repo) && repo !== DEFAULT_UPDATE_REPO && /^[^/\s]+\/[^/\s]+$/.test(repo);
+  return Boolean(repo) && repo !== PLACEHOLDER_UPDATE_REPO && /^[^/\s]+\/[^/\s]+$/.test(repo);
 }
 
 function buildLatestReleaseUrl(repo) {
@@ -184,6 +187,7 @@ async function checkForUpdates({ currentVersion, repo = resolveUpdateRepo() } = 
 
 module.exports = {
   DEFAULT_UPDATE_REPO,
+  PLACEHOLDER_UPDATE_REPO,
   UPDATE_CHECK_TIMEOUT_MS,
   resolveUpdateRepo,
   isUpdateRepoConfigured,

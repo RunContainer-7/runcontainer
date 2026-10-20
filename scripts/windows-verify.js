@@ -511,7 +511,9 @@ function checkHyperVReport() {
   if (!updateCheck.buildLatestReleaseUrl('o/r').endsWith('/repos/o/r/releases/latest')) throw new Error('update endpoint must be releases/latest');
   if (!updateCheck.isNewerVersion('0.5.1', '0.5.10')) throw new Error('versions must compare numerically');
   if (updateCheck.isNewerVersion('0.5.1', '0.5.1')) throw new Error('equal versions are not an update');
-  if (updateCheck.isUpdateRepoConfigured(updateCheck.DEFAULT_UPDATE_REPO)) throw new Error('placeholder repo must read as unconfigured');
+  if (!updateCheck.isUpdateRepoConfigured(updateCheck.DEFAULT_UPDATE_REPO)) throw new Error('default repo must read as configured');
+  if (updateCheck.isUpdateRepoConfigured(updateCheck.PLACEHOLDER_UPDATE_REPO)) throw new Error('old placeholder must read as unconfigured');
+  if (updateCheck.isUpdateRepoConfigured('not-a-slug')) throw new Error('junk slugs must read as unconfigured');
   // Read-only host probe (never creates anything).
   let probe = 'Hyper-V PowerShell module not present here (expected on CI)';
   try {

@@ -7,6 +7,7 @@ const {
   isUpdateRepoConfigured,
   updateApiBase,
   DEFAULT_UPDATE_REPO,
+  PLACEHOLDER_UPDATE_REPO,
 } = require('../../public/update-check');
 
 describe('update check helpers', () => {
@@ -15,9 +16,11 @@ describe('update check helpers', () => {
       .toBe('https://api.github.com/repos/acme/RunContainer/releases/latest');
   });
 
-  it('treats the placeholder repo as unconfigured', () => {
-    expect(isUpdateRepoConfigured(DEFAULT_UPDATE_REPO)).toBe(false);
+  it('treats the default repo as configured and rejects junk', () => {
+    expect(DEFAULT_UPDATE_REPO).toBe('RunContainer-7/runcontainer');
+    expect(isUpdateRepoConfigured(DEFAULT_UPDATE_REPO)).toBe(true);
     expect(isUpdateRepoConfigured('acme/RunContainer')).toBe(true);
+    expect(isUpdateRepoConfigured(PLACEHOLDER_UPDATE_REPO)).toBe(false);
     expect(isUpdateRepoConfigured('not-a-slug')).toBe(false);
   });
 

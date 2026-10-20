@@ -112,7 +112,7 @@ There is no unguarded mode. There is no Sandboxie path.
 
 ## Versioning
 
-`package.json` is the single source of truth. Stable releases are tags like `v0.5.1` with the installer attached (see `.github/workflows/release.yml`). The in-app Updates tab only tracks stable releases. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
+`package.json` is the single source of truth. Cut a stable release with `git tag v0.6.0 && git push origin v0.6.0` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
 
 ## For developers
 

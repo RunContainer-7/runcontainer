@@ -1,9 +1,17 @@
 #ifndef MyAppVersion
 #define MyAppVersion "0.6.0"
 #endif
+#ifndef MyAppRoot
 #define MyAppRoot "C:\RunContainer\runcontainer"
+#endif
+// Overridden from the command line by the CI release workflow (/DMyAppSource=,
+// /DMyOutDir=); the absolute defaults below are for local builds on this machine.
+#ifndef MyAppSource
 #define MyAppSource "C:\RunContainer\runcontainer\out\RunContainer-win32-x64"
+#endif
+#ifndef MyOutDir
 #define MyOutDir "C:\RunContainer\runcontainer\out"
+#endif
 
 [Setup]
 AppId={{62FD400C-D5A3-4ACA-9B40-A8310FCC5F26}

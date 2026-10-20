@@ -52,7 +52,12 @@ jobs:
         run: |
           choco install innosetup -y --no-progress
           $ver = (Get-Content package.json | ConvertFrom-Json).version
-          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /DMyAppVersion=$ver installer\RunContainer.iss
+          # The .iss defaults point at a local dev machine; CI overrides them
+          # with the real checkout paths so the packaged app is what ships.
+          $src = Join-Path (Get-Location) 'out\RunContainer-win32-x64'
+          $out = Join-Path (Get-Location) 'out'
+          if (-not (Test-Path $src)) { throw "Packaged app not found at $src." }
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /DMyAppVersion=$ver "/DMyAppSource=$src" "/DMyOutDir=$out" installer\RunContainer.iss
 
       - name: Attach installer to the GitHub Release
         uses: softprops/action-gh-release@v2
