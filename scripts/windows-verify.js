@@ -103,6 +103,75 @@ function checkGeneratedScriptsParse(prefix) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. A REAL contained process: suspended start, Job Object assignment, resume,
+// post-launch verification (IsProcessInJob + limits), real exit code.
+// ---------------------------------------------------------------------------
+function checkRcvmLiveLaunch() {
+  const sandbox = makeSandbox('rcvm-live');
+  const profile = path.join(sandbox, 'profile');
+  for (const dir of [path.join(profile, 'Roaming'), path.join(profile, 'Local'), path.join(profile, 'Temp')]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const scriptPath = path.join(sandbox, 'rcvm.ps1');
+  fs.writeFileSync(scriptPath, rcvm.buildRcvmLaunchScript({
+    jobName: `verify-${Date.now()}`,
+    executablePath: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+    workingDirectory: sandbox,
+    appDataDir: path.join(profile, 'Roaming'),
+    localAppDataDir: path.join(profile, 'Local'),
+    tempDir: path.join(profile, 'Temp'),
+    userProfileDir: profile,
+    launchArgs: '/c exit 7',
+    memoryCapBytes: 512 * 1024 * 1024,
+    cpuRate: 2500,
+    maxProcesses: 16,
+  }), 'utf8');
+  const output = powershell(['-File', scriptPath], { timeout: 180000 });
+  const parsed = rcvm.parseRcvmLauncherOutput(output);
+  removeQuietly(sandbox);
+  if (!Number.isSafeInteger(parsed.pid) || parsed.pid <= 0) throw new Error(`no pid reported: ${String(output).slice(0, 300)}`);
+  if (!parsed.verified || parsed.verified.inJob !== true) throw new Error(`job membership not verified: ${String(output).slice(0, 300)}`);
+  if (parsed.verified.limits !== true) throw new Error('job limits do not match the enforced policy');
+  if (parsed.exitCode !== 7) throw new Error(`guest exit code lost (got ${parsed.exitCode})`);
+  return `PID ${parsed.pid} verified in-job with limits, integrity RID ${parsed.verified.integrityRid}, exit 7`;
+}
+
+// ---------------------------------------------------------------------------
+// 1c. The update wizard flow against a local mock (no real release needed).
+// ---------------------------------------------------------------------------
+async function checkUpdateFlowLive() {
+  const serverPath = path.join(__dirname, 'update-test-server.js');
+  const port = 8979;
+  const server = spawn(process.execPath, [serverPath, String(port), 'newer'], { windowsHide: true });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('mock server did not start')), 15000);
+    server.stdout.on('data', (chunk) => {
+      if (String(chunk).includes('update-test-server on')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    server.on('error', (error) => { clearTimeout(timer); reject(error); });
+  });
+  const previousApi = process.env.RUNCONTAINER_UPDATE_API;
+  process.env.RUNCONTAINER_UPDATE_API = `http://127.0.0.1:${port}`;
+  try {
+    const found = await updateCheck.checkForUpdates({ currentVersion: '0.6.0', repo: 'test/app' });
+    if (found.status !== 'update-available') throw new Error(`mock newer release not detected: ${JSON.stringify(found).slice(0, 200)}`);
+    if (!found.installerUrl || !Number.isSafeInteger(found.installerSize) || !found.installerDigest) {
+      throw new Error('installer pick is missing url/size/digest');
+    }
+    const same = await updateCheck.checkForUpdates({ currentVersion: '0.9.0', repo: 'test/app' });
+    if (same.status !== 'up-to-date') throw new Error('same version should read up-to-date');
+    return `mock release detected (${found.latestVersion}), size+digest carried, same-version reads up-to-date`;
+  } finally {
+    if (previousApi === undefined) delete process.env.RUNCONTAINER_UPDATE_API;
+    else process.env.RUNCONTAINER_UPDATE_API = previousApi;
+    server.kill();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2. A real process inside a real AppContainer, with the token verified.
 // ---------------------------------------------------------------------------
 function checkAppContainerLaunch() {
@@ -414,10 +483,12 @@ function checkHyperVReport() {
   if (!hyperv.buildSetVmResourcesScript({ vm: 'V', memoryMB: 1, cpuCount: 99 }).includes('512MB')) throw new Error('resources must be clamped server-side');
   const plan = hyperv.deletionPlan({ vm: 'V', vhdValid: true });
   if (plan.indexOf('remove-env-vhd') < plan.indexOf('verify-vm-absent')) throw new Error('disk must only be removed after the VM is verified absent');
-  const selDefault = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false });
-  const selReady = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: true });
-  if (selDefault.engine !== 'rcvm') throw new Error('default must be RCVM containment (all editions), not a Hyper-V gate');
-  if (selReady.engine !== 'rcvm') throw new Error('default with Hyper-V ready is still RCVM; the VM is opt-in');
+  const selDefault = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false, qemuReady: false });
+  const selQemu = selectIsolationEngine({ platform: 'win32', appRecord: {}, hypervReady: false, qemuReady: true });
+  if (selDefault.engine !== 'rcvm') throw new Error('default without a provisioned VM must be honest RCVM containment so Run works');
+  if (selQemu.engine !== 'qemu') throw new Error('default with QEMU provisioned must be the genuine VM');
+  const selQemuCold = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'qemu' }, qemuReady: false, qemuMissing: ['QEMU is not installed.'] });
+  if (selQemuCold.engine !== 'qemu-unavailable') throw new Error('explicit QEMU VM without provisioning must fail closed');
   const selVmCold = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'hyperv' }, hypervReady: false });
   const selVmReady = selectIsolationEngine({ platform: 'win32', appRecord: { isolationEngine: 'hyperv' }, hypervReady: true });
   if (selVmCold.engine !== 'hyperv-unavailable') throw new Error('explicit Hyper-V without readiness must fail closed');
@@ -428,12 +499,14 @@ function checkHyperVReport() {
   const rcvmScript = rcvm.buildRcvmLaunchScript({
     jobName: 'verify', executablePath: 'C:\\a.exe', workingDirectory: 'C:\\w',
     appDataDir: 'C:\\w\\p\\Roaming', localAppDataDir: 'C:\\w\\p\\Local', tempDir: 'C:\\w\\p\\Temp',
+    userProfileDir: 'C:\\w\\p',
     memoryCapBytes: 1024 * 1024 * 1024, cpuRate: 2500, maxProcesses: 32,
   });
-  for (const token of ['CreateJobObjectW', 'AssignProcessToJobObject', 'LIMIT_KILL_ON_JOB_CLOSE', 'APPDATA', 'WaitForExit']) {
+  for (const token of ['CreateJobObjectW', 'AssignProcessToJobObject', 'IsProcessInJob', 'QueryInformationJobObject', 'LIMIT_KILL_ON_JOB_CLOSE', 'APPDATA', 'USERPROFILE', 'Verify', 'WaitForExit']) {
     if (!rcvmScript.includes(token)) throw new Error(`RCVM launcher is missing ${token}`);
   }
   if (rcvm.parseRcvmLauncherOutput('{"pid":7}').pid !== 7) throw new Error('RCVM pid line must parse');
+  if (rcvm.parseRcvmLauncherOutput('{"pid":7,"verified":{"inJob":true,"limits":true}}').verified?.inJob !== true) throw new Error('RCVM verify line must parse');
   // Update checks: stable-only endpoint, numeric compare, installer picking.
   if (!updateCheck.buildLatestReleaseUrl('o/r').endsWith('/repos/o/r/releases/latest')) throw new Error('update endpoint must be releases/latest');
   if (!updateCheck.isNewerVersion('0.5.1', '0.5.10')) throw new Error('versions must compare numerically');
@@ -442,7 +515,7 @@ function checkHyperVReport() {
   // Read-only host probe (never creates anything).
   let probe = 'Hyper-V PowerShell module not present here (expected on CI)';
   try {
-    const out = powershell(['-Command', "(Get-Command Get-VM -ErrorAction SilentlyContinue) ? 'PRESENT' : 'ABSENT'"]);
+    const out = powershell(['-Command', "if (Get-Command Get-VM -ErrorAction SilentlyContinue) { 'PRESENT' } else { 'ABSENT' }"]);
     if (String(out).includes('PRESENT')) {
       const script = path.join(work, 'prereq.ps1');
       fs.writeFileSync(script, hyperv.buildHyperVPrereqScript(), 'utf8');
@@ -464,6 +537,8 @@ async function main() {
   }
 
   check('generated launchers parse', () => checkGeneratedScriptsParse(''));
+  check('RCVM live launch: job membership + limits verified, exit code kept', checkRcvmLiveLaunch);
+  await checkAsync('update wizard flow against a local mock release server', checkUpdateFlowLive);
   check('AppContainer launch + token verification + profile delete', checkAppContainerLaunch);
   check('AppContainer boundary (token + sandbox grant, no outside grant)', checkAppContainerBoundary);
   check('fail-closed launch and engine selection', checkFailClosed);

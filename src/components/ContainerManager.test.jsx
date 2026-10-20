@@ -27,6 +27,8 @@ jest.mock("../services/containerService", () => ({
   openUpdateLink: jest.fn(async () => ({ opened: true })),
   snoozeUpdate: jest.fn(async () => ({ snoozed: true })),
   downloadUpdate: jest.fn(async () => ({ downloaded: true })),
+  cancelUpdateDownload: jest.fn(),
+  getUpdateState: jest.fn(async () => ({ check: null, downloaded: false })),
   installDownloadedUpdate: jest.fn(async () => ({ started: true })),
   onUpdateDownloadProgress: jest.fn(() => () => {}),
   getQemuStatus: jest.fn(async () => null),
@@ -239,6 +241,19 @@ describe("ContainerManager", () => {
     expect(container.textContent).toContain("QEMU genuine VM");
     expect(container.textContent).toContain("Detect QEMU");
     expect(container.textContent).toContain("Select base image");
+    expect(container.textContent).toContain("RCVM containment (default until a VM is provisioned");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows update check diagnostics in the Updates tab", async () => {
+    checkAppUpdates.mockResolvedValue({ status: "unavailable", reason: "No published releases found." });
+    const container = render();
+    openTab(container, "Updates");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("Update check diagnostics");
+    expect(container.textContent).toContain("No published releases found.");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -260,6 +275,7 @@ describe("ContainerManager", () => {
     act(() => {
       updateButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
+    await act(async () => { await Promise.resolve(); });
     expect(container.textContent).toContain("Update to v0.6.1");
     expect(container.textContent).toContain("Faster boots.");
     downloadUpdate.mockResolvedValue({ downloaded: true });

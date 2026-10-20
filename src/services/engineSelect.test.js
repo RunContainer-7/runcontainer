@@ -1,6 +1,6 @@
 const { selectIsolationEngine } = require("../../public/engine-select");
 
-describe("QEMU-first engine selection", () => {
+describe("best-available engine selection", () => {
   it("never selects an unguarded profile launch, even when requested", () => {
     const d = selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "profile" }, hypervReady: true, qemuReady: true });
     expect(d.engine).toBe("refused");
@@ -17,15 +17,23 @@ describe("QEMU-first engine selection", () => {
   });
 
   it("defaults to the genuine QEMU VM when provisioned", () => {
-    for (const appRecord of [{}, { isolationEngine: "auto" }, { isolationEngine: "qemu" }]) {
+    for (const appRecord of [{}, { isolationEngine: "auto" }]) {
       const d = selectIsolationEngine({ platform: "win32", appRecord, qemuReady: true });
       expect(d.engine).toBe("qemu");
     }
   });
 
-  it("fails closed with setup guidance when QEMU is not provisioned", () => {
+  it("defaults to honest RCVM containment when no VM is provisioned, so Run works", () => {
+    for (const appRecord of [{}, { isolationEngine: "auto" }]) {
+      const d = selectIsolationEngine({ platform: "win32", appRecord, qemuReady: false });
+      expect(d.engine).toBe("rcvm");
+      expect(d.reason).toContain("NOT a virtual machine");
+    }
+  });
+
+  it("fails closed when the genuine VM is explicitly requested but missing", () => {
     const d = selectIsolationEngine({
-      platform: "win32", appRecord: {}, qemuReady: false,
+      platform: "win32", appRecord: { isolationEngine: "qemu" }, qemuReady: false,
       qemuMissing: ["QEMU is not installed."],
     });
     expect(d.engine).toBe("qemu-unavailable");
@@ -33,7 +41,7 @@ describe("QEMU-first engine selection", () => {
     expect(d.reason).toContain("did not fall back");
   });
 
-  it("keeps legacy RCVM containment as an explicit non-VM opt-in", () => {
+  it("keeps explicit RCVM containment as a non-VM choice", () => {
     const d = selectIsolationEngine({ platform: "win32", appRecord: { isolationEngine: "rcvm" }, qemuReady: true });
     expect(d.engine).toBe("rcvm");
     expect(d.reason).toContain("NOT a virtual machine");

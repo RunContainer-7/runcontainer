@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, createQemuProvisionDisk, bootQemuProvision, setGuestExePath } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, createQemuProvisionDisk, bootQemuProvision, setGuestExePath } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -69,7 +69,9 @@ export default function ContainerManager() {
     // everyone else gets the installer from the GitHub Releases page.
     Promise.resolve(checkAppUpdates())
       .then((result) => {
-        if (result && (result.status === 'update-available' || result.status === 'up-to-date')) {
+        // Every outcome is stored so the Updates tab can always explain itself
+        // (up-to-date, unavailable + reason); only update-available banners.
+        if (result && result.status) {
           setUpdateInfo(result);
         }
       })
@@ -406,6 +408,35 @@ export default function ContainerManager() {
     setShowUpdateWizard(false);
   }
 
+  function openUpdateWizard() {
+    // Main owns the download operation; resync the wizard so reopening
+    // mid-download shows the live step instead of a stale one.
+    Promise.resolve(getUpdateState())
+      .then((state) => {
+        if (state?.downloaded) {
+          setWizardStep('ready');
+          setWizardMessage('Installer is downloaded and verified. Install & restart runs it over your current copy — apps and settings are kept.');
+        } else {
+          setWizardStep('notes');
+          setWizardMessage('');
+        }
+        setDownloadProgress(null);
+        setShowUpdateWizard(true);
+      })
+      .catch(() => {
+        setWizardStep('notes');
+        setWizardMessage('');
+        setShowUpdateWizard(true);
+      });
+  }
+
+  function handleCancelDownload() {
+    cancelUpdateDownload();
+    setWizardStep('notes');
+    setWizardMessage('Download cancelled. The partial file was removed.');
+    setDownloadProgress(null);
+  }
+
   function handleDownloadUpdate() {
     setWizardStep('downloading');
     setWizardMessage('');
@@ -534,7 +565,7 @@ export default function ContainerManager() {
         ? `${container.name} will run inside its Hyper-V VM (full guest OS; needs Pro/Enterprise/Education + virtualization + base image + guest credential).`
         : engine === 'appcontainer'
           ? `${container.name} opted into AppContainer mode: lightweight token boundary, NOT a VM, compatible apps only.`
-          : `${container.name} will run contained (RCVM legacy): Job Object caps with a per-app profile. Works on all Windows editions; process containment, NOT a VM.`);
+          : `${container.name} will run under RCVM containment (Job Object caps, verified post-launch) until a QEMU base image is provisioned — then it uses the genuine VM. Containment is process-level, NOT a VM.`);
     }).catch((error) => {
       setInstallMessage(`Could not change the engine for ${container.name}: ${error?.message || 'Unknown error.'}`);
     });
@@ -612,7 +643,7 @@ export default function ContainerManager() {
         <div className="update-banner">
           <span>RunContainer v{updateInfo.latestVersion} is available (you have v{appVersion}).</span>
           <div className="detail-actions">
-            <button className="settings-button" onClick={() => { setWizardStep('notes'); setWizardMessage(''); setDownloadProgress(null); setShowUpdateWizard(true); }}>Update…</button>
+            <button className="settings-button" onClick={openUpdateWizard}>Update…</button>
             <button className="settings-button ghost" onClick={handleSnoozeTomorrow}>Remind tomorrow</button>
             <button className="icon-button" aria-label="Dismiss update notice" onClick={() => setUpdateDismissed(true)}>×</button>
           </div>
@@ -713,7 +744,7 @@ export default function ContainerManager() {
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
                         {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • VM disk missing' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
-                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : container.isolationEngine === 'hyperv' ? ' • Hyper-V VM (full)' : container.isolationEngine === 'rcvm' ? ' • RCVM containment (legacy, not a VM)' : ' • QEMU genuine VM (default)'}
+                        {container.isolationEngine === 'appcontainer' ? ' • AppContainer (optional, not a VM)' : container.isolationEngine === 'hyperv' ? ' • Hyper-V VM (full)' : container.isolationEngine === 'rcvm' ? ' • RCVM containment (not a VM)' : ' • Genuine VM when provisioned, RCVM containment otherwise'}
                       </div>
                     </div>
                   </div>
@@ -869,8 +900,8 @@ export default function ContainerManager() {
               <span className="muted">QEMU is detected, never bundled (GPLv2). Windows media and licence are yours; nothing is downloaded. WHPX acceleration when available, TCG fallback otherwise. Install Windows + virtio drivers + qemu-guest-agent in the provisioning VM, shut it down, then select its disk as the base image.</span>
             </div>
             <div className="profile-card">
-              <strong>RCVM containment (legacy fallback, not a VM)</strong>
-              <span>Job Object caps (lifetime, memory, CPU, process count) with per-app profile folders. No admin rights, works on Home and Pro — but this is process containment, explicitly not a virtual machine, and it does not cut network access. Choose it per app when the genuine VM is not provisioned.</span>
+              <strong>RCVM containment (default until a VM is provisioned, not a VM)</strong>
+              <span>Job Object caps (lifetime, memory, CPU, process count) with per-app profile folders, verified on this machine after every launch. No admin rights, works on Home and Pro — this is what Run uses until you provision a QEMU base image. Process containment, explicitly not a virtual machine, and it does not cut network access.</span>
             </div>
             <div className="profile-card">
               <strong>VM isolation as a full Hyper-V VM (optional, no Sandboxie)</strong>
@@ -960,11 +991,16 @@ export default function ContainerManager() {
           <div className="detail-actions">
             <button className="settings-button" onClick={() => handleCheckUpdates(true)} disabled={updateChecking}>{updateChecking ? 'Checking…' : 'Check for updates'}</button>
             {updateInfo?.status === 'update-available' && (
-              <button className="settings-button ghost" onClick={() => { setWizardStep('notes'); setWizardMessage(''); setDownloadProgress(null); setShowUpdateWizard(true); }}>Update…</button>
+              <button className="settings-button ghost" onClick={openUpdateWizard}>Update…</button>
             )}
           </div>
-          {updateInfo?.status === 'unavailable' && updateInfo?.reason && (
-            <p className="muted">Update check: {updateInfo.reason}</p>
+          {updateInfo && (
+            <div className="profile-card update-diagnostics">
+              <strong>Update check diagnostics</strong>
+              <span>Installed: v{appVersion} • Status: {updateInfo.status}{updateInfo.latestVersion ? ` • Latest seen: v${updateInfo.latestVersion}` : ''}</span>
+              {updateInfo.reason && <span className="muted">{updateInfo.reason}</span>}
+              <span className="muted">New installers are attached to each stable GitHub Release; this check only reads the release feed and never installs anything by itself.</span>
+            </div>
           )}
           {updateInfo?.status === 'update-available' && (
             <div className="profile-card active update-available">
@@ -1014,14 +1050,17 @@ export default function ContainerManager() {
               <div className="wizard-step active">2. {updateInfo.releaseNotes ? updateInfo.releaseNotes.slice(0, 500) : 'See the Updates tab for the changelog.'}</div>
               <div className="wizard-step active">3. Download the installer, then install over your current copy — apps and settings are kept.</div>
             </div>
-            {downloadProgress && wizardStep === 'downloading' && (
-              <p className="status-line">Downloaded {(downloadProgress.received / 1048576).toFixed(1)} MB{downloadProgress.total ? ` of ${(downloadProgress.total / 1048576).toFixed(0)} MB` : ''}…</p>
+            {wizardStep === 'downloading' && (
+              <p className="status-line">{downloadProgress?.percent != null
+                ? `Downloaded ${(downloadProgress.received / 1048576).toFixed(1)} MB of ${(downloadProgress.total / 1048576).toFixed(1)} MB (${downloadProgress.percent}%)…`
+                : `Downloaded ${((downloadProgress?.received || 0) / 1048576).toFixed(1)} MB…`}</p>
             )}
             {wizardMessage && <p className="status-line">{wizardMessage}</p>}
             <div className="detail-actions">
               {wizardStep !== 'ready'
                 ? <button className="settings-button" onClick={handleDownloadUpdate} disabled={wizardStep === 'downloading'}>{wizardStep === 'downloading' ? 'Downloading…' : 'Download installer'}</button>
                 : <button className="settings-button" onClick={handleInstallUpdate}>Install & restart</button>}
+              {wizardStep === 'downloading' && <button className="settings-button ghost" onClick={handleCancelDownload}>Cancel</button>}
               {updateInfo.releaseUrl && <button className="settings-button ghost" onClick={() => handleOpenUpdateLink('release')}>View release</button>}
               <button className="settings-button ghost" onClick={handleSnoozeTomorrow}>Remind tomorrow</button>
             </div>
@@ -1055,12 +1094,12 @@ export default function ContainerManager() {
                     : selectedApp.isolationEngine === 'hyperv'
                       ? 'Hyper-V VM (full guest OS): installer and app run inside this environment\'s own guest VM. Needs Pro/Enterprise/Education + firmware virtualization + provisioned base image + guest credential.'
                       : selectedApp.isolationEngine === 'rcvm'
-                        ? 'RCVM containment (legacy): Job Object caps with a per-app profile. Process containment — explicitly NOT a virtual machine, no network cut-off.'
+                        ? 'RCVM containment: Job Object caps with a per-app profile, verified post-launch on this machine. Process containment — explicitly NOT a virtual machine, no network cut-off.'
                         : 'QEMU genuine VM (default): per-environment virtual machine with overlay disk and guest agent. Needs detected QEMU + provisioned base image (see Settings).'}
                 </p>
                 <div className="detail-actions">
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'qemu')}>QEMU VM (genuine)</button>
-                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'rcvm')}>RCVM containment (legacy, not a VM)</button>
+                  <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'rcvm')}>RCVM containment (not a VM)</button>
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'hyperv')}>Hyper-V VM (full)</button>
                   <button className="settings-button ghost" onClick={() => handleSetIsolationEngine(selectedApp, 'appcontainer')}>AppContainer (optional, not a VM)</button>
                 </div>

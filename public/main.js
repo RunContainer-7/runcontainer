@@ -1005,6 +1005,7 @@ function rcvmProfileDirs(sandboxRoot) {
     appData: path.join(profileRoot, 'Roaming'),
     localAppData: path.join(profileRoot, 'Local'),
     temp: path.join(profileRoot, 'Temp'),
+    userProfile: profileRoot,
   };
 }
 
@@ -1064,6 +1065,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       appDataDir: profile.appData,
       localAppDataDir: profile.localAppData,
       tempDir: profile.temp,
+      userProfileDir: profile.userProfile,
       launchArgs: argCheck.args || '',
       memoryCapBytes: limitCheck.limits.memoryCapBytes,
       cpuRate: limitCheck.limits.cpuRate,
@@ -1076,6 +1078,31 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     const launcherPid = launcherChild.pid;
     rcvmLaunchers.set(appRecord.id, launcherChild);
     let launcherOutput = '';
+    const verifyPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('The RCVM launcher did not report verification in time.')),
+        90000);
+      const poll = setInterval(() => {
+        const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
+        if (parsed.error) {
+          clearTimeout(timer);
+          clearInterval(poll);
+          reject(new Error(parsed.error));
+        } else if (parsed.verified !== undefined) {
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve(parsed.verified);
+        }
+      }, 300);
+      launcherChild.once('exit', () => {
+        clearTimeout(timer);
+        clearInterval(poll);
+        const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
+        if (parsed.verified !== undefined) resolve(parsed.verified);
+        else reject(new Error(parsed.error || 'The RCVM launcher exited before verification.'));
+      });
+    });
+    // Never an unhandled rejection when Run fails earlier on pidPromise.
+    verifyPromise.catch(() => {});
     const pidPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('The RCVM launcher did not report a process in time.')), 60000);
       launcherChild.stdout.on('data', (chunk) => {
@@ -1106,6 +1133,19 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     });
 
     const pid = await pidPromise;
+
+    // Post-launch verification of the ACTUAL process (IsProcessInJob against
+    // our job + enforced limits). Anything unverified is killed, never reported.
+    const verified = await verifyPromise;
+    if (!verified || verified.inJob !== true || verified.limits !== true) {
+      const why = !verified
+        ? 'the launcher never reported verification'
+        : verified.inJob !== true
+          ? 'the app process is not inside its Job Object'
+          : 'the Job Object limits do not match the enforced policy';
+      throw new Error(`Containment verification failed: ${why}.`);
+    }
+    appendLog(logPath, `Verified: PID ${pid} is inside its Job Object with enforced limits (token integrity RID ${verified.integrityRid ?? 'unknown'}).`);
 
     let pids = [];
     const deadline = Date.now() + 8000;
@@ -2673,37 +2713,102 @@ ipcMain.handle('snooze-update', async (_event, { version, untilMs } = {}) => {
   return { snoozed: true };
 });
 
-function downloadViaHttps(url, destPath, redirectsLeft = 5) {
+// Max installer size: refuses absurd payloads before they fill the disk.
+const UPDATE_MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
+let updateDownloadAbort = null;
+
+function sendUpdateProgress(progress) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-download-progress', progress);
+  }
+}
+
+function downloadViaHttps(url, destPath, { expectedSize, expectedDigest, redirectsLeft = 5 } = {}) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      updateDownloadAbort = null;
+      try { fs.unlinkSync(destPath); } catch (cleanupError) { /* partial removed */ }
+      reject(error);
+    };
     const request = https.get(url, {
       headers: { Accept: 'application/octet-stream', 'User-Agent': 'RunContainer' },
       timeout: 30000,
     }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location && redirectsLeft > 0) {
+        const next = String(response.headers.location);
+        // Test-server override is http; production stays https-only.
+        const allowHttp = (process.env.RUNCONTAINER_UPDATE_API || '').trim() !== '';
+        if (!next.startsWith('https://') && !(allowHttp && next.startsWith('http://127.0.0.1'))) {
+          response.resume();
+          fail(new Error('Download redirect left the trusted host.'));
+          return;
+        }
         response.resume();
-        resolve(downloadViaHttps(response.headers.location, destPath, redirectsLeft - 1));
+        downloadViaHttps(next, destPath, { expectedSize, expectedDigest, redirectsLeft: redirectsLeft - 1 })
+          .then((r) => { if (!settled) { settled = true; updateDownloadAbort = null; resolve(r); } })
+          .catch(fail);
         return;
       }
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(`Download answered HTTP ${response.statusCode}.`));
+        fail(new Error(`Download answered HTTP ${response.statusCode}.`));
         return;
       }
-      const total = Number(response.headers['content-length']) || null;
+      const headerTotal = Number(response.headers['content-length']) || null;
+      const total = headerTotal || expectedSize || null;
+      if (total && total > UPDATE_MAX_DOWNLOAD_BYTES) {
+        response.resume();
+        fail(new Error('Installer is larger than the 1 GB safety cap.'));
+        return;
+      }
+      const hash = crypto.createHash('sha256');
       let received = 0;
+      let lastSent = 0;
       const file = fs.createWriteStream(destPath);
+      updateDownloadAbort = () => {
+        response.destroy(new Error('Download cancelled.'));
+        try { file.destroy(); } catch (abortError) { /* closing */ }
+      };
       response.on('data', (chunk) => {
         received += chunk.length;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('update-download-progress', { received, total });
+        hash.update(chunk);
+        if (received > UPDATE_MAX_DOWNLOAD_BYTES) {
+          fail(new Error('Installer exceeded the 1 GB safety cap during download.'));
+          try { response.destroy(); } catch (destroyError) { /* closing */ }
+          return;
+        }
+        // Throttle progress: ~5 IPC messages per second, always with percent.
+        const now = Date.now();
+        if (now - lastSent > 200 || (total && received >= total)) {
+          lastSent = now;
+          sendUpdateProgress({ received, total, percent: total ? Math.floor((received * 100) / total) : null });
         }
       });
       response.pipe(file);
-      file.on('finish', () => file.close(() => resolve({ received, total })));
-      file.on('error', (error) => { try { fs.unlinkSync(destPath); } catch (cleanupError) { /* gone */ } reject(error); });
+      file.on('finish', () => file.close(() => {
+        if (settled) return;
+        if (expectedSize && received !== expectedSize) {
+          fail(new Error(`Installer size mismatch: expected ${expectedSize} bytes, got ${received}. It may be truncated; refusing to run it.`));
+          return;
+        }
+        const actual = `sha256:${hash.digest('hex')}`;
+        if (expectedDigest && actual.toLowerCase() !== String(expectedDigest).toLowerCase()) {
+          fail(new Error('Installer checksum does not match the release metadata. Refusing to run it.'));
+          return;
+        }
+        settled = true;
+        updateDownloadAbort = null;
+        sendUpdateProgress({ received, total: total || received, percent: 100 });
+        resolve({ received, total: total || received, sha256: actual });
+      }));
+      file.on('error', (error) => fail(error));
+      response.on('error', (error) => fail(error));
     });
-    request.on('timeout', () => request.destroy(new Error('Download timed out.')));
-    request.on('error', reject);
+    request.on('timeout', () => { request.destroy(new Error('Download timed out.')); });
+    request.on('error', (error) => fail(error));
   });
 }
 
@@ -2715,10 +2820,32 @@ ipcMain.handle('download-update', async () => {
   }
   const destPath = path.join(app.getPath('temp'), `RunContainer-Setup-${result.latestVersion}.exe`);
   downloadedUpdatePath = null;
-  await downloadViaHttps(url, destPath);
-  downloadedUpdatePath = destPath;
-  return { downloaded: true };
+  try {
+    // A size/digest check over HTTPS catches corruption, not a hostile mirror;
+    // signing guidance lives in docs/qemu-integration-plan.md. Fail closed either way.
+    const info = await downloadViaHttps(url, destPath, { expectedSize: result.installerSize, expectedDigest: result.installerDigest });
+    downloadedUpdatePath = destPath;
+    return { downloaded: true, bytes: info.received };
+  } catch (error) {
+    return { downloaded: false, error: error?.message || 'Download failed.' };
+  }
 });
+
+// Cancel an in-flight installer download; the partial file is removed.
+ipcMain.on('cancel-download-update', () => {
+  try {
+    if (updateDownloadAbort) updateDownloadAbort();
+  } catch (error) {
+    // Already finished: nothing to cancel.
+  }
+});
+
+// Rebuild the wizard after it reopens mid-download: main owns the operation,
+// the renderer only presents it.
+ipcMain.handle('get-update-state', async () => ({
+  check: lastUpdateCheck?.result || null,
+  downloaded: Boolean(downloadedUpdatePath && fs.existsSync(downloadedUpdatePath)),
+}));
 
 ipcMain.handle('install-downloaded-update', async () => {
   const destPath = downloadedUpdatePath;
@@ -2727,8 +2854,10 @@ ipcMain.handle('install-downloaded-update', async () => {
     return { started: false, error: 'No downloaded installer is ready. Download it first.' };
   }
   // Same Inno AppId installs over the existing directory (update, not a second
-  // install). Launched visibly so the user sees the normal installer wizard.
-  const child = spawn(destPath, [], { detached: true, stdio: 'ignore', windowsHide: false });
+  // install). Visible wizard with a log file; CloseApplications lets Inno ask
+  // to close the running app instead of failing on locked files.
+  const logPath = path.join(app.getPath('temp'), `RunContainer-update-${Date.now()}.log`);
+  const child = spawn(destPath, ['/SP-', '/NORESTART', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS', `/LOG=${logPath}`], { detached: true, stdio: 'ignore', windowsHide: false });
   child.unref();
   await new Promise((resolve, reject) => {
     child.once('spawn', resolve);

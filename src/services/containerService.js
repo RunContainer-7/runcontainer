@@ -141,6 +141,24 @@ export async function downloadUpdate() {
   return requireIpc('Downloading updates').invoke('download-update');
 }
 
+export function cancelUpdateDownload() {
+  if (!ipcRenderer) return;
+  try {
+    ipcRenderer.send('cancel-download-update');
+  } catch (error) {
+    // Download already finished: nothing to cancel.
+  }
+}
+
+export async function getUpdateState() {
+  if (!ipcRenderer) return { check: null, downloaded: false };
+  try {
+    return await ipcRenderer.invoke('get-update-state');
+  } catch (error) {
+    return { check: null, downloaded: false };
+  }
+}
+
 export async function installDownloadedUpdate() {
   return requireIpc('Installing updates').invoke('install-downloaded-update');
 }

@@ -14,6 +14,7 @@ const SCRIPT_OPTS = {
   appDataDir: 'C:\\data\\env\\profile\\Roaming',
   localAppDataDir: 'C:\\data\\env\\profile\\Local',
   tempDir: 'C:\\data\\env\\profile\\Temp',
+  userProfileDir: 'C:\\data\\env\\profile',
   launchArgs: '--safe-mode',
   memoryCapBytes: 2048 * 1024 * 1024,
   cpuRate: 2500,
@@ -57,6 +58,14 @@ describe('RCVM user-mode container backend', () => {
     // Redirected profile (set after Add-Type so compiler temp stays real).
     expect(script.indexOf('Add-Type')).toBeLessThan(script.indexOf('$env:APPDATA'));
     expect(script).toContain('LOCALAPPDATA');
+    expect(script).toContain('$env:USERPROFILE');
+    expect(script).toContain('$env:HOMEDRIVE');
+    expect(script).toContain('$env:HOMEPATH');
+    // Post-launch verification of the actual process.
+    expect(script).toContain('IsProcessInJob');
+    expect(script).toContain('QueryInformationJobObject');
+    expect(script).toContain('[RcvmLauncher]::Verify');
+    expect(script.indexOf('Write-Output $verifyJson')).toBeLessThan(script.indexOf('[RcvmLauncher]::WaitForExit'));
     // Limits and identity flow through.
     expect(script).toContain(String(2048 * 1024 * 1024));
     expect(script).toContain('RunContainer-RCVM-test');
@@ -65,14 +74,18 @@ describe('RCVM user-mode container backend', () => {
     expect(script.indexOf('Write-Output $startJson')).toBeLessThan(script.indexOf('[RcvmLauncher]::WaitForExit'));
   });
 
+  it('requires the profile folder for the launcher', () => {
+    expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, userProfileDir: undefined })).toThrow();
+  });
+
   it('refuses to build a launcher without limits or paths', () => {
     expect(() => buildRcvmLaunchScript({})).toThrow();
     expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, memoryCapBytes: undefined })).toThrow();
   });
 
-  it('parses the launcher pid/exit/error lines without throwing', () => {
-    expect(parseRcvmLauncherOutput('{"pid":1234,"job":"j"}\r\n{"pid":1234,"exitCode":0}'))
-      .toEqual({ pid: 1234, job: 'j', exitCode: 0 });
+  it('parses the launcher pid/verify/exit/error lines without throwing', () => {
+    expect(parseRcvmLauncherOutput('{"pid":1234,"job":"j"}\r\n{"pid":1234,"verified":{"inJob":true,"limits":true,"cpu":true,"integrityRid":8192}}\r\n{"pid":1234,"exitCode":0}'))
+      .toEqual({ pid: 1234, job: 'j', verified: { inJob: true, limits: true, cpu: true, integrityRid: 8192 }, exitCode: 0 });
     expect(parseRcvmLauncherOutput('noise\n{"error":"boom"}').error).toBe('boom');
     expect(parseRcvmLauncherOutput('')).toEqual({});
     expect(parseRcvmLauncherOutput(null)).toEqual({});

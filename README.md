@@ -9,7 +9,11 @@ RunContainer runs Windows apps contained: each app gets its own environment fold
 
 Requirements: Windows 10/11 (Home works), 64-bit. No admin rights needed for the default containment.
 
-## QEMU setup (first run)
+## How Run works out of the box
+
+Press **Run** and the app launches contained — no setup needed. RunContainer picks the strongest backend available: the genuine QEMU VM when one is provisioned below, otherwise RCVM process containment (Job Object lifetime/resource caps, verified on your machine after every launch). If verification fails, the app is killed and Run reports exactly which check failed — nothing runs uncontained.
+
+## QEMU setup (first run, optional but recommended)
 
 1. Install QEMU for Windows (https://www.qemu.org/download/) — it is detected, never bundled.
 2. Settings → QEMU VM setup → Detect QEMU (WHPX acceleration when available, TCG fallback otherwise).
@@ -18,7 +22,15 @@ Requirements: Windows 10/11 (Home works), 64-bit. No admin rights needed for the
 
 ## Updating
 
-When a stable release is out, a notice banner appears with an **Update…** wizard: release notes, installer download with progress, then **Install & restart** (installs over your copy; apps and settings are kept). **Remind tomorrow** snoozes that version for a day. If the check fails, the Updates tab says why (not configured, rate-limited, offline) instead of staying silent.
+When a stable release is out, a notice banner appears with an **Update…** wizard:
+
+1. **Notes** — your version vs the new one, with release notes.
+2. **Download** — the exact `RunContainer-Setup-<version>.exe` from the release, with progress, a Cancel button, and size + checksum verification (mismatches are refused, partials deleted).
+3. **Install & restart** — runs the installer wizard over your current copy (same AppId, so it updates in place; apps and settings are kept), then the app restarts.
+
+**Remind tomorrow** snoozes that version for a day; a new release always notifies. If the check fails, the Updates tab's diagnostics panel says why (not configured, rate-limited, offline, no releases yet) instead of staying silent. Every check is also logged with repo, versions, and outcome.
+
+To test the whole flow before any real release exists: `node scripts/update-test-server.js 8977 newer`, then set `RUNCONTAINER_UPDATE_API=http://127.0.0.1:8977` and use repo `test/app` (env only, never a URL from the UI).
 
 ## Using it
 

@@ -62,23 +62,22 @@ function isNewerVersion(current, latest) {
   return compareVersions(normalizedCurrent, normalizedLatest) < 0;
 }
 
-// Prefer a direct Setup-exe download; fall back to the release page when no
-// installer asset matches (the page always lets the user pick).
-function pickReleaseLink({ assets, htmlUrl }) {
+// Pick the installer asset for a release. First the EXACT filename our release
+// workflow produces (RunContainer-Setup-<version>.exe), then looser patterns.
+// Never the first .exe returned: a wrong asset would install the wrong thing.
+// The asset size + digest travel with the pick so the downloader can verify.
+function pickReleaseLink({ assets, htmlUrl, version }) {
   const list = Array.isArray(assets) ? assets : [];
-  const installer = list.find((asset) => (
-    asset
-    && typeof asset.name === 'string'
-    && /runcontainer.*setup.*\.exe$/i.test(asset.name)
-    && typeof asset.browser_download_url === 'string'
-  )) || list.find((asset) => (
-    asset
-    && typeof asset.name === 'string'
-    && /setup.*\.exe$/i.test(asset.name)
-    && typeof asset.browser_download_url === 'string'
-  ));
+  const hasUrl = (asset) => asset && typeof asset.name === 'string' && typeof asset.browser_download_url === 'string';
+  const exactName = version ? `RunContainer-Setup-${version}.exe`.toLowerCase() : null;
+  const installer = (exactName && list.find((asset) => hasUrl(asset) && asset.name.toLowerCase() === exactName))
+    || list.find((asset) => hasUrl(asset) && /runcontainer.*setup.*\.exe$/i.test(asset.name))
+    || list.find((asset) => hasUrl(asset) && /setup.*\.exe$/i.test(asset.name));
   return {
     installerUrl: installer ? installer.browser_download_url : null,
+    installerName: installer ? installer.name : null,
+    installerSize: Number.isSafeInteger(installer?.size) ? installer.size : null,
+    installerDigest: typeof installer?.digest === 'string' ? installer.digest : null,
     releaseUrl: typeof htmlUrl === 'string' ? htmlUrl : null,
   };
 }
@@ -94,10 +93,24 @@ function classifyReleaseHttpStatus(statusCode) {
   return `GitHub Releases answered HTTP ${statusCode}.`;
 }
 
+// RUNCONTAINER_UPDATE_API overrides the API base for local testing ONLY
+// (e.g. http://127.0.0.1:PORT against scripts/update-test-server.js). It is
+// read from the process environment, never from renderer input, and production
+// builds simply never set it.
+function updateApiBase() {
+  const override = (process.env.RUNCONTAINER_UPDATE_API || '').trim().replace(/\/$/, '');
+  return override || 'https://api.github.com';
+}
+
 function fetchLatestRelease({ repo, timeoutMs = UPDATE_CHECK_TIMEOUT_MS } = {}) {
-  const url = buildLatestReleaseUrl(repo);
+  const url = `${updateApiBase()}/repos/${repo}/releases/latest`;
+  // Plain http is allowed ONLY for the loopback test override; production is https.
+  const transport = url.startsWith('http://127.0.0.1') ? require('http') : https;
+  if (!url.startsWith('https://') && !url.startsWith('http://127.0.0.1')) {
+    return Promise.reject(new Error('Update API must be https (or loopback http for tests).'));
+  }
   return new Promise((resolve, reject) => {
-    const request = https.get(url, {
+    const request = transport.get(url, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'RunContainer',
@@ -150,9 +163,10 @@ async function checkForUpdates({ currentVersion, repo = resolveUpdateRepo() } = 
   if (!isNewerVersion(normalizedCurrent, latestVersion)) {
     return { status: 'up-to-date', currentVersion: normalizedCurrent, latestVersion };
   }
-  const { installerUrl, releaseUrl } = pickReleaseLink({
+  const { installerUrl, installerName, installerSize, installerDigest, releaseUrl } = pickReleaseLink({
     assets: release?.assets,
     htmlUrl: release?.html_url,
+    version: latestVersion,
   });
   return {
     status: 'update-available',
@@ -161,6 +175,9 @@ async function checkForUpdates({ currentVersion, repo = resolveUpdateRepo() } = 
     releaseName: typeof release?.name === 'string' ? release.name : '',
     releaseNotes: typeof release?.body === 'string' ? release.body : '',
     installerUrl,
+    installerName,
+    installerSize,
+    installerDigest,
     releaseUrl,
   };
 }
@@ -171,6 +188,7 @@ module.exports = {
   resolveUpdateRepo,
   isUpdateRepoConfigured,
   buildLatestReleaseUrl,
+  updateApiBase,
   classifyReleaseHttpStatus,
   normalizeVersion,
   compareVersions,

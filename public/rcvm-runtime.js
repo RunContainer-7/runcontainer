@@ -93,7 +93,7 @@ public class RcvmLauncher {
   const uint CREATE_SUSPENDED = 0x00000004;
   const uint INFINITE = 0xFFFFFFFF;
   const uint LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
-  const uint LIMIT_JOB_MEMORY = 0x00000100;
+  const uint LIMIT_JOB_MEMORY = 0x00000200;
   const uint LIMIT_ACTIVE_PROCESS = 0x00000008;
   const int INFO_EXTENDED_LIMIT = 9;
   const int INFO_CPU_RATE = 15;
@@ -188,6 +188,24 @@ public class RcvmLauncher {
   [DllImport("kernel32.dll")]
   static extern uint ResumeThread(IntPtr thread);
 
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint size, IntPtr retLen);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint size, out uint retLen);
+
+  [DllImport("advapi32.dll")]
+  static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+
+  [DllImport("advapi32.dll")]
+  static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+
   [DllImport("kernel32.dll")]
   static extern uint WaitForSingleObject(IntPtr handle, uint millis);
 
@@ -247,7 +265,13 @@ public class RcvmLauncher {
           TerminateProcess(pi.hProcess, 1);
           return JsonError("The app could not be placed in its job object: " + Marshal.GetLastWin32Error());
         }
-        ResumeThread(pi.hThread);
+        uint prevSuspend = ResumeThread(pi.hThread);
+        if (prevSuspend != 1) {
+          TerminateProcess(pi.hProcess, 1);
+          CloseHandle(pi.hThread);
+          CloseHandle(pi.hProcess);
+          return JsonError("The app thread did not resume from exactly one suspend count.");
+        }
         CloseHandle(pi.hThread);
         // The process handle is intentionally leaked here: WaitForExit closes it.
         // The job handle is kept so limits apply until the launcher exits.
@@ -265,6 +289,72 @@ public class RcvmLauncher {
   }
 
   static readonly Dictionary<string, IntPtr> JobProcessHandles = new Dictionary<string, IntPtr>();
+
+  // Post-launch verification of the ACTUAL process: job membership against OUR
+  // job handle, the enforced limits, and the token integrity level (reported,
+  // not forced — this launcher does not change tokens).
+  public static string Verify(string jobName, int pid, long memoryCapBytes, int cpuRate, int maxProcesses) {
+    try {
+      IntPtr job;
+      lock (jobs) { jobs.TryGetValue(jobName, out job); }
+      if (job == IntPtr.Zero) return JsonError("Job handle is missing for verification.");
+      IntPtr proc;
+      lock (jobs) { JobProcessHandles.TryGetValue(jobName, out proc); }
+      if (proc == IntPtr.Zero) return JsonError("Process handle is missing for verification.");
+      bool inJob = false;
+      bool inJobOk = IsProcessInJob(proc, job, out inJob);
+      bool limitsOk = false;
+      bool cpuOk = false;
+      int extSize = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+      IntPtr extPtr = Marshal.AllocHGlobal(extSize);
+      try {
+        if (QueryInformationJobObject(job, INFO_EXTENDED_LIMIT, extPtr, (uint)extSize, IntPtr.Zero)) {
+          var current = (JOBOBJECT_EXTENDED_LIMIT_INFORMATION)Marshal.PtrToStructure(extPtr, typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+          uint need = LIMIT_KILL_ON_JOB_CLOSE | LIMIT_JOB_MEMORY | LIMIT_ACTIVE_PROCESS;
+          limitsOk = ((current.BasicLimitInformation.LimitFlags & need) == need)
+            && (current.BasicLimitInformation.JobMemoryLimit == memoryCapBytes
+              || current.JobMemoryLimit == (UIntPtr)((ulong)memoryCapBytes))
+            && current.BasicLimitInformation.ActiveProcessLimit == (uint)maxProcesses;
+        }
+      } finally { Marshal.FreeHGlobal(extPtr); }
+      int cpuSize = Marshal.SizeOf(typeof(JOBOBJECT_CPU_RATE_CONTROL_INFORMATION));
+      IntPtr cpuPtr = Marshal.AllocHGlobal(cpuSize);
+      try {
+        if (QueryInformationJobObject(job, INFO_CPU_RATE, cpuPtr, (uint)cpuSize, IntPtr.Zero)) {
+          var currentCpu = (JOBOBJECT_CPU_RATE_CONTROL_INFORMATION)Marshal.PtrToStructure(cpuPtr, typeof(JOBOBJECT_CPU_RATE_CONTROL_INFORMATION));
+          cpuOk = ((currentCpu.ControlFlags & (CPU_ENABLE | CPU_HARD_CAP)) == (CPU_ENABLE | CPU_HARD_CAP))
+            && currentCpu.CpuRate == (uint)cpuRate;
+        }
+      } finally { Marshal.FreeHGlobal(cpuPtr); }
+      int integrityRid = -1;
+      IntPtr token = IntPtr.Zero;
+      try {
+        if (OpenProcessToken(proc, 0x8 /* TOKEN_QUERY */, out token)) {
+          uint need = 0;
+          GetTokenInformation(token, 25 /* TokenIntegrityLevel */, IntPtr.Zero, 0, out need);
+          if (need > 0) {
+            IntPtr buf = Marshal.AllocHGlobal((int)need);
+            try {
+              uint got = 0;
+              if (GetTokenInformation(token, 25, buf, need, out got)) {
+                IntPtr sid = Marshal.ReadIntPtr(buf);
+                byte count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+                if (count > 0) integrityRid = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+              }
+            } finally { Marshal.FreeHGlobal(buf); }
+          }
+          CloseHandle(token);
+        }
+      } catch (Exception) { }
+      return "{\\\"pid\\\":" + pid
+        + ",\\\"verified\\\":{\\\"inJob\\\":" + (inJobOk && inJob ? "true" : "false")
+        + ",\\\"limits\\\":" + (limitsOk ? "true" : "false")
+        + ",\\\"cpu\\\":" + (cpuOk ? "true" : "false")
+        + ",\\\"integrityRid\\\":" + integrityRid + "}}";
+    } catch (Exception ex) {
+      return JsonError("Verification failed: " + ex.Message);
+    }
+  }
 
   public static string WaitForExit(string jobName, int pid) {
     try {
@@ -291,6 +381,8 @@ public class RcvmLauncher {
 // Builds the .ps1 launcher. Profile dirs must already exist (Node creates them).
 // $env: overrides are set AFTER Add-Type so compiler temp files use the real
 // profile; the app inherits the redirected profile from the launcher.
+
+
 function buildRcvmLaunchScript({
   jobName,
   executablePath,
@@ -298,17 +390,26 @@ function buildRcvmLaunchScript({
   appDataDir,
   localAppDataDir,
   tempDir,
+  userProfileDir,
   launchArgs = '',
   memoryCapBytes,
   cpuRate,
   maxProcesses,
 } = {}) {
-  if (!jobName || !executablePath || !workingDirectory || !appDataDir || !localAppDataDir || !tempDir) {
+  if (!jobName || !executablePath || !workingDirectory || !appDataDir || !localAppDataDir || !tempDir || !userProfileDir) {
     throw new Error('RCVM launcher needs a job name, executable, working directory, and profile folders.');
   }
   if (!Number.isSafeInteger(memoryCapBytes) || !Number.isSafeInteger(cpuRate) || !Number.isSafeInteger(maxProcesses)) {
     throw new Error('RCVM launcher needs numeric job limits (validate them first).');
   }
+  // USERPROFILE/HOMEDRIVE/HOMEPATH are set alongside APPDATA so more
+  // well-behaved apps resolve into the per-app profile. This is still
+  // environment redirection, not Known-Folder redirection: apps using
+  // SHGetKnownFolderPath can resolve outside it, which the docs state openly.
+  const normalized = String(userProfileDir).replace(/\//g, '\\');
+  const driveMatch = normalized.match(/^([A-Za-z]:)(\\.*)?$/);
+  const homeDrive = driveMatch ? driveMatch[1] : 'C:';
+  const homePath = driveMatch && driveMatch[2] ? driveMatch[2] : '\\';
   return [
     '$ErrorActionPreference = \'Stop\'',
     `$csharp = @'\n${RCVM_CSHARP}\n'@`,
@@ -317,11 +418,17 @@ function buildRcvmLaunchScript({
     `$env:LOCALAPPDATA = ${psQuote(localAppDataDir)}`,
     `$env:TEMP = ${psQuote(tempDir)}`,
     `$env:TMP = ${psQuote(tempDir)}`,
+    `$env:USERPROFILE = ${psQuote(userProfileDir)}`,
+    `$env:HOMEDRIVE = ${psQuote(homeDrive)}`,
+    `$env:HOMEPATH = ${psQuote(homePath)}`,
     `$startJson = [RcvmLauncher]::Start(${psQuote(jobName)}, ${psQuote(executablePath)}, ${psQuote(launchArgs)}, ${psQuote(workingDirectory)}, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses})`,
     'Write-Output $startJson',
     '[Console]::Out.Flush()',
     '$start = $startJson | ConvertFrom-Json',
     'if ($start.pid) {',
+    `  $verifyJson = [RcvmLauncher]::Verify(${psQuote(jobName)}, [int]$start.pid, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses})`,
+    '  Write-Output $verifyJson',
+    '  [Console]::Out.Flush()',
     `  $exitJson = [RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid)`,
     '  Write-Output $exitJson',
     '}',
@@ -352,6 +459,9 @@ function parseRcvmLauncherOutput(stdout) {
     }
     if (typeof parsed?.job === 'string' && !result.job) {
       result.job = parsed.job;
+    }
+    if (parsed && typeof parsed.verified === 'object' && parsed.verified !== null && result.verified === undefined) {
+      result.verified = parsed.verified;
     }
   }
   return result;

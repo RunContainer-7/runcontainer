@@ -1,14 +1,19 @@
-// QEMU-first engine selection. Pure function so it can be unit tested.
+// Engine selection: best available backend, honestly labeled. Pure function so
+// it can be unit tested.
 //
-// Default path: 'qemu' — a GENUINE virtual machine per environment, managed by
-// RunContainer with QEMU as its engine (per-env overlay disk, QMP management,
-// guest-agent channel, no virtual network). Gated on qemuReady (detected QEMU
-// binary + provisioned base image); otherwise 'qemu-unavailable' with an
-// actionable error — never a silent fallback relabeled as a VM.
-// Legacy 'rcvm' stays as an explicitly chosen process-containment mode and is
-// labeled as NOT a VM. 'hyperv' is the full Hyper-V VM opt-in, 'appcontainer'
-// the token-mode opt-in. There is no 'profile' or 'sandboxie' path:
-// unisolated execution is never selected, even on request.
+// Default path: 'qemu' — a GENUINE virtual machine per environment, when QEMU
+// is detected AND a base image is provisioned. Otherwise the default is 'rcvm'
+// — RunContainer's own process containment (Job Object lifetime/resource caps
+// with per-app profile folders, verified post-launch). RCVM works on every
+// Windows 10/11 edition with no setup, so Run works out of the box; it is
+// labeled as NOT a VM everywhere it appears.
+//
+// Fail-closed rules (never a silent fallback relabeled as something stronger):
+// - Explicit 'qemu' choice without provisioning -> 'qemu-unavailable' with
+//   setup guidance. The app is NOT run contained and reported as a VM.
+// - Explicit 'hyperv' without Hyper-V ready -> 'hyperv-unavailable'.
+// - 'profile'/'sandboxie' -> 'refused'. 'appcontainer' stays an explicit
+//   opt-in, labeled NOT a VM.
 function selectIsolationEngine({ platform = process.platform, appRecord = {}, hypervReady = false, qemuReady = false, qemuMissing = [] } = {}) {
   if (platform !== 'win32') {
     return { engine: 'unavailable', reason: 'Isolation requires Windows 10/11.' };
@@ -16,18 +21,18 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
   if (appRecord.isolationEngine === 'profile') {
     return {
       engine: 'refused',
-      reason: 'This app is marked "unguarded profile mode", which is not a security boundary. RunContainer refuses to launch it unisolated. Choose the QEMU VM, Hyper-V VM, RCVM containment, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
+      reason: 'This app is marked "unguarded profile mode", which is not a security boundary. RunContainer refuses to launch it unisolated. Choose the QEMU VM, RCVM containment, Hyper-V VM, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
     };
   }
   if (appRecord.isolationEngine === 'sandboxie' || appRecord.launchMode === 'sandboxie') {
     return {
       engine: 'refused',
-      reason: 'Sandboxie is not an allowed isolation backend for RunContainer. Choose the QEMU VM, Hyper-V VM, RCVM containment, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
+      reason: 'Sandboxie is not an allowed isolation backend for RunContainer. Choose the QEMU VM, RCVM containment, Hyper-V VM, or explicitly choose the AppContainer mode for compatible apps. Nothing was launched.',
     };
   }
-  // Explicit opt-in to the legacy lightweight, non-VM process mode.
+  // Explicit opt-in to the legacy process mode. Labeled accurately below.
   if (appRecord.isolationEngine === 'rcvm' && !appRecord.requiresVm && !appRecord.preferVm && !appRecord.requiresQemu) {
-    return { engine: 'rcvm', reason: 'Legacy process containment: Job Object lifetime/resource caps with per-app profile folders. This is NOT a virtual machine and does not cut network access.' };
+    return { engine: 'rcvm', reason: 'Process containment: Job Object lifetime/resource caps with per-app profile folders, verified post-launch. This is NOT a virtual machine and does not cut network access.' };
   }
   // Explicit opt-in to the lightweight, non-VM token mode. Labeled accurately below.
   if (appRecord.isolationEngine === 'appcontainer' && !appRecord.requiresVm && !appRecord.preferVm && !appRecord.requiresQemu) {
@@ -43,14 +48,22 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
     }
     return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (guest OS boundary).' };
   }
-  // Default and 'auto'/'qemu': the genuine RCVM virtual machine. Fails closed
-  // when QEMU is not provisioned — never falls back to another mode silently.
+  // Explicit genuine-VM choice. Fails closed when QEMU is not provisioned —
+  // never runs the app contained while reporting a VM.
+  if (appRecord.isolationEngine === 'qemu' || appRecord.requiresQemu) {
+    if (!qemuReady) {
+      const detail = (qemuMissing || []).filter(Boolean).join(' ');
+      return {
+        engine: 'qemu-unavailable',
+        reason: `The genuine RCVM virtual machine was requested but is not provisioned yet. ${detail || 'Install QEMU and provision a base image from Windows media you own.'} Open Settings → QEMU VM setup. RunContainer did not launch anything, and did not fall back to any other mode.`,
+      };
+    }
+    return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
+  }
+  // Default and 'auto': genuine VM when provisioned, honest process containment
+  // otherwise. Both paths verify before reporting; nothing runs uncontained.
   if (!qemuReady) {
-    const detail = (qemuMissing || []).filter(Boolean).join(' ');
-    return {
-      engine: 'qemu-unavailable',
-      reason: `The genuine RCVM virtual machine is not provisioned yet. ${detail || 'Install QEMU and provision a base image from Windows media you own.'} Open Settings → QEMU VM setup. RunContainer did not launch anything, and did not fall back to any other mode.`,
-    };
+    return { engine: 'rcvm', reason: 'No provisioned VM yet, so this app runs under RCVM process containment (Job Object caps, verified post-launch) until a QEMU base image is provisioned in Settings. This is NOT a virtual machine.' };
   }
   return { engine: 'qemu', reason: 'Genuine VM isolation: per-environment QEMU virtual machine (overlay disk, guest agent, no virtual network).' };
 }

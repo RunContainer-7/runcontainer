@@ -5,6 +5,7 @@ const {
   isNewerVersion,
   pickReleaseLink,
   isUpdateRepoConfigured,
+  updateApiBase,
   DEFAULT_UPDATE_REPO,
 } = require('../../public/update-check');
 
@@ -44,20 +45,33 @@ describe('update check helpers', () => {
     expect(classifyReleaseHttpStatus(500)).toContain('HTTP 500');
   });
 
-  it('picks the Setup exe asset and falls back to the release page', () => {
+  it('picks the exact Setup exe for the version, with size and digest', () => {
     const htmlUrl = 'https://github.com/acme/RunContainer/releases/tag/v0.5.1';
     const picked = pickReleaseLink({
       htmlUrl,
+      version: '0.5.1',
       assets: [
+        { name: 'Setup.exe', browser_download_url: 'https://example.com/wrong.exe', size: 1 },
         { name: 'checksums.txt', browser_download_url: 'https://example.com/sums' },
-        { name: 'RunContainer-Setup-0.5.1.exe', browser_download_url: 'https://example.com/setup.exe' },
+        { name: 'RunContainer-Setup-0.5.1.exe', browser_download_url: 'https://example.com/setup.exe', size: 123, digest: 'sha256:abc' },
       ],
     });
     expect(picked.installerUrl).toBe('https://example.com/setup.exe');
+    expect(picked.installerSize).toBe(123);
+    expect(picked.installerDigest).toBe('sha256:abc');
     expect(picked.releaseUrl).toBe(htmlUrl);
 
     const fallback = pickReleaseLink({ htmlUrl, assets: [{ name: 'src.zip' }] });
     expect(fallback.installerUrl).toBeNull();
+    expect(fallback.installerSize).toBeNull();
     expect(fallback.releaseUrl).toBe(htmlUrl);
+  });
+
+  it('defaults the API base to GitHub but honors the test override', () => {
+    delete process.env.RUNCONTAINER_UPDATE_API;
+    expect(updateApiBase()).toBe('https://api.github.com');
+    process.env.RUNCONTAINER_UPDATE_API = 'http://127.0.0.1:8977/';
+    expect(updateApiBase()).toBe('http://127.0.0.1:8977');
+    delete process.env.RUNCONTAINER_UPDATE_API;
   });
 });
