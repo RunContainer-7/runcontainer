@@ -13,12 +13,15 @@ function buildTakeOwnershipArgs(directory) {
 }
 
 // Reset explicit (possibly DENY) ACEs so the tree reports the inherited ACLs again.
+// icacls takes the object first and switches after it: `icacls <dir> /reset`. Switches
+// before the name are rejected with "Invalid parameter" (exit 87), which silently left
+// every DENY-ACL sandbox undeletable because the repair never actually ran.
 function buildResetAclArgs(directory) {
-  return ['/reset', '/T', '/C', '/Q', directory];
+  return [directory, '/reset', '/T', '/C', '/Q'];
 }
 
 function buildGrantFullControlArgs(directory, user = os.userInfo().username) {
-  return ['/grant:r', `${user}:(OI)(CI)F`, '/T', '/C', '/Q', directory];
+  return [directory, '/grant:r', `${user}:(OI)(CI)F`, '/T', '/C', '/Q'];
 }
 
 // The order matters on Windows. An explicit DENY ACE also denies traverse, so the root has to
@@ -28,7 +31,7 @@ function buildGrantFullControlArgs(directory, user = os.userInfo().username) {
 // run the same sequence.
 function buildAclRepairPlan(directory, user = os.userInfo().username) {
   return [
-    { command: 'icacls.exe', args: ['/reset', directory] },
+    { command: 'icacls.exe', args: [directory, '/reset', '/C', '/Q'] },
     { command: 'takeown.exe', args: buildTakeOwnershipArgs(directory) },
     { command: 'icacls.exe', args: buildResetAclArgs(directory) },
     { command: 'icacls.exe', args: buildGrantFullControlArgs(directory, user) },

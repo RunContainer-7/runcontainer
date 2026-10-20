@@ -250,15 +250,30 @@ describe("sandbox removal repair", () => {
   it("resets the root ACL before taking ownership, because a DENY also denies traversal", () => {
     const plan = buildAclRepairPlan("C:\\sb", "me");
     expect(plan.map((step) => step.command)).toEqual(["icacls.exe", "takeown.exe", "icacls.exe", "icacls.exe"]);
-    expect(plan[0].args).toEqual(["/reset", "C:\\sb"]);
+    expect(plan[0].args).toEqual(["C:\\sb", "/reset", "/C", "/Q"]);
     expect(plan[1].args).toEqual(["/F", "C:\\sb", "/R", "/D", "Y"]);
-    expect(plan[3].args).toEqual(["/grant:r", "me:(OI)(CI)F", "/T", "/C", "/Q", "C:\\sb"]);
+    expect(plan[3].args).toEqual(["C:\\sb", "/grant:r", "me:(OI)(CI)F", "/T", "/C", "/Q"]);
   });
 
   it("builds ownership and ACL repair commands for the app's own folder", () => {
     expect(buildTakeOwnershipArgs("C:\\sb")).toEqual(["/F", "C:\\sb", "/R", "/D", "Y"]);
-    expect(buildResetAclArgs("C:\\sb")).toEqual(["/reset", "/T", "/C", "/Q", "C:\\sb"]);
-    expect(buildGrantFullControlArgs("C:\\sb", "me")).toEqual(["/grant:r", "me:(OI)(CI)F", "/T", "/C", "/Q", "C:\\sb"]);
+    expect(buildResetAclArgs("C:\\sb")).toEqual(["C:\\sb", "/reset", "/T", "/C", "/Q"]);
+    expect(buildGrantFullControlArgs("C:\\sb", "me")).toEqual(["C:\\sb", "/grant:r", "me:(OI)(CI)F", "/T", "/C", "/Q"]);
+  });
+
+  it("gives icacls the folder before its switches, which it rejects otherwise", () => {
+    // icacls parses `icacls /reset <dir>` as an invalid parameter (exit 87) and prints
+    // its usage text, so a repair that ordered the arguments that way did nothing and
+    // left DENY-ACL sandboxes undeletable. Every icacls invocation must start with the object.
+    const icaclsCalls = [
+      ...buildAclRepairPlan("C:\\sb", "me").filter((step) => step.command === "icacls.exe").map((step) => step.args),
+      buildResetAclArgs("C:\\sb"),
+      buildGrantFullControlArgs("C:\\sb", "me"),
+    ];
+    for (const args of icaclsCalls) {
+      expect(args[0].startsWith("/")).toBe(false);
+      expect(args.slice(1).some((arg) => arg.startsWith("/"))).toBe(true);
+    }
   });
 
   it("repairs permissions once after a denial and then succeeds without escalating further", async () => {

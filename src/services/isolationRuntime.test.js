@@ -125,6 +125,16 @@ describe("isolation launcher results", () => {
     expect(parseAppContainerOutput(output)).toMatchObject({ pid: 123, verified: true });
   });
 
+  it("reads the result when a console app's prompt is glued onto the marker line", () => {
+    // cmd.exe (and installers) inherit the launcher's console, so their prompt can end
+    // up directly before the marker with no newline in between. This is what real
+    // Windows produced, and the old line-start check reported "no result".
+    const output = "The system cannot find message text for message number 0x2350.\r\n"
+      + "(c) Microsoft Corporation. All rights reserved.\r\n\r\n"
+      + `C:\\Users\\me\\AppData\\Local\\Temp\\sb>${RESULT_PREFIX}{"verified":true,"pid":8472,"processSid":"S-1-15-2-9","containerSid":"S-1-15-2-9"}\r\n`;
+    expect(parseAppContainerOutput(output)).toMatchObject({ pid: 8472, verified: true });
+  });
+
   it("surfaces the launcher's error instead of pretending the app started", () => {
     expect(() => parseAppContainerOutput(`${RESULT_PREFIX}{"error":"The AppContainer profile could not be created (HRESULT 0x80070005)."}`))
       .toThrow("HRESULT 0x80070005");

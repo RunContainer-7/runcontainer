@@ -406,11 +406,18 @@ function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executab
 
 function parseAppContainerOutput(stdout) {
   const text = String(stdout || '');
-  const line = text.split(/\r?\n/).reverse().find((entry) => entry.startsWith(RESULT_PREFIX));
-  if (!line) throw new Error('The isolation launcher did not return a result.');
+  // The contained process inherits the launcher's console, so a console app's banner
+  // or its prompt can land in front of our marker on the same line, e.g.
+  //   C:\Users\me\Temp\run>RCAPPCONTAINER {"pid":123,...}
+  // Requiring the marker at the start of a line made that look like "no result"
+  // (which is exactly how the AppContainer checks failed on real Windows), so find
+  // the last marker anywhere in the output and read JSON up to the end of its line.
+  const marker = text.lastIndexOf(RESULT_PREFIX);
+  if (marker === -1) throw new Error('The isolation launcher did not return a result.');
+  const line = text.slice(marker + RESULT_PREFIX.length).split(/\r?\n/, 1)[0];
   let parsed;
   try {
-    parsed = JSON.parse(line.slice(RESULT_PREFIX.length));
+    parsed = JSON.parse(line);
   } catch (error) {
     throw new Error('The isolation launcher returned an unreadable result.');
   }

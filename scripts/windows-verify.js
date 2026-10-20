@@ -327,8 +327,11 @@ async function checkDeletionCases() {
       '$handle.Close()',
     ].join('\n'), 'utf8');
 
-    const holder = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', holderScript, '-Path', target, '-Marker', marker], { detached: true, stdio: 'ignore', windowsHide: true });
-    holder.unref();
+    // Not detached: powershell.exe starts and exits without running the script when it
+    // is spawned with DETACHED_PROCESS (no console), so the holder never took the lock
+    // and the check failed with "the lock holder never started". A plain child is enough
+    // here; the check kills it explicitly.
+    const holder = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', holderScript, '-Path', target, '-Marker', marker], { stdio: 'ignore', windowsHide: true });
     const deadline = Date.now() + 20000;
     while (!fs.existsSync(marker) && Date.now() < deadline) await wait(250);
     if (!fs.existsSync(marker)) throw new Error('the lock holder never started');
