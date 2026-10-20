@@ -57,6 +57,13 @@ Hyper-V setup (only if you opt an app into the full VM): enable virtualization i
 
 `Reset` stops the app and returns the environment to a fresh state, keeping data. `Delete` stops everything and removes the app with its folder. There is no unguarded mode and no Sandboxie backend.
 
+## Compatibility and safety
+
+- Some installers expect to be installed system-wide, or rely on drivers, services or hardware access. These may not work in an environment.
+- Only install software you trust. Applications inside an environment can still see anything you type into them, so sign in only where you trust the software.
+- Isolation reduces the impact an application can have on your PC, but it is not a guarantee. It is not antivirus, and not every Windows application will work.
+- Keep your normal antivirus and backups running.
+
 ## (Old engineering notes below — kept for developers)
 
 ## How isolation actually works now (developer reference)
@@ -110,12 +117,30 @@ is removed, instead of deleting a live VHDX out from under vmms.
 
 There is no unguarded mode. There is no Sandboxie path.
 
+## Get help and report issues
+
+- **Questions and ideas:** [RunContainer Discord](https://discord.gg/UKTGRMMmC4)
+- **Bugs and feature requests:** [Issue tracker](https://github.com/RunContainer-7/runcontainer/issues)
+
+## Project structure
+
+```
+runcontainer
+├── public/        Electron main process and runtime scripts
+├── src/           React interface
+├── scripts/       Helper scripts
+├── installer/     Installer build files (Inno Setup)
+├── run.bat        Run from source on Windows
+└── package.json
+```
+
 ## Versioning
 
 `package.json` is the single source of truth. Cut a stable release with `git tag v0.6.0 && git push origin v0.6.0` (tag must match `package.json`): the `release.yml` workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. The in-app Updates tab only tracks stable releases and checks `RunContainer-7/runcontainer` by default. Forks: set `RUNCONTAINER_UPDATE_REPO=owner/repo` so the update check reads your releases.
 
 ## For developers
 
+- Easiest from source on Windows: double-click `run.bat` (installs dependencies, builds the interface, opens the app).
 - `npm install`, `npm start` (Electron), `npm run build`.
 - `npm test`, plus on Windows `node scripts/windows-verify.js`.
 - App states: Running, Stopped, Failed, Unknown. One operation per environment at a time.

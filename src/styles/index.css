@@ -716,3 +716,18 @@ body {
     color: #cbd5e1;
     font-size: 13px;
 }
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(40, 110, 200, 0.22);
+}
+
+.update-banner .detail-actions {
+  margin: 0;
+  flex-shrink: 0;
+}

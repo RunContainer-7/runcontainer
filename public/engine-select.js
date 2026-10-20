@@ -39,11 +39,12 @@ function selectIsolationEngine({ platform = process.platform, appRecord = {}, hy
     return { engine: 'appcontainer', reason: 'Optional lightweight mode: Windows AppContainer with verified container token. This is NOT a virtual machine and cannot run administrator installers, drivers, or services.' };
   }
   // Explicit full Hyper-V choice. Fails closed when Hyper-V is not ready.
+  // A missing VM is never papered over by a weaker mode.
   if (appRecord.isolationEngine === 'hyperv' || appRecord.requiresVm || appRecord.preferVm) {
     if (!hypervReady) {
       return {
         engine: 'hyperv-unavailable',
-        reason: 'Hyper-V VM isolation was requested, but Hyper-V is not ready. Enable Hyper-V on Windows 10/11 Pro/Enterprise/Education with virtualization enabled in firmware, provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.',
+        reason: 'Hyper-V VM isolation was requested, but Hyper-V is not ready. Turn on Hyper-V and virtualization in firmware, then provision a base image and guest credential. RunContainer did not launch anything, and did not fall back to any other mode.',
       };
     }
     return { engine: 'hyperv', reason: 'Full VM isolation via Hyper-V (guest OS boundary).' };
