@@ -335,13 +335,19 @@ async function checkDeletionCases() {
     const deadline = Date.now() + 20000;
     while (!fs.existsSync(marker) && Date.now() < deadline) await wait(250);
     if (!fs.existsSync(marker)) throw new Error('the lock holder never started');
-    holder.kill();
 
+    // Delete while the exclusive handle is still open. This has to fail: killing the
+    // holder first (as this check used to) released the lock before anything was tried,
+    // so it always succeeded and reported that the lock did not block deletion.
     let failureMessage = null;
     try {
       await launch.removeDirectoryWithRetries({ directory: sandbox, attempts: 2, retryDelayMs: 200 });
     } catch (error) {
       failureMessage = error.message;
+    }
+    if (!failureMessage) {
+      try { run('taskkill.exe', ['/PID', String(holder.pid), '/T', '/F']); } catch (error) {}
+      throw new Error('a tree with an open exclusive handle was removed without an error');
     }
     // Close only the holder we started, never other PowerShell processes.
     try { run('taskkill.exe', ['/PID', String(holder.pid), '/T', '/F']); } catch (error) {}
@@ -357,7 +363,7 @@ async function checkDeletionCases() {
     await wait(500);
     await launch.removeDirectoryWithRetries({ directory: sandbox, attempts: 6, retryDelayMs: 500 });
     if (fs.existsSync(sandbox)) throw new Error('the tree was not removed after the lock was released');
-    notes.push(`locked-then-released${failureMessage ? ` (locked attempt failed with: ${failureMessage.slice(0, 90)}…)` : ' (N.B. the lock did not block deletion on this system)'}`);
+    notes.push(`locked-then-released (locked attempt failed with: ${failureMessage.slice(0, 90)}…)`);
   }
 
   return notes.join(', ');
