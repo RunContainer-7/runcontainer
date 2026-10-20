@@ -47,6 +47,12 @@ jobs:
       - name: Package app
         run: npm run package
 
+      # Package and installer both succeed even when the app cannot resolve a
+      # release repository; that combination ships an app that never notices an
+      # update. Fail the release instead.
+      - name: Verify packaged update repository
+        run: node scripts/verify-packaged-update-repo.js
+
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |

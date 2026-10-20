@@ -78,3 +78,49 @@ describe('update check helpers', () => {
     delete process.env.RUNCONTAINER_UPDATE_API;
   });
 });
+
+describe('checkForUpdates network behaviour', () => {
+  const { checkForUpdates, resolveUpdateRepo } = require('../../public/update-check');
+  const net = require('net');
+
+  afterEach(() => {
+    delete process.env.RUNCONTAINER_UPDATE_API;
+    delete process.env.RUNCONTAINER_UPDATE_REPO;
+  });
+
+  it('resolves the built-in repository without any environment variable', () => {
+    delete process.env.RUNCONTAINER_UPDATE_REPO;
+    expect(resolveUpdateRepo()).toBe('RunContainer-7/runcontainer');
+    process.env.RUNCONTAINER_UPDATE_REPO = 'fork/RunContainer';
+    expect(resolveUpdateRepo()).toBe('fork/RunContainer');
+  });
+
+  it('survives a refused connection instead of throwing (offline)', async () => {
+    // Bind a port, then close it: the port is known-closed, so the connection is
+    // refused immediately rather than hanging on a filtered port.
+    const port = await new Promise((resolve) => {
+      const server = net.createServer();
+      server.listen(0, '127.0.0.1', () => {
+        const { port: assigned } = server.address();
+        server.close(() => resolve(assigned));
+      });
+    });
+    process.env.RUNCONTAINER_UPDATE_API = `http://127.0.0.1:${port}`;
+    const result = await checkForUpdates({ currentVersion: '0.6.0' });
+    expect(result.status).toBe('unavailable');
+    expect(typeof result.reason).toBe('string');
+    expect(result.reason.length).toBeGreaterThan(0);
+  });
+
+  it('reports unavailable for an unconfigured repository without any request', async () => {
+    const result = await checkForUpdates({ currentVersion: '0.6.0', repo: 'not-a-slug' });
+    expect(result.status).toBe('unavailable');
+    expect(result.reason).toContain('not configured');
+  });
+
+  it('reports unavailable for an unreadable installed version', async () => {
+    const result = await checkForUpdates({ currentVersion: 'unknown-build' });
+    expect(result.status).toBe('unavailable');
+    expect(result.reason).toContain('unreadable');
+  });
+});
