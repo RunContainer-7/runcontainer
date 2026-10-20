@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, createQemuProvisionDisk, bootQemuProvision, setGuestExePath } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, provisionGuestCredential, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, browseQemuBase, setQemuBase, createQemuProvisionDisk, bootQemuProvision, setGuestExePath, openExternalUrl } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -15,6 +15,9 @@ function useBootAnimation() {
 }
 // Used only until the main process reports the version from package.json.
 const APP_VERSION_FALLBACK = "0.6.1";
+// The only two project links the app opens, both official and public.
+const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
+const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
 const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
@@ -387,6 +390,17 @@ export default function ContainerManager() {
         setInstallMessage('Could not check for updates right now.');
       })
       .finally(() => setUpdateChecking(false));
+  }
+
+  // Docs and Discord are anchors, so a browser click still works; inside the app the
+  // click is handed to the main process, which opens the default browser.
+  function handleOpenProjectLink(event, url) {
+    if (event) event.preventDefault();
+    Promise.resolve(openExternalUrl(url))
+      .then((result) => {
+        if (result && result.opened === false && result.error) setInstallMessage(result.error);
+      })
+      .catch(() => setInstallMessage('Could not open that link in your browser.'));
   }
 
   function handleOpenUpdateLink(which) {
@@ -958,7 +972,18 @@ export default function ContainerManager() {
             </div>
             <div className="profile-card">
               <strong>Beta notice</strong>
-              <span>RunContainer is still in beta, so bugs may appear. If you hit one, join the Discord server: https://discord.gg/rvMjMZJykE</span>
+              <span>
+                RunContainer is still in beta, so bugs may appear. If you hit one, ask in the
+                {" "}
+                <a
+                  className="info-link"
+                  href={DISCORD_URL}
+                  onClick={(event) => handleOpenProjectLink(event, DISCORD_URL)}
+                >
+                  RunContainer Discord server
+                </a>
+                .
+              </span>
             </div>
           </div>
           <div className="panel-section">
@@ -972,6 +997,43 @@ export default function ContainerManager() {
               <div className="profile-card">
                 <strong>Open source</strong>
                 <span>The code is public and transparent, so you can inspect how it works, suggest changes, or build on it yourself.</span>
+              </div>
+            </div>
+          </div>
+          <div className="panel-section">
+            <h3>Support &amp; documentation</h3>
+            <p>The documentation is the official reference for setup, guides, troubleshooting and release notes.</p>
+            <div className="profile-list">
+              <div className="profile-card active">
+                <strong>Documentation</strong>
+                <span>Installation, first launch, everyday guides, safety notes and known limitations.</span>
+                <div className="detail-actions">
+                  <a
+                    className="settings-button info-link-button"
+                    href={DOCS_URL}
+                    onClick={(event) => handleOpenProjectLink(event, DOCS_URL)}
+                  >
+                    Open documentation
+                  </a>
+                </div>
+              </div>
+              <div className="profile-card">
+                <strong>Community</strong>
+                <span>
+                  Join the{" "}
+                  <a
+                    className="info-link"
+                    href={DISCORD_URL}
+                    onClick={(event) => handleOpenProjectLink(event, DISCORD_URL)}
+                  >
+                    RunContainer Discord server
+                  </a>{" "}
+                  for questions, bug reports and release announcements.
+                </span>
+              </div>
+              <div className="profile-card">
+                <strong>Links open in your browser</strong>
+                <span>RunContainer only opens its own documentation, Discord server and GitHub pages. Every other address is refused.</span>
               </div>
             </div>
           </div>

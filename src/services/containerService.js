@@ -211,6 +211,16 @@ export async function openUpdateLink(which) {
   return requireIpc('Opening update links').invoke('open-update-link', which);
 }
 
+// Opens a documented project link (docs site, Discord) in the default browser.
+// Outside Electron the click falls back to a normal browser navigation.
+export async function openExternalUrl(url) {
+  if (!ipcRenderer) {
+    if (typeof window !== 'undefined' && /^https:\/\//.test(url)) window.open(url, '_blank', 'noopener');
+    return { opened: false };
+  }
+  return ipcRenderer.invoke('open-external-url', url);
+}
+
 export async function stopContainer(container) {
   return killContainer(container);
 }

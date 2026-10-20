@@ -254,6 +254,23 @@ body {
     background: rgba(255,255,255,0.08);
 }
 
+/* Project links in the Info tab: anchors that look like controls without losing
+   native link behaviour when the UI runs in a browser. */
+.info-link {
+    color: #93c5fd;
+    text-decoration: underline;
+}
+
+.info-link:hover,
+.info-link:focus-visible {
+    color: #bfdbfe;
+}
+
+.settings-button.info-link-button {
+    display: inline-block;
+    text-decoration: none;
+}
+
 .empty-state {
     padding: 20px;
     text-align: center;

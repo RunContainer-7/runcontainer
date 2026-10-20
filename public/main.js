@@ -2975,6 +2975,23 @@ ipcMain.handle('qemu-set-guest-exe', async (_event, requestedAppRecord) => {
   return { id: appRecord.id, status: updated.status, installedExeGuestPath: guestPath };
 });
 
+// Documented project links only (docs site, Discord, source). The renderer never
+// gets to open an arbitrary URL: anything else is refused with a reason.
+const EXTERNAL_LINK_HOSTS = ['runcontainer-7.github.io', 'discord.gg', 'discord.com', 'github.com'];
+ipcMain.handle('open-external-url', async (_event, url) => {
+  let parsed = null;
+  try {
+    parsed = new URL(String(url || ''));
+  } catch (error) {
+    return { opened: false, error: 'That link is not a valid address.' };
+  }
+  if (parsed.protocol !== 'https:' || !EXTERNAL_LINK_HOSTS.includes(parsed.hostname)) {
+    return { opened: false, error: `RunContainer only opens documented project links, not ${parsed.hostname || 'that address'}.` };
+  }
+  await shell.openExternal(parsed.toString());
+  return { opened: true };
+});
+
 ipcMain.handle('open-update-link', async (_event, which) => {
   const result = lastUpdateCheck?.result;
   const url = which === 'installer' ? result?.installerUrl : result?.releaseUrl;
