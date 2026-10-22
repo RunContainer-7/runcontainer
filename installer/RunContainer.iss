@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.6.8"
+#define MyAppVersion "0.6.9"
 #endif
 #ifndef MyAppRoot
 #define MyAppRoot "C:\RunContainer\runcontainer"
@@ -66,12 +66,36 @@ begin
   Result := ResultCode = 1;
 end;
 
+// Killing the process tree is not instant: Electron's main process can take a
+// few seconds to exit, and a single check right after taskkill used to report a
+// failure while the app was already closing. Wait for it instead of guessing.
 function CloseRunContainer(): Boolean;
 var
   ResultCode: Integer;
+  PowerShell: String;
+  Script: String;
 begin
+  PowerShell := ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(PowerShell) then
+    PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  Script := '$ErrorActionPreference=''SilentlyContinue'';'
+    + ' & taskkill.exe /IM RunContainer.exe /T /F | Out-Null;'
+    + ' $deadline=(Get-Date).AddSeconds(10);'
+    + ' while ((Get-Process -Name ''RunContainer'') -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 250 };'
+    + ' if (Get-Process -Name ''RunContainer'') { exit 1 } else { exit 0 }';
+  if FileExists(PowerShell) then
+  begin
+    if not Exec(PowerShell, '-NoProfile -NonInteractive -Command "' + Script + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      Result := False;
+      Exit;
+    end;
+    Result := ResultCode = 0;
+    Exit;
+  end;
+  // No PowerShell: fall back to taskkill and give the process tree time to go.
   Exec(ExpandConstant('{sysnative}\taskkill.exe'), '/IM RunContainer.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(1500);
+  Sleep(5000);
   Result := not RunContainerRunning();
 end;
 

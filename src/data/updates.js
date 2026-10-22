@@ -4,6 +4,15 @@
 
 export const UPDATES = [
   {
+    version: '0.6.9',
+    date: '2026-10-22',
+    title: 'Upgrades wait for RunContainer to finish closing',
+    changes: [
+      'Fixed “Setup could not close RunContainer” during an upgrade. Setup now waits up to ten seconds for the old process tree to exit and only reports a problem if the app is still running; before, it checked once after 1.5 seconds and could fail while RunContainer was already closing.',
+      'The same wait applies to silent installs and to a crashed copy that is showing an error window, so upgrades no longer stop halfway through.',
+    ],
+  },
+  {
     version: '0.6.8',
     date: '2026-10-22',
     title: 'Policies live in the documentation, not in the launcher',
