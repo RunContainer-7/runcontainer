@@ -166,7 +166,9 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.6.6");
+    // The fallback must track package.json; a stale constant here shows an
+    // older version during the first moment of startup.
+    expect(container.textContent).toContain(`RunContainer v${require("../../package.json").version}`);
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -183,11 +185,13 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("restores every tab including AI, Policies, Tweaks, Profiles and Updates", () => {
+  it("restores every app tab, including AI, Tweaks, Profiles and Updates", () => {
     const container = render();
-    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Policies", "Info", "Updates"]) {
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"]) {
       expect(container.textContent).toContain(tab);
     }
+    // Policies live on the documentation site, not inside the launcher.
+    expect(container.textContent).not.toContain("Policies");
     openTab(container, "Tweaks");
     expect(container.textContent).toContain("Launch arguments");
     expect(container.textContent).toContain("Save tweaks");
@@ -514,19 +518,4 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("has a Policies panel covering terms, privacy, source and responsible use", async () => {
-    const container = render();
-    openTab(container, "Policies");
-    await act(async () => { await Promise.resolve(); });
-    const text = container.textContent;
-    expect(text).toContain("Terms of service");
-    expect(text).toContain("Privacy policy");
-    expect(text).toContain("Source code and self-hosting");
-    expect(text).toContain("pirated software");
-    expect(text).toContain("Discord");
-    expect(text).toContain("free");
-    act(() => {
-      ReactDOM.unmountComponentAtNode(container);
-    });
-  });
 });

@@ -292,8 +292,8 @@ body {
     gap: 6px;
 }
 
-/* One row for every tab, including Policies: the nav overlays the panel, so a
-   wrapped second row would cover content. */
+/* One row for every tab: the nav overlays the panel, so a wrapped second row
+   would cover content. */
 .bottom-nav .nav-button {
     flex: 1 1 0;
 }
@@ -952,54 +952,6 @@ details.advanced-settings[open] > summary::before {
 
 .more-menu-panel button.danger {
     color: #fca5a5;
-}
-
-/* Policies panel: native <details> keeps it accessible and needs no state. */
-.policies-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.policy-card {
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 12px;
-    background: rgba(15, 23, 42, 0.55);
-    padding: 12px 14px;
-}
-
-.policy-card summary {
-    cursor: pointer;
-    font-weight: 600;
-    color: #e2e8f0;
-    list-style: none;
-}
-
-.policy-card summary::-webkit-details-marker {
-    display: none;
-}
-
-.policy-card summary::before {
-    content: "▸";
-    display: inline-block;
-    width: 16px;
-    color: #94a3b8;
-    transition: transform 0.15s ease;
-}
-
-.policy-card[open] summary::before {
-    transform: rotate(90deg);
-}
-
-.policy-card p {
-    margin: 10px 0 0;
-    font-size: 13px;
-    line-height: 1.55;
-    color: #cbd5e1;
-}
-
-.policy-card a {
-    color: #93c5fd;
 }
 
 .ai-history-row .pill,

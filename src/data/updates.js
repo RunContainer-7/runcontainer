@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.6.8',
+    date: '2026-10-22',
+    title: 'Policies live in the documentation, not in the launcher',
+    changes: [
+      'The Policies tab is gone. Terms, privacy, source code and community rules belong with the documentation, where they can be corrected without shipping a new build. Read them at runcontainer-7.github.io/9-runcontainer/policies; the Info tab still opens the documentation site.',
+      'The launcher keeps one fewer panel to scroll through, and the bottom tab bar reflects it.',
+      'The version shown during the first moment of startup now comes from this build instead of a hard-coded older number.',
+    ],
+  },
+  {
     version: '0.6.7',
     date: '2026-10-22',
     title: 'Updates install cleanly, and the AI tab proves it is watching',

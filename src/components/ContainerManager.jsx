@@ -14,11 +14,11 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.6";
+const APP_VERSION_FALLBACK = "0.6.8";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
-const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Policies", "Info", "Updates"];
+const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
@@ -26,7 +26,6 @@ const tabIcons = {
   Settings: "⚙",
   Profiles: "◧",
   AI: "◈",
-  Policies: "§",
   Info: "◌",
   Updates: "↓",
 };
@@ -1177,48 +1176,6 @@ export default function ContainerManager() {
             </div>
           )}
           <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
-        </div>
-      )}
-
-      {activeTab === "Policies" && (
-        <div className="placeholder-panel policies-panel">
-          <h3>Policies</h3>
-          <p className="muted">Short, plain-language rules for using RunContainer and its community spaces. They are not legal advice.</p>
-
-          <details className="policy-card" open>
-            <summary>Terms of service</summary>
-            <p>RunContainer is free software provided as-is, without warranty. You may use it for personal or commercial work. You are responsible for the apps you run in it and for having the right to use them.</p>
-            <p>Do not use RunContainer to break the law, to harm other people or their systems, or to bypass licences or protections you do not own. Updates may change these terms; the current version is always shown on this panel.</p>
-          </details>
-
-          <details className="policy-card">
-            <summary>Privacy policy</summary>
-            <p>RC-Brain runs on your PC. Monitoring, diagnoses, verification and the experience history stay in RunContainer’s app-data folder. Log snippets stored for diagnostics are redacted: file paths, user names, machine names, e-mail addresses and IP addresses are replaced before they are saved.</p>
-            <p>RunContainer contacts GitHub only to check for a newer release, and only reads the public release feed. No telemetry is sent unless a build has been given an explicit registry endpoint; the official build has none. You can inspect or delete the app-data folder at any time.</p>
-          </details>
-
-          <details className="policy-card">
-            <summary>Source code and self-hosting</summary>
-            <p>The source is public at <a href="https://github.com/RunContainer-7/runcontainer" onClick={(event) => { event.preventDefault(); openExternalUrl('https://github.com/RunContainer-7/runcontainer'); }}>github.com/RunContainer-7/runcontainer</a>. You may read it, clone it, build it yourself and check that the installer matches it. If you do not trust the prebuilt installer, build from source or compare its SHA-256 with the value on the downloads page.</p>
-            <p>Forks are welcome. If you publish a modified build, make clear that it is not the official release.</p>
-          </details>
-
-          <details className="policy-card">
-            <summary>Responsible use of apps</summary>
-            <p>RunContainer runs programs; it does not give you a licence to them. Do not use it to run pirated software, cracked installers, or anything you would not be allowed to install on your own PC. Respect each app’s licence and its vendor’s terms.</p>
-            <p>Isolation is a safety boundary, not a permission to do harm. Never point RunContainer at malware or use it to attack systems you do not own.</p>
-          </details>
-
-          <details className="policy-card">
-            <summary>Community and feedback</summary>
-            <p>In the <a href="https://discord.gg/rvMjMZJykE" onClick={(event) => { event.preventDefault(); openExternalUrl('https://discord.gg/rvMjMZJykE'); }}>Discord server</a>, treat the maintainers and other members with respect. Abuse, harassment, threats and personal attacks are not welcome.</p>
-            <p>Feedback should be constructive: describe what happened, what you expected and what you tried. RunContainer is free and maintained in spare time, so please be patient and appreciative rather than demanding. Reports are read; not every request can be built.</p>
-          </details>
-
-          <details className="policy-card">
-            <summary>Cost</summary>
-            <p>RunContainer is free to download and use. There is no paid tier and no account. If it saves you time, saying thanks (or helping someone else in Discord) is appreciated more than any payment.</p>
-          </details>
         </div>
       )}
 
