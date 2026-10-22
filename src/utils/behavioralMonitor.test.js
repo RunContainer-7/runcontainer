@@ -101,6 +101,36 @@ describe('behavioural supervisor (AI-led)', () => {
     expect(decisions[0].autoExecute).toBe(true);
   });
 
+  it('keeps observing on its own timer for as long as the app is open', async () => {
+    jest.useFakeTimers();
+    try {
+      let probes = 0;
+      const supervisor = monitor.createBehavioralSupervisor({
+        brain: fakeBrain(() => decision({ diagnosis: { id: 'healthy', summary: 'Normal', confidence: 0.99, confidenceText: '99%' }, action: { id: 'none', label: 'No action', requiresApproval: false, autonomous: true }, decision: 'monitor' })),
+        listApps: async () => [{ id: 'app-1', status: 'Running' }],
+        probe: async () => { probes += 1; return sample(); },
+        intervalMs: 5000,
+      });
+      supervisor.start();
+      expect(probes).toBe(0);
+      expect(supervisor.status().running).toBe(true);
+      for (let tick = 1; tick <= 3; tick += 1) {
+        jest.advanceTimersByTime(5000);
+        for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
+        expect(probes).toBe(tick);
+      }
+      expect(supervisor.status().ticks).toBe(3);
+      expect(supervisor.status().lastTickAt).toBeGreaterThan(0);
+      supervisor.stop();
+      jest.advanceTimersByTime(20000);
+      for (let flush = 0; flush < 10; flush += 1) await Promise.resolve();
+      expect(probes).toBe(3);
+      expect(supervisor.status().running).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('does nothing while the model says the app is normal', async () => {
     const decisions = [];
     const supervisor = monitor.createBehavioralSupervisor({

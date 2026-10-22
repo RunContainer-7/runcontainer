@@ -435,6 +435,11 @@ describe("ContainerManager", () => {
       available: true,
       enabled: true,
       monitoring: true,
+      monitor: { running: true, intervalMs: 5000, startedAt: Date.now(), lastTickAt: Date.now(), ticks: 42, watchedApps: 1 },
+      permissions: [
+        { id: "restart_same_profile", label: "Restart the app", risk: "low", autonomous: true, requiresApproval: false },
+        { id: "restart_clean_profile", label: "Restart with a clean profile", risk: "medium", autonomous: false, requiresApproval: true },
+      ],
       knowledgeVersion: "2026-10-22.1",
       limits: ["Small local model, not a language model."],
       model: {
@@ -463,6 +468,9 @@ describe("ContainerManager", () => {
     expect(container.textContent).toContain("8,334 parameters");
     expect(container.textContent).toContain("Familiar cases:");
     expect(container.textContent).toContain("Held-out evaluation");
+    expect(container.textContent).toContain("42 checks done");
+    expect(container.textContent).toContain("May run automatically: Restart the app.");
+    expect(container.textContent).toContain("Needs your approval: Restart with a clean profile.");
     const pause = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent.includes("Pause monitoring"));
     expect(pause).not.toBeUndefined();
     act(() => {

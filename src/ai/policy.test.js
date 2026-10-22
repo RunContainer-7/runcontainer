@@ -12,6 +12,13 @@ describe('RC-Brain safety policy', () => {
     expect(result.reason).toContain('does not show a failure');
   });
 
+  it('never restarts an app the model just called normal', () => {
+    const result = gateDecision({ diagnosisId: 'healthy', action: restart });
+    expect(result.decision).toBe('abstain');
+    expect(result.action.id).toBe(OBSERVE_ACTION.id);
+    expect(result.reason).toContain('nothing is restarted');
+  });
+
   it('gathers evidence instead of repairing an unrecognised failure', () => {
     const result = gateDecision({ diagnosisId: 'unknown_failure', action: restart });
     expect(result.decision).toBe('abstain');

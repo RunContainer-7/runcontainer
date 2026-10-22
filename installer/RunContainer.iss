@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.6.6"
+#define MyAppVersion "0.6.7"
 #endif
 #ifndef MyAppRoot
 #define MyAppRoot "C:\RunContainer\runcontainer"
@@ -44,3 +44,51 @@ Name: "{commondesktop}\RunContainer"; Filename: "{app}\RunContainer.exe"; IconFi
 
 [Run]
 Filename: "{app}\RunContainer.exe"; Description: "Launch RunContainer"; Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[Code]
+// An upgrade must not fail just because RunContainer is still open. A crashed
+// copy can leave an error window that ignores a graceful close, and Setup's
+// Restart Manager then aborts the whole installation with a generic message.
+// Close our own process first: silently when unattended, after asking otherwise.
+function RunContainerRunning(): Boolean;
+var
+  ResultCode: Integer;
+  PowerShell: String;
+begin
+  Result := False;
+  PowerShell := ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(PowerShell) then
+    PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(PowerShell) then
+    Exit;
+  if not Exec(PowerShell, '-NoProfile -NonInteractive -Command "if (Get-Process -Name ''RunContainer'' -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  Result := ResultCode = 1;
+end;
+
+function CloseRunContainer(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sysnative}\taskkill.exe'), '/IM RunContainer.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(1500);
+  Result := not RunContainerRunning();
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not RunContainerRunning() then
+    Exit;
+  if not WizardSilent then
+  begin
+    if MsgBox('RunContainer is still running. Setup must close it before replacing its files.' + #13#10#13#10
+      + 'Close RunContainer now and continue?', mbConfirmation, MB_YESNO) = IDNO then
+    begin
+      Result := 'Close RunContainer (including any error window), then run Setup again.';
+      Exit;
+    end;
+  end;
+  if not CloseRunContainer() then
+    Result := 'Setup could not close RunContainer. End RunContainer.exe in Task Manager, then run Setup again.';
+end;

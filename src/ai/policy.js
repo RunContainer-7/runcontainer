@@ -76,6 +76,17 @@ function gateDecision({
     };
   }
 
+  // Even a low-risk repair is not applied to an app the model just called
+  // normal: interrupting a working app is never a repair. This holds even if
+  // the action head disagrees with the diagnosis head.
+  if (NON_FAILURE.has(diagnosisId) && actionable) {
+    return {
+      action: OBSERVE_ACTION,
+      decision: 'abstain',
+      reason: 'The diagnosis is normal behaviour, so nothing is restarted or changed; monitoring continues.',
+    };
+  }
+
   if (diagnosisId === 'user_data_risk' && actionable) {
     return {
       action: ESCALATE_ACTION,

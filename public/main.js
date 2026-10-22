@@ -1106,6 +1106,10 @@ function aiStatus() {
     model: aiBrain.model,
     registry: aiRegistry(),
     monitoring: Boolean(aiMonitoringEnabled && behavioralSupervisor),
+    // Live proof that the supervisor is ticking, shown in the AI tab.
+    monitor: behavioralSupervisor?.status?.() || {
+      running: false, intervalMs: null, startedAt: null, lastTickAt: null, ticks: 0, watchedApps: 0,
+    },
     enabled: aiMonitoringEnabled,
     knowledgeVersion: aiKnowledge.knowledgeVersion,
     limits: aiKnowledge.limits,

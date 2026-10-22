@@ -4,11 +4,24 @@
 
 export const UPDATES = [
   {
+    version: '0.6.7',
+    date: '2026-10-22',
+    title: 'Updates install cleanly, and the AI tab proves it is watching',
+    changes: [
+      'Installing over a running copy no longer fails. Setup used to abort with “Setup was unable to automatically close all applications” when RunContainer was open — including a crashed copy showing an error window. It now closes RunContainer itself: silently during an unattended install, and after asking you during a normal one.',
+      'Fixed the 0.6.5 startup error for good. That build required a training-only package that packaging removed, so the installed app could stop with “Cannot find module” before opening. 0.6.6 removed that dependency; this release also keeps the installer from failing when an old broken copy is still in memory, which is how 0.6.5 users were getting stuck.',
+      'The AI tab now shows the monitor is alive: how many checks it has completed, when the last check ran, and how many running apps it is watching. The heartbeat refreshes while the tab is open instead of showing a snapshot.',
+      '“What it may do on its own” is now read from the shipped action catalogue, so the automatic and approval-only repairs listed are exactly the ones this build enforces.',
+      'The safety gate no longer applies even a low-risk repair to an app the model just diagnosed as normal: a restart is never a repair for a working app.',
+      'Documentation: the download answer and system requirements now describe the current release instead of saying none exists. Installation explains what to do if you are still on 0.6.5.',
+    ],
+  },
+  {
     version: '0.6.6',
     date: '2026-10-22',
     title: 'RC-Brain 2: better evidence, verified repairs, a real learning loop',
     changes: [
-      'RC-Brain 2 is a bigger model trained from scratch: 8,334 parameters over 65 structured observation features, 19 diagnoses and 11 actions. It now uses temporal evidence (how long a symptom persisted, recurrences, recoveries), exit-code classes, host pressure, misleading-log signals and contradictory evidence, not one error string.',
+      'RC-Brain 2 is a bigger model trained from scratch: 8,334 parameters over 66 structured observation features, 19 diagnoses and 11 actions. It now uses temporal evidence (how long a symptom persisted, recurrences, recoveries), exit-code classes, host pressure, misleading-log signals and contradictory evidence, not one error string.',
       'Repairs are verified independently: after a restart, RC-Brain waits for three consecutive observations and re-checks the original condition. “Verified”, “unresolved” and “inconclusive” are reported honestly; a zero exit code is not treated as success.',
       'A structured experience pipeline records the observation, the prediction, the action and the verified outcome locally, with paths and names redacted. Verified examples can be promoted with consent into a curated dataset; training a candidate and activating it are separate, gated offline steps, and the previous model can be rolled back in the AI tab.',
       'Evaluation is reported by split: 99.6% on familiar holdout variants, 96.8% on whole unseen failure families, 96.5% on an untouched final split, 0 unsafe destructive actions and 0 repairs proposed for normal behaviour. The ambiguous/restraint split is reported separately instead of being averaged into a headline.',

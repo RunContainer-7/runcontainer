@@ -202,6 +202,11 @@ function createBehavioralSupervisor({
   let timer = null;
   let ticking = false;
   let unavailableReported = false;
+  // Observability only: the AI tab reports that monitoring is actually alive
+  // instead of trusting a switch. It never changes a diagnosis.
+  let startedAt = null;
+  let lastTickAt = null;
+  let ticks = 0;
 
   function historyFor(state) {
     return {
@@ -214,6 +219,8 @@ function createBehavioralSupervisor({
   async function tick() {
     if (ticking) return;
     ticking = true;
+    ticks += 1;
+    lastTickAt = now();
     try {
       const apps = (await listApps()).filter((entry) => entry?.status === 'Running');
       const liveIds = new Set(apps.map((entry) => entry.id));
@@ -318,12 +325,23 @@ function createBehavioralSupervisor({
   return {
     start() {
       if (timer) return;
+      startedAt = now();
       timer = setInterval(() => { tick().catch(() => {}); }, intervalMs);
       if (timer.unref) timer.unref();
     },
     stop() {
       if (timer) clearInterval(timer);
       timer = null;
+    },
+    status() {
+      return {
+        running: Boolean(timer),
+        intervalMs,
+        startedAt,
+        lastTickAt,
+        ticks,
+        watchedApps: monitors.size,
+      };
     },
     tick,
     getState(id) {

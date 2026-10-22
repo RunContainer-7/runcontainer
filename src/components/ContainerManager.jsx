@@ -180,6 +180,23 @@ export default function ContainerManager() {
   useEffect(() => onAiStatus((status) => { if (status) setAiStatus(status); }), []);
   useEffect(() => onAiHistory((history) => { if (Array.isArray(history)) setAiHistory(history); }), []);
 
+  // Keep the AI tab's heartbeat current: "last check" must reflect the real
+  // supervisor tick, not the snapshot taken when the tab opened.
+  useEffect(() => {
+    if (activeTab !== 'AI') return undefined;
+    const timer = setInterval(() => {
+      Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); }).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [activeTab]);
+
+  function describeLastCheck(lastTickAt) {
+    if (!lastTickAt) return 'not yet';
+    const seconds = Math.max(0, Math.round((Date.now() - lastTickAt) / 1000));
+    if (seconds < 90) return `${seconds}s ago`;
+    return `${Math.round(seconds / 60)} min ago`;
+  }
+
   function handleAiRepair(approved = false) {
     if (!aiDecision || aiRepairing) return;
     setAiRepairing(true);
@@ -1015,14 +1032,19 @@ export default function ContainerManager() {
           </p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>{aiStatus?.model?.name || 'RC-Brain 1'} · {(aiStatus?.model?.parameters || 0).toLocaleString()} parameters</strong>
+              <strong>
+                {aiStatus?.model?.name || 'RC-Brain'}
+                {aiStatus?.model?.parameters ? ` · ${aiStatus.model.parameters.toLocaleString()} parameters` : ''}
+                {aiStatus?.model?.version ? ` ${aiStatus.model.version}` : ''}
+              </strong>
               <span>
-                Two heads: one chooses the diagnosis, one chooses the action. {aiStatus?.model?.features || 44} structured observations in,
-                {' '}{aiStatus?.model?.hiddenLayers?.diagnosis?.join('×') || '32×16'} hidden units for diagnosis and
-                {' '}{aiStatus?.model?.hiddenLayers?.action?.join('×') || '24×12'} for action.
+                Two heads: one chooses the diagnosis, one chooses the action.
+                {aiStatus?.model?.features
+                  ? ` ${aiStatus.model.features} structured observations in, ${aiStatus.model.hiddenLayers?.diagnosis?.join('×') || '—'} hidden units for diagnosis and ${aiStatus.model.hiddenLayers?.action?.join('×') || '—'} for action.`
+                  : ' Numbers come from the loaded model file, so they are shown once it loads.'}
               </span>
               <span className="muted">
-                Version {aiStatus?.model?.version || '1.0.0'} · knowledge {aiStatus?.knowledgeVersion || 'unknown'} · trained {aiStatus?.model?.createdAt ? new Date(aiStatus.model.createdAt).toLocaleDateString() : 'unknown'}
+                Version {aiStatus?.model?.version || 'not loaded'} · knowledge {aiStatus?.knowledgeVersion || 'unknown'} · trained {aiStatus?.model?.createdAt ? new Date(aiStatus.model.createdAt).toLocaleDateString() : 'unknown'}
               </span>
             </div>
             <div className="profile-card">
@@ -1055,6 +1077,13 @@ export default function ContainerManager() {
             <div className="profile-card">
               <strong>Monitoring</strong>
               <span>Checks running apps every few seconds while RunContainer is open. It is not a Windows service and stops when the app closes.</span>
+              {aiStatus?.monitor && (
+                <span className="muted">
+                  {aiStatus.monitor.running
+                    ? `Running: ${Number(aiStatus.monitor.ticks || 0).toLocaleString()} checks done, last check ${describeLastCheck(aiStatus.monitor.lastTickAt)}, ${aiStatus.monitor.watchedApps || 0} running app(s) watched.`
+                    : 'The monitor is not running.'}
+                </span>
+              )}
               <div className="detail-actions">
                 <button className={`settings-button ${aiStatus?.enabled ? '' : 'ghost'}`} onClick={handleToggleAiMonitoring}>
                   {aiStatus?.enabled ? 'Pause monitoring' : 'Start monitoring'}
@@ -1063,7 +1092,23 @@ export default function ContainerManager() {
             </div>
             <div className="profile-card">
               <strong>What it may do on its own</strong>
-              <span>Restart the app, restart its isolation engine, or repair access to its own folder. Clearing the app’s profile needs approval. It never installs system software, deletes app files, weakens isolation, or follows instructions written in a log.</span>
+              {Array.isArray(aiStatus?.permissions) ? (
+                <>
+                  <span>
+                    May run automatically:{' '}
+                    {aiStatus.permissions.filter((entry) => entry.autonomous && !entry.requiresApproval && entry.risk !== 'none').map((entry) => entry.label).join(', ') || 'none'}.
+                  </span>
+                  <span>
+                    Needs your approval:{' '}
+                    {aiStatus.permissions.filter((entry) => entry.requiresApproval).map((entry) => entry.label).join(', ') || 'none'}.
+                  </span>
+                  <span className="muted">
+                    This list is read from the action catalogue shipped with this build. It never installs system software, deletes app files, weakens isolation, or follows instructions written in a log.
+                  </span>
+                </>
+              ) : (
+                <span>Restart the app, restart its isolation engine, or repair access to its own folder. Clearing the app’s profile needs approval. It never installs system software, deletes app files, weakens isolation, or follows instructions written in a log.</span>
+              )}
             </div>
             <div className="profile-card">
               <strong>Privacy</strong>
