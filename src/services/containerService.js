@@ -236,3 +236,62 @@ export async function listContainers() {
   if (!ipcRenderer) return [];
   return ipcRenderer.invoke('list-apps');
 }
+
+// RC-Brain: the model in the main process makes the diagnosis and chooses the
+// action; the renderer shows the evidence and asks the executor to run it.
+export async function getAiStatus() {
+  if (!ipcRenderer) return null;
+  try {
+    return await ipcRenderer.invoke('ai-status');
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function getAiHistory() {
+  if (!ipcRenderer) return [];
+  try {
+    return await ipcRenderer.invoke('ai-history');
+  } catch (error) {
+    return [];
+  }
+}
+
+export async function setAiMonitoring(enabled) {
+  return requireIpc('Changing monitoring').invoke('ai-set-monitoring', { enabled: Boolean(enabled) });
+}
+
+export async function repairAppEnvironment(appId, decision, approved = false) {
+  return requireIpc('Repairing apps').invoke('repair-app-behaviour', { appId, decision, approved });
+}
+
+function onAiEvent(channel, callback) {
+  if (!ipcRenderer) return () => {};
+  const listener = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
+export function onAiDiagnosis(callback) {
+  return onAiEvent('ai:diagnosis', callback);
+}
+
+export function onAiRepairResult(callback) {
+  return onAiEvent('ai:repair-result', callback);
+}
+
+export function onAiRecovered(callback) {
+  return onAiEvent('ai:recovered', callback);
+}
+
+export function onAiUnavailable(callback) {
+  return onAiEvent('ai:unavailable', callback);
+}
+
+export function onAiStatus(callback) {
+  return onAiEvent('ai:status', callback);
+}
+
+export function onAiHistory(callback) {
+  return onAiEvent('ai:history', callback);
+}

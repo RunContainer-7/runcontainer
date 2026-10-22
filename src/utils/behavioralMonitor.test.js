@@ -1,0 +1,202 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const monitor = require('./behavioralMonitor');
+
+function sample(overrides = {}) {
+  return {
+    now: Date.now(),
+    running: true,
+    engine: 'rcvm',
+    pidCount: 1,
+    windowExpected: true,
+    windowVisible: true,
+    windowAgeMs: 3000,
+    ageMs: 3000,
+    windowHung: false,
+    engineResponsive: true,
+    cpuPercent: 4,
+    ioIdle: false,
+    logLines: [],
+    environment: {},
+    ...overrides,
+  };
+}
+
+function fakeBrain(decisionFactory) {
+  return {
+    available: true,
+    model: { id: 'rc-brain-1' },
+    analyze: (observation, history) => decisionFactory(observation, history),
+  };
+}
+
+function decision(overrides = {}) {
+  return {
+    available: true,
+    diagnosis: { id: 'window_hang', summary: 'The process is alive but has produced no visible window in time.', confidence: 0.97, confidenceText: '97%' },
+    action: { id: 'restart_same_profile', label: 'Restart the app', requiresApproval: false, autonomous: true },
+    decision: 'execute',
+    reason: 'Restart',
+    explanation: 'No window appeared.',
+    evidence: ['no visible window after 12.0s'],
+    uncertain: false,
+    model: { id: 'rc-brain-1' },
+    ...overrides,
+  };
+}
+
+describe('behavioural observation helpers', () => {
+  it('reads only the tail of a log file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-behavior-'));
+    const logPath = path.join(dir, 'app.log');
+    fs.writeFileSync(logPath, Array.from({ length: 100 }, (_value, index) => `line-${index}`).join('\n'), 'utf8');
+    expect(monitor.readLogTail(logPath, { maxLines: 5 })).toEqual(['line-95', 'line-96', 'line-97', 'line-98', 'line-99']);
+    expect(monitor.readLogTail(path.join(dir, 'missing.log'))).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps a bounded in-memory stdout/stderr buffer', () => {
+    const buffer = monitor.createLiveLogBuffer({ maxLines: 3 });
+    buffer.push('first\nsecond');
+    buffer.push('third\nfourth\n');
+    expect(buffer.lines()).toEqual(['second', 'third', 'fourth']);
+    buffer.clear();
+    expect(buffer.lines()).toEqual([]);
+  });
+
+  it('maps only catalogue actions to executable plans', () => {
+    expect(monitor.repairPlanFor('restart_same_profile')).toEqual({ action: 'restart_same_profile', resetProfile: false, restartEngine: false, repairAcl: false, requiresApproval: false });
+    expect(monitor.repairPlanFor('restart_engine').restartEngine).toBe(true);
+    expect(monitor.repairPlanFor('repair_permissions').repairAcl).toBe(true);
+    expect(monitor.repairPlanFor('restart_clean_profile').requiresApproval).toBe(true);
+    expect(monitor.repairPlanFor('reset_requires_approval')).toBeNull();
+    expect(monitor.repairPlanFor('delete_everything')).toBeNull();
+  });
+});
+
+describe('behavioural supervisor (AI-led)', () => {
+  it('passes structured observations to the model and reports its decision once', async () => {
+    const seen = [];
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain((observation) => {
+        seen.push(observation);
+        return decision();
+      }),
+      listApps: async () => [{ id: 'app-1', name: 'Editor', status: 'Running', engine: 'rcvm', sandboxPids: [42] }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+    });
+
+    await supervisor.tick();
+    await supervisor.tick();
+    expect(seen[0].app.status).toBe('Running');
+    expect(seen[0].process.windowVisible).toBe(true);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].diagnosis.id).toBe('window_hang');
+    expect(decisions[0].diagnosis.confidenceText).toBe('97%');
+    expect(decisions[0].action.id).toBe('restart_same_profile');
+    expect(decisions[0].autoExecute).toBe(true);
+  });
+
+  it('does nothing while the model says the app is normal', async () => {
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({ diagnosis: { id: 'healthy', summary: 'Normal', confidence: 0.99, confidenceText: '99%' }, action: { id: 'none', label: 'No action', requiresApproval: false, autonomous: true }, decision: 'monitor' })),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+    });
+    await supervisor.tick();
+    await supervisor.tick();
+    expect(decisions).toEqual([]);
+    expect(supervisor.getState('app-1').state).toBe('HEALTHY');
+  });
+
+  it('clears an active diagnosis after two healthy observations', async () => {
+    let healthy = false;
+    const recovered = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => (healthy
+        ? decision({ diagnosis: { id: 'healthy', summary: 'Normal', confidence: 0.99, confidenceText: '99%' }, action: { id: 'none', label: 'No action', requiresApproval: false, autonomous: true }, decision: 'monitor' })
+        : decision())),
+      listApps: async () => [{ id: 'app-1', name: 'Editor', status: 'Running' }],
+      probe: async () => sample(),
+      onRecovered: (payload) => recovered.push(payload),
+    });
+    await supervisor.tick();
+    healthy = true;
+    await supervisor.tick();
+    expect(recovered).toEqual([]);
+    await supervisor.tick();
+    expect(recovered).toEqual([{ id: 'app-1' }]);
+    expect(supervisor.getState('app-1').state).toBe('HEALTHY');
+  });
+
+  it('reports an unavailable model and makes no decisions', async () => {
+    const unavailable = [];
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: { available: false, error: 'The RC-Brain model file is missing.' },
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+      onUnavailable: (payload) => unavailable.push(payload),
+    });
+    await supervisor.tick();
+    await supervisor.tick();
+    expect(decisions).toEqual([]);
+    expect(unavailable).toEqual([{ error: 'The RC-Brain model file is missing.' }]);
+  });
+
+  it('never marks an approval-only action for automatic execution', async () => {
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({
+        diagnosis: { id: 'corrupt_profile', summary: 'Profile looks corrupt', confidence: 0.95, confidenceText: '95%' },
+        action: { id: 'restart_clean_profile', label: 'Restart with a clean profile', requiresApproval: true, autonomous: false },
+        decision: 'awaiting_approval',
+      })),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+    });
+    await supervisor.tick();
+    expect(decisions[0].autoExecute).toBe(false);
+    expect(decisions[0].action.requiresApproval).toBe(true);
+  });
+
+  it('enforces the repair budget before automatic execution', async () => {
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision()),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+      now: () => 1000,
+    });
+    await supervisor.tick();
+    supervisor.recordRepair('app-1', { diagnosis: 'window_hang', outcome: 'failed' });
+    supervisor.recordRepair('app-1', { diagnosis: 'window_hang', outcome: 'failed' });
+    supervisor.clearActive('app-1');
+    await supervisor.tick();
+    expect(decisions[1].canRepair).toBe(false);
+    expect(decisions[1].autoExecute).toBe(false);
+  });
+
+  it('stops tracking an app once it is no longer running', async () => {
+    let running = true;
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({ decision: 'monitor', diagnosis: { id: 'healthy', summary: 'Normal', confidence: 1, confidenceText: '100%' }, action: { id: 'none', label: 'No action', requiresApproval: false } })),
+      listApps: async () => (running ? [{ id: 'app-1', status: 'Running' }] : []),
+      probe: async () => sample(),
+    });
+    await supervisor.tick();
+    expect(supervisor.getState('app-1')).not.toBeNull();
+    running = false;
+    await supervisor.tick();
+    expect(supervisor.getState('app-1')).toBeNull();
+  });
+});

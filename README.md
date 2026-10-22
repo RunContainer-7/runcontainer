@@ -36,6 +36,26 @@ Either way, if RunContainer can't establish the environment, it refuses to launc
 
 A `locked` profile asks for no network access. That can only be enforced when the app runs in a virtual machine or a restricted container; on a standard environment Windows gives ordinary apps network access, and the app says so instead of pretending otherwise.
 
+## RC-Brain: its own AI model
+
+RunContainer has a small neural model trained from scratch on its own architecture and failure modes. It is not a cloud chatbot, and it is not a rules table with an AI label.
+
+- **RC-Brain 1** has **4,229 parameters** across two heads: one diagnoses, one chooses a repair action from a fixed catalogue.
+- While the app is open it watches running apps every few seconds: window handles, CPU/IO movement, engine liveness and the last 40 log lines.
+- It knows 18 RunContainer-specific states, from a missing Microsoft runtime to a trapped VM engine, and abstains when the evidence is weak instead of guessing.
+- Low-risk repairs (restart the app, restart its engine, repair its own folder permissions) run automatically. Clearing an app's profile needs approval. It never installs system software, deletes app data, weakens isolation or follows instructions found in logs.
+- Held-out evaluation: **98.9% diagnosis accuracy**, **98.9% action accuracy**, **0% false positives** on normal behaviour and **0 unsafe actions** across 348 unseen scenarios. A keyword baseline scores 49.7% and 58.6%.
+- If the model is missing or corrupt, the **AI** tab says so and no diagnosis or repair happens. There is no silent rule-based fallback.
+
+Train and verify it locally:
+
+```bash
+node scripts/train-ai-brain.js   # retrain + held-out evaluation (≈2–3 min)
+npm test -- --watchAll=false     # includes the shipped model's held-out scoring
+```
+
+The model artefact, feature schema, knowledge specification and evaluation report live in `src/ai/` and `reports/ai-evaluation.md`. Details: the documentation's [RC-Brain page](https://runcontainer-7.github.io/9-runcontainer/guide/ai-brain).
+
 ## One honest limit
 
 This is containment, not a sandbox driver. Well-behaved apps keep their files, settings and child processes in their own folder. An app that writes to shared Windows places — the registry, or a system-wide install directory — can still leave traces outside its folder. If it needs a driver, a Windows service, or hardware access, it may not work at all.
@@ -68,8 +88,9 @@ On Windows you can also double-click `run.bat`, which installs dependencies and 
 ```
 runcontainer
 ├── public/     Electron main process and runtime helpers
-├── src/        React interface
-├── scripts/    Build and verification helpers
+├── src/        React interface, RC-Brain model and knowledge specification
+├── scripts/    Build, training and verification helpers
+├── reports/    Held-out AI evaluation
 ├── installer/  Installer build files
 └── package.json
 ```
@@ -79,7 +100,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.6.4 && git push origin v0.6.4
+git tag v0.6.5 && git push origin v0.6.5
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

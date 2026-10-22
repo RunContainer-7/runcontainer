@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, openExternalUrl } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -14,20 +14,24 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.4";
+const APP_VERSION_FALLBACK = "0.6.5";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
-const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"];
+const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
   Tweaks: "✧",
   Settings: "⚙",
   Profiles: "◧",
+  AI: "◈",
   Info: "◌",
   Updates: "↓",
 };
+// Only these actions have an executor in the main process. Advice and escalation
+// are shown with the diagnosis and never disguised as a repair button.
+const EXECUTABLE_AI_ACTIONS = ["restart_same_profile", "restart_engine", "repair_permissions", "restart_clean_profile"];
 
 export default function ContainerManager() {
   const { containers, addContainer, removeContainer, updateContainerStatus, refreshContainers } = useContainers();
@@ -55,6 +59,12 @@ export default function ContainerManager() {
   const [tweakArgs, setTweakArgs] = useState("");
   const [tweakMemory, setTweakMemory] = useState("4096");
   const [tweakCpu, setTweakCpu] = useState("2");
+  const [aiStatus, setAiStatus] = useState(null);
+  const [aiDecision, setAiDecision] = useState(null);
+  const [aiRepairing, setAiRepairing] = useState(false);
+  const [aiOutcome, setAiOutcome] = useState("idle");
+  const [aiMessage, setAiMessage] = useState("");
+  const [aiHistory, setAiHistory] = useState([]);
   const booting = useBootAnimation();
 
   useEffect(() => {
@@ -113,6 +123,74 @@ export default function ContainerManager() {
     if (record.status) updateContainerStatus(record.id, record.status);
     setActiveSession((current) => current?.id === record.id ? { ...current, ...record } : current);
   }), [updateContainerStatus]);
+
+  useEffect(() => {
+    Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); }).catch(() => {});
+    Promise.resolve(getAiHistory()).then((history) => { if (Array.isArray(history)) setAiHistory(history); }).catch(() => {});
+  }, []);
+
+  // RC-Brain pushes each new diagnosis. The banner stays until the app recovers,
+  // the user dismisses it, or the repair reports its result.
+  useEffect(() => onAiDiagnosis((decision) => {
+    if (!decision?.id) return;
+    setAiDecision(decision);
+    setAiOutcome(decision.outcome === 'repairing' ? 'repairing' : 'idle');
+    setAiMessage(decision.outcome === 'repairing' ? 'RC-Brain is running its chosen repair…' : '');
+  }), []);
+
+  useEffect(() => onAiRepairResult(({ id, result, diagnosis }) => {
+    setAiDecision((current) => (current?.id === id ? current : current));
+    setAiOutcome(result?.status === 'repaired' ? 'repaired' : 'failed');
+    setAiMessage(result?.status === 'repaired'
+      ? (result.clearedProfile?.length > 0 ? 'Repaired. The app restarted with a clean profile.' : 'Repaired. The app is running again.')
+      : (result?.error || result?.note || `Repair for ${diagnosis?.summary || 'the diagnosis'} did not complete.`));
+    if (result?.status === 'repaired') refreshContainers();
+  }), [refreshContainers]);
+
+  useEffect(() => onAiRecovered(({ id }) => {
+    setAiDecision((current) => (current?.id === id ? null : current));
+    setAiOutcome("idle");
+    setAiMessage("");
+  }), []);
+
+  useEffect(() => onAiUnavailable(({ error }) => {
+    setAiStatus((current) => ({ ...(current || {}), available: false, error }));
+  }), []);
+
+  useEffect(() => onAiStatus((status) => { if (status) setAiStatus(status); }), []);
+  useEffect(() => onAiHistory((history) => { if (Array.isArray(history)) setAiHistory(history); }), []);
+
+  function handleAiRepair(approved = false) {
+    if (!aiDecision || aiRepairing) return;
+    setAiRepairing(true);
+    setAiOutcome("repairing");
+    setAiMessage(approved ? 'Approved. Running the repair RC-Brain chose…' : 'Stopping the app and running the repair RC-Brain chose…');
+    Promise.resolve(repairAppEnvironment(aiDecision.id, aiDecision, approved))
+      .then((result) => {
+        if (result?.status === 'repaired') {
+          setAiOutcome("repaired");
+          setAiMessage(result.clearedProfile?.length > 0
+            ? "Repaired. The app restarted with a clean profile."
+            : "Repaired. The app is running again.");
+          refreshContainers();
+          return;
+        }
+        setAiOutcome(result?.status === 'awaiting_approval' ? 'awaiting_approval' : 'failed');
+        setAiMessage(result?.error || result?.note || "The repair did not complete.");
+      })
+      .catch((error) => {
+        setAiOutcome("failed");
+        setAiMessage(error?.message || "The repair failed before it could start.");
+      })
+      .finally(() => setAiRepairing(false));
+  }
+
+  function handleToggleAiMonitoring() {
+    const next = !(aiStatus?.enabled);
+    Promise.resolve(setAiMonitoring(next))
+      .then((status) => { if (status) setAiStatus(status); })
+      .catch((error) => setAiMessage(error?.message || "Monitoring could not be changed."));
+  }
 
   function handleInstallExe() {
     const pickFile = (file) => {
@@ -581,6 +659,58 @@ export default function ContainerManager() {
         </div>
       )}
 
+      {aiDecision && (
+        <div className={`behavioral-banner ai-banner${aiOutcome === 'repaired' ? ' repaired' : ''}`} role="alert">
+          <div className="behavioral-copy">
+            <strong>
+              {aiOutcome === 'repaired'
+                ? '◈ RC-Brain · repair verified'
+                : `◈ RC-Brain · ${aiDecision.diagnosis?.summary || 'Diagnosis'}`}
+            </strong>
+            {aiOutcome === 'repaired' ? (
+              <span className="behavioral-repair-status">{aiMessage}</span>
+            ) : (
+              <>
+                <span className="muted">
+                  {aiDecision.name || 'App'}
+                  {aiDecision.diagnosis?.confidenceText ? ` · ${aiDecision.diagnosis.confidenceText} confidence` : ''}
+                  {aiDecision.action?.label ? ` · chosen action: ${aiDecision.action.label}` : ''}
+                </span>
+                <span>{aiDecision.explanation}</span>
+                {Array.isArray(aiDecision.evidence) && aiDecision.evidence.length > 0 && (
+                  <ul className="ai-evidence">
+                    {aiDecision.evidence.slice(0, 4).map((fact, index) => <li key={`${fact}-${index}`}>{fact}</li>)}
+                  </ul>
+                )}
+                {aiMessage && <span className="behavioral-repair-status">{aiMessage}</span>}
+                {aiDecision.canRepair === false && (
+                  <span className="muted">Automatic repair has already run twice in the last ten minutes, so RC-Brain will not act again until it is asked.</span>
+                )}
+                <span className="muted behavioral-disclaimer">RC-Brain may restart the app, repair its own folder or restart its engine. It cannot delete app data, change Windows settings or weaken isolation without your approval.</span>
+              </>
+            )}
+          </div>
+          <div className="detail-actions">
+            {aiOutcome !== 'repaired' && EXECUTABLE_AI_ACTIONS.includes(aiDecision.action?.id) && (
+              aiDecision.action?.requiresApproval
+                ? (
+                  <button className="settings-button" disabled={aiRepairing} onClick={() => handleAiRepair(true)}>Approve &amp; run repair</button>
+                )
+                : (
+                  <button
+                    className="settings-button"
+                    disabled={aiRepairing || aiDecision.canRepair === false}
+                    onClick={() => handleAiRepair(false)}
+                  >
+                    {aiRepairing ? 'Repairing…' : '⚡ Automated Environment Repair'}
+                  </button>
+                )
+            )}
+            <button className="icon-button" aria-label="Dismiss diagnosis" onClick={() => setAiDecision(null)}>×</button>
+          </div>
+        </div>
+      )}
+
       {showInstallWizard && (
         <div className="modal-backdrop" onClick={() => setShowInstallWizard(false)}>
           <div className="detail-panel wizard-panel" onClick={(event) => event.stopPropagation()}>
@@ -815,6 +945,83 @@ export default function ContainerManager() {
               <span>Launch, stop and exit events are written to each app’s log, which you can open with the Logs button.</span>
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === "AI" && (
+        <div className="placeholder-panel ai-panel">
+          <div className="panel-title-row">
+            <div>
+              <h3>RC-Brain</h3>
+              <span className="muted">RunContainer’s own on-device model</span>
+            </div>
+            <div className="pill">{aiStatus?.available ? 'Loaded' : 'Unavailable'}</div>
+          </div>
+          <p>
+            RC-Brain watches running apps while RunContainer is open, compares what it sees with how RunContainer is supposed to behave,
+            and diagnoses what is wrong. It is a small neural network trained from scratch on RunContainer’s own scenarios — not a cloud
+            chatbot, and not a set of if-statements wearing an AI label.
+          </p>
+          <div className="profile-list">
+            <div className="profile-card active">
+              <strong>{aiStatus?.model?.name || 'RC-Brain 1'} · {(aiStatus?.model?.parameters || 0).toLocaleString()} parameters</strong>
+              <span>
+                Two heads: one chooses the diagnosis, one chooses the action. {aiStatus?.model?.features || 44} structured observations in,
+                {' '}{aiStatus?.model?.hiddenLayers?.diagnosis?.join('×') || '32×16'} hidden units for diagnosis and
+                {' '}{aiStatus?.model?.hiddenLayers?.action?.join('×') || '24×12'} for action.
+              </span>
+              <span className="muted">
+                Version {aiStatus?.model?.version || '1.0.0'} · knowledge {aiStatus?.knowledgeVersion || 'unknown'} · trained {aiStatus?.model?.createdAt ? new Date(aiStatus.model.createdAt).toLocaleDateString() : 'unknown'}
+              </span>
+            </div>
+            <div className="profile-card">
+              <strong>Held-out evaluation</strong>
+              <span>
+                {aiStatus?.model?.evaluation
+                  ? `${(aiStatus.model.evaluation.diagnosisAccuracy * 100).toFixed(1)}% diagnosis accuracy, ${(aiStatus.model.evaluation.actionAccuracy * 100).toFixed(1)}% action selection, ${(aiStatus.model.evaluation.falsePositiveRate * 100).toFixed(1)}% false positives and ${aiStatus.model.evaluation.unsafeActions} unsafe actions across ${aiStatus.model.evaluation.samples} unseen scenarios.`
+                  : 'The evaluation results ship inside the model artefact and appear here once it is loaded.'}
+              </span>
+            </div>
+            <div className="profile-card">
+              <strong>Monitoring</strong>
+              <span>Checks running apps every few seconds while RunContainer is open. It is not a Windows service and stops when the app closes.</span>
+              <div className="detail-actions">
+                <button className={`settings-button ${aiStatus?.enabled ? '' : 'ghost'}`} onClick={handleToggleAiMonitoring}>
+                  {aiStatus?.enabled ? 'Pause monitoring' : 'Start monitoring'}
+                </button>
+              </div>
+            </div>
+            <div className="profile-card">
+              <strong>What it may do on its own</strong>
+              <span>Restart the app, restart its isolation engine, or repair access to its own folder. Clearing the app’s profile needs approval. It never installs system software, deletes app files, weakens isolation, or follows instructions written in a log.</span>
+            </div>
+            <div className="profile-card">
+              <strong>Privacy</strong>
+              <span>Inference happens on this PC. Nothing is uploaded unless this build has been given an explicit, configured registry endpoint, and then only an anonymised diagnosis with no paths, names or log text beyond the scrubbed snippet.</span>
+            </div>
+          </div>
+
+          {!aiStatus?.available && (
+            <p className="status-line">RC-Brain is not loaded{aiStatus?.error ? `: ${aiStatus.error}` : '.'} Monitoring will not diagnose or repair anything until it is available.</p>
+          )}
+
+          <h4>Recent diagnoses</h4>
+          {aiHistory.length === 0 ? (
+            <p className="muted">No diagnoses yet. RC-Brain only records a decision when something departs from normal behaviour.</p>
+          ) : (
+            <div className="ai-history">
+              {aiHistory.slice(0, 8).map((entry, index) => (
+                <div className="ai-history-row" key={`${entry.detectedAt || 'decision'}-${index}`}>
+                  <div>
+                    <strong>{entry.diagnosis?.summary || entry.diagnosis?.id || 'Diagnosis'}</strong>
+                    <span className="muted"> {entry.name || 'App'} · {entry.diagnosis?.confidenceText || ''} · {entry.action?.label || ''} · {entry.outcome}</span>
+                  </div>
+                  <div className="muted">{entry.explanation}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
         </div>
       )}
 

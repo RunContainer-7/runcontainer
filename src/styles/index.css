@@ -365,6 +365,122 @@ body {
     margin-top: 0;
 }
 
+/* The behavioural monitor's intervention banner. It slides in because it appears
+   while an app is already running, and it must not be mistaken for the update
+   notice: amber border, diagnosis first, one repair action. */
+.behavioral-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border-radius: 12px;
+    border: 1px solid #f59e0b;
+    background: rgba(245, 158, 11, 0.14);
+    color: #fef3c7;
+    font-size: 13px;
+    flex-shrink: 0;
+    animation: behavioral-slide-in 180ms ease-out;
+}
+
+.behavioral-banner .behavioral-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: 72ch;
+}
+
+.behavioral-banner .behavioral-snippet {
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.28);
+    color: #fde68a;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.behavioral-banner .behavioral-repair-status {
+    color: #fef3c7;
+    font-weight: 600;
+}
+
+.behavioral-banner.repaired {
+    border-color: #34d399;
+    background: rgba(52, 211, 153, 0.14);
+    color: #d1fae5;
+}
+
+/* RC-Brain's diagnosis banner: violet, because it is the model speaking, and
+   visibly separate from the blue update notice and the amber anomaly styling. */
+.ai-banner {
+    border-color: #8b5cf6;
+    background: rgba(139, 92, 246, 0.14);
+    color: #ede9fe;
+}
+
+.ai-evidence {
+    margin: 2px 0 0;
+    padding-left: 18px;
+    color: #ddd6fe;
+    font-size: 12px;
+}
+
+.ai-evidence li {
+    margin: 1px 0;
+}
+
+.ai-panel .profile-card span + span {
+    margin-top: 4px;
+}
+
+.ai-history {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.ai-history-row {
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: rgba(15, 23, 42, 0.35);
+    font-size: 13px;
+}
+
+.ai-history-row .muted {
+    display: block;
+    margin-top: 2px;
+}
+
+.behavioral-banner .behavioral-disclaimer {
+    font-size: 12px;
+}
+
+.behavioral-banner .detail-actions {
+    margin-top: 0;
+    align-items: center;
+}
+
+@keyframes behavioral-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .behavioral-banner {
+        animation: none;
+    }
+}
+
 .update-available {
     margin-top: 10px;
 }

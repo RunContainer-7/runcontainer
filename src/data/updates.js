@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.6.5',
+    date: '2026-10-22',
+    title: 'RC-Brain: RunContainer\'s own AI model',
+    changes: [
+      'RC-Brain 1 is a small neural network (4,229 parameters, two heads for diagnosis and action) trained from scratch on RunContainer\'s own scenarios. It runs locally and makes the diagnosis; a rules table no longer decides what is wrong.',
+      'While RunContainer is open it watches running apps: visible windows, CPU and file activity, engine liveness and the live log tail. It abstains when the evidence is weak instead of inventing a cause.',
+      'A new AI tab shows the model, its held-out results, a monitoring switch, what it may repair on its own, and recent diagnoses. A diagnosis banner shows the evidence, confidence and chosen action.',
+      'Low-risk repairs (restart the app, restart its engine, repair its own folder permissions) run automatically. Clearing an app profile needs approval. It never installs system software, deletes app data, weakens isolation or follows instructions found in logs.',
+      'Held-out evaluation: 98.9% diagnosis accuracy, 98.9% action accuracy, 0% false positives on normal behaviour and 0 unsafe actions across 348 unseen scenarios (keyword baseline: 49.7% / 58.6%).',
+      'If the model is missing or corrupt, the app says so and monitoring will not diagnose or repair. There is no silent rule-based fallback.',
+    ],
+  },
+  {
     version: '0.6.4',
     date: '2026-10-20',
     title: 'A launcher, not a virtual machine console',

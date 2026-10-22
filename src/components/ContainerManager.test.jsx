@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
-import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers } from "../services/containerService";
+import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -40,6 +40,31 @@ jest.mock("../services/containerService", () => ({
   setGuestExePath: jest.fn(),
   listContainers: jest.fn(async () => []),
   onContainerStatus: jest.fn(() => () => {}),
+  getAiStatus: jest.fn(async () => ({
+    available: true,
+    enabled: true,
+    monitoring: true,
+    knowledgeVersion: "2026-10-22.1",
+    limits: ["Small local model, not a language model."],
+    model: {
+      name: "RC-Brain 1",
+      version: "1.0.0",
+      parameters: 4229,
+      features: 44,
+      hiddenLayers: { diagnosis: [32, 16], action: [24, 12] },
+      createdAt: "2026-10-22T00:00:00.000Z",
+      evaluation: { diagnosisAccuracy: 0.989, actionAccuracy: 0.989, falsePositiveRate: 0, unsafeActions: 0, samples: 348 },
+    },
+  })),
+  getAiHistory: jest.fn(async () => []),
+  setAiMonitoring: jest.fn(async () => ({ enabled: false, monitoring: false, available: true })),
+  repairAppEnvironment: jest.fn(async () => ({ status: "repaired", clearedProfile: [] })),
+  onAiDiagnosis: jest.fn(() => () => {}),
+  onAiRepairResult: jest.fn(() => () => {}),
+  onAiRecovered: jest.fn(() => () => {}),
+  onAiUnavailable: jest.fn(() => () => {}),
+  onAiStatus: jest.fn(() => () => {}),
+  onAiHistory: jest.fn(() => () => {}),
 }));
 
 describe("ContainerManager", () => {
@@ -137,7 +162,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.6.4");
+    expect(container.textContent).toContain("RunContainer v0.6.5");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -154,9 +179,9 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("restores all seven tabs including Tweaks, Profiles, and Updates", () => {
+  it("restores all eight tabs including AI, Tweaks, Profiles, and Updates", () => {
     const container = render();
-    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"]) {
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"]) {
       expect(container.textContent).toContain(tab);
     }
     openTab(container, "Tweaks");
@@ -300,6 +325,139 @@ describe("ContainerManager", () => {
     await act(async () => { await Promise.resolve(); });
     expect(container.textContent).toContain("Update check diagnostics");
     expect(container.textContent).toContain("No published releases found.");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows RC-Brain's diagnosis, evidence and repair action in a banner", async () => {
+    let emitDiagnosis;
+    onAiDiagnosis.mockImplementation((callback) => {
+      emitDiagnosis = callback;
+      return () => {};
+    });
+    repairAppEnvironment.mockResolvedValue({ status: "repaired", clearedProfile: [] });
+    const container = render();
+    act(() => {
+      emitDiagnosis({
+        id: "app-1",
+        name: "Editor",
+        outcome: "execute",
+        diagnosis: { id: "missing_runtime", summary: "A Microsoft runtime DLL required by the app is missing from this PC.", confidence: 0.99, confidenceText: "99%" },
+        action: { id: "restart_same_profile", label: "Restart the app", requiresApproval: false },
+        explanation: "A Microsoft runtime DLL required by the app is missing from this PC. Stop the confirmed processes and start the app again.",
+        evidence: ["no visible window after 12.0s", "a Microsoft runtime DLL is reported missing"],
+        canRepair: true,
+      });
+    });
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(container.textContent).toContain("RC-Brain");
+    expect(container.textContent).toContain("99% confidence");
+    expect(container.textContent).toContain("a Microsoft runtime DLL is reported missing");
+
+    const repair = Array.from(alert.querySelectorAll("button")).find((entry) => entry.textContent.includes("Automated Environment Repair"));
+    expect(repair).not.toBeUndefined();
+    act(() => {
+      repair.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(repairAppEnvironment).toHaveBeenCalledWith("app-1", expect.objectContaining({ diagnosis: expect.objectContaining({ id: "missing_runtime" }) }), false);
+    expect(container.textContent).toContain("Repaired. The app is running again.");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("requires approval before a repair that touches app data", async () => {
+    let emitDiagnosis;
+    onAiDiagnosis.mockImplementation((callback) => {
+      emitDiagnosis = callback;
+      return () => {};
+    });
+    repairAppEnvironment.mockResolvedValue({ status: "repaired", clearedProfile: ["profile"] });
+    const container = render();
+    act(() => {
+      emitDiagnosis({
+        id: "app-1",
+        name: "Editor",
+        diagnosis: { id: "corrupt_profile", summary: "The app fails consistently while its own profile is in use.", confidenceText: "96%" },
+        action: { id: "restart_clean_profile", label: "Restart with a clean profile", requiresApproval: true },
+        explanation: "The profile looks corrupt.",
+        evidence: ["the log reports corrupt profile or configuration data"],
+        canRepair: true,
+      });
+    });
+    expect(container.textContent).toContain("Approve & run repair");
+    const approve = Array.from(container.querySelectorAll("[role=\"alert\"] button")).find((entry) => entry.textContent.includes("Approve"));
+    act(() => {
+      approve.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(repairAppEnvironment).toHaveBeenCalledWith("app-1", expect.objectContaining({ action: expect.objectContaining({ id: "restart_clean_profile" }) }), true);
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("disables the repair button once the per-app budget is spent", () => {
+    let emitDiagnosis;
+    onAiDiagnosis.mockImplementation((callback) => {
+      emitDiagnosis = callback;
+      return () => {};
+    });
+    const container = render();
+    act(() => {
+      emitDiagnosis({
+        id: "app-1",
+        name: "Editor",
+        diagnosis: { id: "resource_hang", summary: "The process holds the CPU while file activity has stopped.", confidenceText: "94%" },
+        action: { id: "restart_same_profile", label: "Restart the app", requiresApproval: false },
+        explanation: "The app appears hung.",
+        evidence: ["CPU at 99% with file activity stopped"],
+        canRepair: false,
+      });
+    });
+    const repair = Array.from(container.querySelectorAll("[role=\"alert\"] button")).find((entry) => entry.textContent.includes("Automated Environment Repair"));
+    expect(repair.disabled).toBe(true);
+    expect(container.textContent).toContain("already run twice");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows the model, evaluation and monitoring control in the AI tab", async () => {
+    getAiStatus.mockResolvedValue({
+      available: true,
+      enabled: true,
+      monitoring: true,
+      knowledgeVersion: "2026-10-22.1",
+      limits: ["Small local model, not a language model."],
+      model: {
+        name: "RC-Brain 1",
+        version: "1.0.0",
+        parameters: 4229,
+        features: 44,
+        hiddenLayers: { diagnosis: [32, 16], action: [24, 12] },
+        createdAt: "2026-10-22T00:00:00.000Z",
+        evaluation: { diagnosisAccuracy: 0.989, actionAccuracy: 0.989, falsePositiveRate: 0, unsafeActions: 0, samples: 348 },
+      },
+    });
+    setAiMonitoring.mockResolvedValue({ enabled: false, monitoring: false, available: true });
+    const container = render();
+    openTab(container, "AI");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("RC-Brain");
+    expect(container.textContent).toContain("4,229 parameters");
+    expect(container.textContent).toContain("98.9% diagnosis accuracy");
+    expect(container.textContent).toContain("Held-out evaluation");
+    const pause = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent.includes("Pause monitoring"));
+    expect(pause).not.toBeUndefined();
+    act(() => {
+      pause.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(setAiMonitoring).toHaveBeenCalledWith(false);
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

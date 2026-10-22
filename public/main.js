@@ -50,6 +50,16 @@ const {
   nativeHandleToInt,
 } = require('./window-host');
 const {
+  buildBehaviorProbeScript,
+  buildBehaviorProbeArgs,
+  parseBehaviorProbeOutput,
+  summarizeProbe,
+} = require('./behavioral-probe');
+const behavioralMonitor = require('../src/utils/behavioralMonitor');
+const { createBrain } = require('../src/ai/engine');
+const aiKnowledge = require('../src/ai/knowledge.json');
+const { createTelemetryLogger } = require('../src/utils/telemetryLogger');
+const {
   appContainerName,
   isAppContainerSupported,
   buildAppContainerFolderAclArgs,
@@ -792,6 +802,398 @@ async function runWindowHostScript(args) {
   }
 }
 
+// --- Behavioural monitor ------------------------------------------------------
+// The supervisor in src/utils/behavioralMonitor.js owns the state machine; this
+// side supplies the three live vectors (window handles, CPU/IO, log tail) and
+// performs the repair it asks for. Nothing here can launch an app uncontained.
+const liveLogs = new Map();
+const probeSamples = new Map();
+const aiBrain = createBrain({
+  logger: (message) => {
+    try {
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
+    } catch (error) {
+      // The error log is best-effort.
+    }
+  },
+});
+let aiMonitoringEnabled = true;
+// Local diagnostic history: temporary context for the safety gate and the AI
+// tab. It is not training data and nothing here changes the model's weights.
+const aiHistoryPath = path.join(app.getPath('userData'), 'runcontainer-ai-history.json');
+let aiHistory = [];
+try {
+  const saved = JSON.parse(fs.readFileSync(aiHistoryPath, 'utf8'));
+  if (Array.isArray(saved)) aiHistory = saved.slice(0, 40);
+} catch (error) {
+  aiHistory = [];
+}
+try {
+  appendLog(
+    path.join(app.getPath('userData'), 'runcontainer-error.log'),
+    aiBrain.available
+      ? `RC-Brain ${aiBrain.model.name} ${aiBrain.model.version} loaded (${aiBrain.model.parameters} parameters, model built ${aiBrain.model.createdAt}).`
+      : `RC-Brain is unavailable: ${aiBrain.error}`,
+  );
+} catch (error) {
+  // Diagnostics are best-effort; the AI tab reports the same state.
+}
+const anomalyTelemetry = createTelemetryLogger({
+  userDataDir: app.getPath('userData'),
+  appVersion: app.getVersion(),
+  logger: (message) => {
+    try {
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
+    } catch (error) {
+      // The error log is best-effort.
+    }
+  },
+});
+let behavioralSupervisor = null;
+
+function liveLogBuffer(appId) {
+  if (!liveLogs.has(appId)) liveLogs.set(appId, behavioralMonitor.createLiveLogBuffer());
+  return liveLogs.get(appId);
+}
+
+function clearLiveLog(appId) {
+  liveLogs.delete(appId);
+}
+
+function appLogPath(appRecord) {
+  const sandboxRoot = appRecord?.sandboxRoot || (appRecord?.source ? path.dirname(appRecord.source) : '');
+  const logsRoot = appRecord?.logsRoot || path.join(sandboxRoot, 'logs');
+  return path.join(logsRoot, `${sanitizeName(appRecord?.name || 'app')}.log`);
+}
+
+function ensureBehaviorProbeScript() {
+  const scriptPath = path.join(app.getPath('userData'), 'runcontainer-behaviour-probe.ps1');
+  const text = buildBehaviorProbeScript();
+  try {
+    if (!fs.existsSync(scriptPath) || fs.readFileSync(scriptPath, 'utf8') !== text) {
+      fs.writeFileSync(scriptPath, text, 'utf8');
+    }
+  } catch (error) {
+    // A stale script still works; a missing one surfaces as an unavailable probe.
+  }
+  return scriptPath;
+}
+
+// An engine whose own process has exited while the app is still reported Running
+// cannot be answering for it any more.
+function behavioralEngineResponsive(appRecord) {
+  const engine = appRecord?.activeEngine || appRecord?.launchMode;
+  if (engine === 'qemu') {
+    const child = qemuProcs.get(appRecord.id);
+    if (child && child.exitCode !== null) return false;
+  }
+  if (engine === 'rcvm') {
+    const child = rcvmLaunchers.get(appRecord.id);
+    if (child && child.exitCode !== null) return false;
+  }
+  return true;
+}
+
+async function probeAppBehavior(appRecord, state) {
+  const engine = appRecord.activeEngine || appRecord.launchMode || 'rcvm';
+  const isVm = engine === 'qemu' || engine === 'hyperv';
+  const logLines = [
+    ...behavioralMonitor.readLogTail(appLogPath(appRecord)),
+    ...(liveLogs.get(appRecord.id)?.lines() || []),
+  ].slice(-behavioralMonitor.RULES.logLines);
+  const pids = (appRecord.sandboxPids || []).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  let probe = null;
+  if (!isVm && process.platform === 'win32' && pids.length > 0) {
+    try {
+      const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids), {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+      });
+      probe = summarizeProbe(parseBehaviorProbeOutput(stdout));
+    } catch (error) {
+      probe = null;
+    }
+  }
+  const now = Date.now();
+  const previous = probeSamples.get(appRecord.id) || null;
+  let cpuPercent = 0;
+  if (probe && previous && probe.cpuMs !== null && previous.cpuMs !== null && now > previous.now) {
+    cpuPercent = Math.max(0, Math.min(100, (100 * (probe.cpuMs - previous.cpuMs)) / (now - previous.now)));
+  }
+  const ioIdle = Boolean(probe && previous && probe.ioBytes !== null && previous.ioBytes !== null && probe.ioBytes <= previous.ioBytes);
+  probeSamples.set(appRecord.id, { now, cpuMs: probe ? probe.cpuMs : null, ioBytes: probe ? probe.ioBytes : null });
+  const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  return {
+    now,
+    running: true,
+    engine,
+    pidCount: pids.length,
+    // GUI-subsystem images are expected to show a window; console tools are not.
+    windowExpected: !isVm && behavioralMonitor.isGuiExecutable(appRecord.source),
+    windowVisible: probe ? Boolean(probe.windowVisible) : null,
+    windowHung: probe ? Boolean(probe.windowHung) : false,
+    windowAgeMs: now - (state?.firstSeenAt || now),
+    ageMs: now - (state?.firstSeenAt || now),
+    engineResponsive: behavioralEngineResponsive(appRecord),
+    cpuPercent,
+    ioIdle,
+    cpuMs: probe ? probe.cpuMs : null,
+    ioBytes: probe ? probe.ioBytes : null,
+    environment: {
+      qemuProvisioned: isQemuProvisioned(),
+      hypervReady: Boolean(appRecord.hypervVm),
+      appContainerSupported: isAppContainerSupported(),
+      runtimePresent: fs.existsSync(path.join(system32, 'vcruntime140.dll')) && fs.existsSync(path.join(system32, 'msvcp140.dll')),
+    },
+    logLines,
+  };
+}
+
+function emitToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send(channel, payload);
+    } catch (error) {
+      // The window may be closing; a missed notice is not worth an error.
+    }
+  }
+}
+
+function recordAiHistory(entry) {
+  // Replace the same decision when its repair result arrives, so one diagnosis
+  // is one row rather than two.
+  const existing = aiHistory.findIndex((item) => item.id === entry.id && item.detectedAt === entry.detectedAt);
+  if (existing >= 0) aiHistory.splice(existing, 1);
+  aiHistory.unshift(entry);
+  aiHistory.splice(40);
+  try {
+    fs.writeFileSync(aiHistoryPath, JSON.stringify(aiHistory, null, 2), 'utf8');
+  } catch (error) {
+    // History is best-effort; losing it never affects monitoring.
+  }
+  emitToRenderer('ai:history', aiHistory);
+}
+
+async function handleAiDecision(notice) {
+  const appRecord = getStoredApp(notice.id);
+  if (appRecord) {
+    appendLog(appLogPath(appRecord), `RC-Brain: ${notice.diagnosis.id} (${notice.diagnosis.confidenceText}) chose ${notice.action.id}${notice.uncertain ? ' from uncertain evidence' : ''}.`);
+  }
+  const entry = { ...notice, outcome: notice.autoExecute ? 'repairing' : notice.decision };
+  recordAiHistory(entry);
+  emitToRenderer('ai:diagnosis', entry);
+  if (!notice.autoExecute) return;
+  const result = await repairAppBehavior({ appId: notice.id, decision: notice });
+  entry.outcome = result.status;
+  entry.result = result;
+  recordAiHistory(entry);
+  emitToRenderer('ai:repair-result', { id: notice.id, result, diagnosis: notice.diagnosis, action: notice.action });
+}
+
+function startBehavioralSupervisor() {
+  if (!aiMonitoringEnabled) return;
+  if (behavioralSupervisor) {
+    behavioralSupervisor.start();
+    return;
+  }
+  behavioralSupervisor = behavioralMonitor.createBehavioralSupervisor({
+    brain: aiBrain,
+    listApps: async () => loadApps(),
+    probe: probeAppBehavior,
+    onDecision: handleAiDecision,
+    onRecovered: ({ id }) => emitToRenderer('ai:recovered', { id }),
+    onUnavailable: ({ error }) => emitToRenderer('ai:unavailable', { error }),
+    logger: (message) => {
+      try {
+        appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
+      } catch (error) {
+        // The error log is best-effort.
+      }
+    },
+    intervalMs: 5000,
+  });
+  behavioralSupervisor.start();
+}
+
+function aiStatus() {
+  return {
+    available: aiBrain.available,
+    error: aiBrain.error,
+    model: aiBrain.model,
+    monitoring: Boolean(aiMonitoringEnabled && behavioralSupervisor),
+    enabled: aiMonitoringEnabled,
+    knowledgeVersion: aiKnowledge.knowledgeVersion,
+    limits: aiKnowledge.limits,
+    permissions: aiKnowledge.actions.map(({ id, label, risk, autonomous, requiresApproval }) => ({ id, label, risk, autonomous, requiresApproval: Boolean(requiresApproval) })),
+    privacy: 'RC-Brain runs locally. Anonymised anomaly reports are sent only when this build configures a registry endpoint; nothing is uploaded by default.',
+  };
+}
+
+// Clears the data RunContainer keeps for one app: its RCVM profile, redirected
+// AppData/Temp/ProgramData, and the per-app registry key RunContainer owns (if a
+// previous version created one). Registry writes an app makes outside its own
+// folder are not reverted, and the repair result says so.
+function clearAppProfile(appRecord, logPath) {
+  const sandboxRoot = appRecord.sandboxRoot;
+  const cleared = [];
+  if (!sandboxRoot) return cleared;
+  for (const target of ['profile', 'AppData', 'Temp', 'ProgramData']) {
+    const targetPath = path.join(sandboxRoot, target);
+    if (!isWithinDirectory(sandboxRoot, targetPath) || !fs.existsSync(targetPath)) continue;
+    try {
+      fs.rmSync(targetPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      cleared.push(target);
+    } catch (error) {
+      appendLog(logPath, `Repair could not clear ${target}: ${error.message}`);
+    }
+  }
+  ensureSandboxLayout(sandboxRoot);
+  return cleared;
+}
+
+function missingMicrosoftRuntimeNote(logLines) {
+  const text = (logLines || []).join('\n');
+  if (!/(vcruntime\d+|msvcp\d+|ucrtbase)\.dll/i.test(text)) return null;
+  const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  const missing = ['vcruntime140.dll', 'msvcp140.dll', 'ucrtbase.dll'].filter((dll) => !fs.existsSync(path.join(system32, dll)));
+  if (missing.length === 0) return null;
+  return `This PC is missing ${missing.join(', ')} from System32. Install the official Microsoft Visual C++ Redistributable, then press Run again. RunContainer does not install system runtimes on its own.`;
+}
+
+// Re-grants access to the app's own folder only. This is the executor for the
+// model's repair_permissions action; it never touches any other path.
+async function repairFolderPermissions(appRecord, logPath) {
+  if (!appRecord.sandboxRoot) return { repaired: false, error: 'The app has no managed folder.' };
+  const steps = buildAclRepairPlan(appRecord.sandboxRoot);
+  for (const step of steps) {
+    try {
+      await executeFile(step.command, step.args);
+    } catch (error) {
+      appendLog(logPath, `Permission repair step (${step.command}) failed: ${error.message}`);
+    }
+  }
+  appendLog(logPath, 'Re-granted access to this app’s managed folder; nothing outside it was touched.');
+  return { repaired: true };
+}
+
+function telemetryAnomalyFromDecision(decision, actionId) {
+  return {
+    rule: decision?.diagnosis?.id || actionId,
+    title: decision?.diagnosis?.summary || actionId,
+    detail: decision?.explanation || '',
+    snippet: decision?.observation?.logLine || '',
+    confidence: decision?.diagnosis?.confidence,
+  };
+}
+
+function settleAiRepair(appRecord, decision, actionId, outcome, detail) {
+  if (behavioralSupervisor) {
+    behavioralSupervisor.recordRepair(appRecord.id, { diagnosis: decision?.diagnosis?.id, outcome });
+    if (outcome === 'repaired') behavioralSupervisor.clearActive(appRecord.id);
+  }
+  const anomaly = telemetryAnomalyFromDecision(decision, actionId);
+  if (anomalyTelemetry.enabled) {
+    anomalyTelemetry.recordHandled({
+      anomaly,
+      appRecord,
+      resolution: { action: actionId, outcome, detail },
+    }).catch(() => {});
+  }
+}
+
+async function repairAppBehavior(payload = {}) {
+  const appRecord = getStoredApp(payload.appId);
+  if (!appRecord?.id) {
+    return { status: 'failed', error: 'This app is no longer in RunContainer’s list.' };
+  }
+  const decision = payload.decision || null;
+  const actionId = decision?.action?.id || payload.actionId || null;
+  const plan = behavioralMonitor.repairPlanFor(actionId);
+  const logPath = appLogPath(appRecord);
+  if (!plan) {
+    return {
+      status: 'not-executable',
+      id: appRecord.id,
+      action: actionId,
+      error: decision?.action?.requiresApproval
+        ? 'That repair needs a person: use Reset or Delete in Manage, and read the diagnosis first.'
+        : 'RC-Brain did not choose a repair that RunContainer can execute. Its explanation and evidence are shown instead.',
+    };
+  }
+  if (plan.requiresApproval && payload.approved !== true) {
+    return {
+      status: 'awaiting_approval',
+      id: appRecord.id,
+      action: actionId,
+      error: 'This repair changes app-local data and needs your approval before it runs.',
+    };
+  }
+  const monitored = behavioralSupervisor?.getState(appRecord.id);
+  if (monitored && !behavioralMonitor.canRepair(monitored)) {
+    return {
+      status: 'failed',
+      id: appRecord.id,
+      action: actionId,
+      error: 'Automatic repair has already run twice for this app in the last ten minutes. Close it and start it again, or use Reset in Manage.',
+    };
+  }
+  return withOpLock(appRecord.id, 'repair', async () => {
+    appendLog(logPath, `RC-Brain repair requested: ${actionId} after ${decision?.diagnosis?.id || 'a diagnosis'}.`);
+    await releaseAppWindow(appRecord, appRecord.sandboxPids, logPath).catch(() => {});
+    await stopRcvmLauncher(appRecord, logPath).catch(() => {});
+    const qemuChild = qemuProcs.get(appRecord.id);
+    if (qemuChild) {
+      try { qemuChild.kill(); } catch (error) { /* already gone */ }
+      qemuProcs.delete(appRecord.id);
+    }
+    const sandboxRoot = appRecord.sandboxRoot || path.dirname(appRecord.source || '');
+    let remaining = [];
+    try {
+      remaining = await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath });
+    } catch (error) {
+      appendLog(logPath, `Repair could not verify that the app stopped: ${error.message}`);
+      remaining = trackedPids(appRecord);
+    }
+    if (remaining.length > 0) {
+      const error = `Repair could not stop this app (PIDs ${remaining.join(', ')}). Close it and try again.`;
+      settleAiRepair(appRecord, decision, actionId, 'failed', error);
+      return { status: 'failed', id: appRecord.id, action: actionId, error };
+    }
+
+    let permissions = null;
+    if (plan.repairAcl) permissions = await repairFolderPermissions(appRecord, logPath);
+    const cleared = plan.resetProfile ? clearAppProfile(appRecord, logPath) : [];
+    const updated = resetLaunchState(getStoredApp(appRecord.id) || appRecord);
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
+    const launched = await runApp(updated, { lockHeld: true });
+    const repaired = launched?.status === 'Running';
+    const runtimeNote = missingMicrosoftRuntimeNote([
+      decision?.observation?.logLine || '',
+      ...(await Promise.resolve(behavioralMonitor.readLogTail(logPath))),
+    ]);
+    const note = repaired
+      ? null
+      : runtimeNote || launched?.error || launched?.reason || 'The app did not start again after the repair.';
+    appendLog(logPath, repaired
+      ? `Repair finished: the app is running again after ${actionId}.`
+      : `Repair did not start the app again: ${note}`);
+    const detail = repaired
+      ? `App restarted after ${actionId}${cleared.length > 0 ? ` with a clean profile (${cleared.join(', ')})` : ''}${permissions?.repaired ? ' and repaired folder permissions' : ''}.`
+      : note || '';
+    settleAiRepair(appRecord, decision, actionId, repaired ? 'repaired' : 'failed', detail);
+    return {
+      status: repaired ? 'repaired' : 'failed',
+      id: appRecord.id,
+      action: actionId,
+      engine: launched?.activeEngine || launched?.launchMode || null,
+      clearedProfile: cleared,
+      permissionsRepaired: Boolean(permissions?.repaired),
+      note,
+      error: repaired ? null : note,
+    };
+  });
+}
+
 // Re-parents the app's window into RunContainer's window. This is presentation only: it adds
 // no isolation, and Windows can refuse it (a lower-integrity window usually cannot be hosted
 // by a higher-integrity one). A failure is logged and the app keeps running normally.
@@ -1075,6 +1477,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     fs.writeFileSync(scriptPath, scriptText, 'utf8');
 
     launcherChild = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], { windowsHide: true });
+    // The launcher's pipes are the only live stdout/stderr a detached GUI app has;
+    // the monitor reads them alongside the app's log file.
+    launcherChild.stdout?.on('data', (chunk) => liveLogBuffer(appRecord.id).push(String(chunk)));
     const launcherPid = launcherChild.pid;
     rcvmLaunchers.set(appRecord.id, launcherChild);
     let launcherOutput = '';
@@ -1126,7 +1531,10 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
         reject(new Error(parsed.error || `The RCVM launcher exited before the app started (code ${code}).`));
       });
     });
-    launcherChild.stderr.on('data', (chunk) => appendLog(logPath, `RCVM launcher: ${String(chunk).trim()}`));
+    launcherChild.stderr.on('data', (chunk) => {
+      liveLogBuffer(appRecord.id).push(String(chunk));
+      appendLog(logPath, `RCVM launcher: ${String(chunk).trim()}`);
+    });
     launcherChild.on('exit', (code) => {
       rcvmLaunchers.delete(appRecord.id);
       appendLog(logPath, `RCVM launcher exited (code ${code}); its job object ends the app tree with it.`);
@@ -1948,6 +2356,7 @@ app.whenReady().then(() => {
     // A corrupt store must not prevent startup; list-apps surfaces it per record.
   }
   createWindow();
+  startBehavioralSupervisor();
 });
 
 app.on('window-all-closed', () => {
@@ -2131,7 +2540,9 @@ ipcMain.handle('get-app-logs', async (_event, appRecord) => {
   return fs.readFileSync(logPath, 'utf8').trim().split(/\n/).filter(Boolean);
 });
 
-ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
+// lockHeld is used by the repair path, which already holds the app's operation
+// lock while it stops the app and clears its profile.
+async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id || !appRecord?.source) {
     return { id: requestedAppRecord?.id, status: 'Failed', embedded: false, error: 'Installed app record is missing its id or executable path.' };
@@ -2200,9 +2611,10 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
   fs.writeFileSync(logPath, `Launch started at ${new Date().toISOString()}\n`, 'utf8');
   appendLog(logPath, `Using container ${sandboxRoot}`);
   stopMonitor(appRecord.id);
+  clearLiveLog(appRecord.id);
 
   appendLog(logPath, 'Launch requested; dispatching the selected engine under an operation lock.');
-  return withOpLock(appRecord.id, 'run', async () => {
+  const performLaunch = async () => {
     const lockedEngine = selectEngine(getStoredApp(appRecord.id) || appRecord);
     if (lockedEngine === 'refused') {
       const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
@@ -2228,7 +2640,33 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => {
       return runWithRcvm(appRecord, sandboxRoot, logPath);
     }
     return failedLaunch(appRecord, 'No isolation engine is available for this app. Nothing was launched.');
-  });
+  };
+  return lockHeld ? performLaunch() : withOpLock(appRecord.id, 'run', performLaunch);
+}
+
+ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requestedAppRecord));
+
+// RC-Brain runs continuously in the main process while monitoring is enabled;
+// these are the only renderer-facing entry points it has.
+ipcMain.handle('ai-status', async () => aiStatus());
+ipcMain.handle('ai-history', async () => aiHistory);
+ipcMain.handle('ai-set-monitoring', async (_event, payload = {}) => {
+  aiMonitoringEnabled = payload.enabled !== false;
+  if (aiMonitoringEnabled) {
+    startBehavioralSupervisor();
+  } else if (behavioralSupervisor) {
+    behavioralSupervisor.stop();
+  }
+  emitToRenderer('ai:status', aiStatus());
+  return aiStatus();
+});
+
+ipcMain.handle('repair-app-behaviour', async (_event, payload = {}) => {
+  try {
+    return await repairAppBehavior(payload);
+  } catch (error) {
+    return { status: 'failed', id: payload.appId || null, error: error.message };
+  }
 });
 
 ipcMain.handle('reset-container', async (_event, requestedAppRecord) => {

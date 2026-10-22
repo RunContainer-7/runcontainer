@@ -1,7 +1,7 @@
 {
   "name": "RunContainer",
   "productName": "RunContainer",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "A Windows-based container management application for running applications in a sandboxed environment.",
   "main": "public/main.js",
   "scripts": {
@@ -20,6 +20,7 @@
     "make": "electron-forge make"
   },
   "dependencies": {
+    "brain.js": "^2.0.0-beta.24",
     "electron-squirrel-startup": "^1.0.1"
   },
   "devDependencies": {
@@ -44,6 +45,7 @@
     "files": [
       "build/**/*",
       "public/**/*",
+      "src/**/*",
       "package.json"
     ],
     "directories": {
