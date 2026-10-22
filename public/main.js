@@ -56,8 +56,39 @@ const {
   summarizeProbe,
 } = require('./behavioral-probe');
 const behavioralMonitor = require('../src/utils/behavioralMonitor');
-const { createBrain } = require('../src/ai/engine');
+const { createBrain, REGISTRY_PATH: AI_REGISTRY_PATH } = require('../src/ai/engine');
+const { createExperienceStore } = require('../src/ai/experiences');
+const repairVerification = require('../src/utils/repairVerifier');
 const aiKnowledge = require('../src/ai/knowledge.json');
+
+// A failure while loading the main process would otherwise surface as Electron's
+// raw "A JavaScript error occurred" dialog with no log entry, which is exactly
+// how 0.6.5 failed to start. Record it, then explain it once, calmly.
+function logStartupFailure(error) {
+  try {
+    const target = path.join(app.getPath('userData'), 'runcontainer-error.log');
+    fs.appendFileSync(target, `[${new Date().toISOString()}] startup failure: ${error?.stack || error?.message || error}\n`);
+  } catch (logError) {
+    // The error log is best-effort.
+  }
+}
+
+process.on('uncaughtException', (error) => {
+  logStartupFailure(error);
+  try {
+    dialog.showErrorBox(
+      'RunContainer could not finish starting',
+      `${error?.message || error}\n\nRunContainer kept its data. A log was written to:\n${path.join(app.getPath('userData'), 'runcontainer-error.log')}\n\nReinstall RunContainer from the official release page if this keeps happening.`,
+    );
+  } catch (dialogError) {
+    // Without a ready app there may be no dialog; the log is what matters.
+  }
+  app.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logStartupFailure(reason instanceof Error ? reason : new Error(String(reason)));
+});
 const { createTelemetryLogger } = require('../src/utils/telemetryLogger');
 const {
   appContainerName,
@@ -808,18 +839,33 @@ async function runWindowHostScript(args) {
 // performs the repair it asks for. Nothing here can launch an app uncontained.
 const liveLogs = new Map();
 const probeSamples = new Map();
-const aiBrain = createBrain({
+const lastObservations = new Map();
+const aiLogPath = path.join(app.getPath('userData'), 'runcontainer-error.log');
+const experienceStore = createExperienceStore({
+  dir: app.getPath('userData'),
+  username: os.userInfo().username,
+  hostname: os.hostname(),
+  logger: (message) => {
+    try { appendLog(aiLogPath, message); } catch (error) { /* best-effort */ }
+  },
+});
+let aiBrain = createBrain({
+  retrieve: ({ features }) => experienceStore.retrieve({ features, k: 3 }),
   logger: (message) => {
     try {
-      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
+      appendLog(aiLogPath, message);
     } catch (error) {
       // The error log is best-effort.
     }
   },
 });
+const repairVerifier = repairVerification.createRepairVerifier({ minObservations: 3, timeoutMs: 45000 });
+const pendingRepairs = new Map();
 let aiMonitoringEnabled = true;
 // Local diagnostic history: temporary context for the safety gate and the AI
 // tab. It is not training data and nothing here changes the model's weights.
+// The separate experience store holds verified outcomes; neither one updates
+// weights without an explicit, offline, gated training run.
 const aiHistoryPath = path.join(app.getPath('userData'), 'runcontainer-ai-history.json');
 let aiHistory = [];
 try {
@@ -1003,6 +1049,7 @@ function startBehavioralSupervisor() {
     onDecision: handleAiDecision,
     onRecovered: ({ id }) => emitToRenderer('ai:recovered', { id }),
     onUnavailable: ({ error }) => emitToRenderer('ai:unavailable', { error }),
+    onSample: handleRepairSample,
     logger: (message) => {
       try {
         appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
@@ -1015,18 +1062,124 @@ function startBehavioralSupervisor() {
   behavioralSupervisor.start();
 }
 
+function aiRegistry() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AI_REGISTRY_PATH, 'utf8'));
+    return {
+      current: raw.current || null,
+      previous: raw.previous || null,
+      updatedAt: raw.updatedAt || null,
+      history: Array.isArray(raw.history) ? raw.history.slice(-4) : [],
+    };
+  } catch (error) {
+    return { current: null, previous: null, history: [] };
+  }
+}
+
+function aiCandidateInfo() {
+  const curated = experienceStore.curated();
+  const examples = Array.isArray(curated.examples) ? curated.examples.length : 0;
+  let candidateModel = null;
+  try {
+    const file = path.join(__dirname, '..', 'src', 'ai', 'model', 'rc-brain-2-candidate.json');
+    if (fs.existsSync(file)) {
+      const artefact = JSON.parse(fs.readFileSync(file, 'utf8'));
+      candidateModel = { id: artefact.id, version: artefact.version, createdAt: artefact.createdAt, parameters: artefact.parameterCount };
+    }
+  } catch (error) {
+    candidateModel = null;
+  }
+  return {
+    examples,
+    canTrain: examples >= 20,
+    minExamples: 20,
+    candidateModel,
+    note: 'Promoted examples stay local. Training a candidate is an offline command (scripts/train-ai-candidate.js) and activation is a separate gated step; monitoring never trains on its own.',
+  };
+}
+
 function aiStatus() {
+  const stats = experienceStore.stats();
   return {
     available: aiBrain.available,
     error: aiBrain.error,
     model: aiBrain.model,
+    registry: aiRegistry(),
     monitoring: Boolean(aiMonitoringEnabled && behavioralSupervisor),
     enabled: aiMonitoringEnabled,
     knowledgeVersion: aiKnowledge.knowledgeVersion,
     limits: aiKnowledge.limits,
     permissions: aiKnowledge.actions.map(({ id, label, risk, autonomous, requiresApproval }) => ({ id, label, risk, autonomous, requiresApproval: Boolean(requiresApproval) })),
-    privacy: 'RC-Brain runs locally. Anonymised anomaly reports are sent only when this build configures a registry endpoint; nothing is uploaded by default.',
+    capabilities: aiBrain.model?.capabilities || null,
+    experiences: stats,
+    recentExperiences: experienceStore.list({ limit: 5 }),
+    candidate: aiCandidateInfo(),
+    verification: {
+      pending: pendingRepairs.size,
+      minObservations: repairVerifier.minObservations,
+      timeoutMs: repairVerifier.timeoutMs,
+    },
+    privacy: 'RC-Brain runs locally. Experience history stays in this PC\'s app data and is redacted (paths, names, hosts, e-mails removed). Nothing is uploaded unless this build configures an explicit registry endpoint; nothing is uploaded by default.',
   };
+}
+
+// A repair is only counted as a success after the original condition clears for
+// several consecutive observations. Anything else is recorded honestly.
+function completeVerifiedOutcome(appId, verdict) {
+  const pending = pendingRepairs.get(appId) || null;
+  const observation = pending?.observation || lastObservations.get(appId) || null;
+  const decision = pending?.decision || null;
+  pendingRepairs.delete(appId);
+  repairVerifier.clear(appId);
+  if (pending) pendingRepairs.delete(appId);
+
+  let experience = null;
+  if (observation && decision) {
+    const outcome = verdict.status === repairVerification.STATUS.VERIFIED
+      ? 'success'
+      : verdict.status === repairVerification.STATUS.UNRESOLVED ? 'failure' : 'inconclusive';
+    const recorded = experienceStore.record({
+      observation,
+      decision,
+      execution: {
+        performed: true,
+        completed: true,
+        steps: pending?.steps || [],
+      },
+      verification: verdict,
+      outcome,
+    });
+    experience = recorded.stored ? recorded.entry : null;
+  }
+
+  emitToRenderer('ai:verified', {
+    id: appId,
+    verdict,
+    diagnosis: decision?.diagnosis || null,
+    action: decision?.action || null,
+    experience,
+  });
+  emitToRenderer('ai:status', aiStatus());
+}
+
+function handleRepairSample({ id, observation }) {
+  lastObservations.set(id, observation);
+  const verdict = repairVerifier.observe(id, observation);
+  if (verdict) completeVerifiedOutcome(id, verdict);
+}
+
+function reloadBrain() {
+  aiBrain = createBrain({
+    retrieve: ({ features }) => experienceStore.retrieve({ features, k: 3 }),
+    logger: (message) => {
+      try { appendLog(aiLogPath, message); } catch (error) { /* best-effort */ }
+    },
+  });
+  if (behavioralSupervisor) {
+    behavioralSupervisor.stop();
+    behavioralSupervisor = null;
+    startBehavioralSupervisor();
+  }
 }
 
 // Clears the data RunContainer keeps for one app: its RCVM profile, redirected
@@ -1139,6 +1292,11 @@ async function repairAppBehavior(payload = {}) {
   }
   return withOpLock(appRecord.id, 'repair', async () => {
     appendLog(logPath, `RC-Brain repair requested: ${actionId} after ${decision?.diagnosis?.id || 'a diagnosis'}.`);
+    // Verification starts before the repair, using the last real observation as
+    // the baseline. It finishes several ticks later, not on this return value.
+    const before = lastObservations.get(appRecord.id) || null;
+    repairVerifier.start({ appId: appRecord.id, diagnosisId: decision?.diagnosis?.id || null, actionId, before });
+    pendingRepairs.set(appRecord.id, { decision, observation: before, steps: [`${actionId} executed`] });
     await releaseAppWindow(appRecord, appRecord.sandboxPids, logPath).catch(() => {});
     await stopRcvmLauncher(appRecord, logPath).catch(() => {});
     const qemuChild = qemuProcs.get(appRecord.id);
@@ -1181,6 +1339,10 @@ async function repairAppBehavior(payload = {}) {
       ? `App restarted after ${actionId}${cleared.length > 0 ? ` with a clean profile (${cleared.join(', ')})` : ''}${permissions?.repaired ? ' and repaired folder permissions' : ''}.`
       : note || '';
     settleAiRepair(appRecord, decision, actionId, repaired ? 'repaired' : 'failed', detail);
+    if (!repaired) {
+      repairVerifier.clear(appRecord.id);
+      pendingRepairs.delete(appRecord.id);
+    }
     return {
       status: repaired ? 'repaired' : 'failed',
       id: appRecord.id,
@@ -1188,6 +1350,10 @@ async function repairAppBehavior(payload = {}) {
       engine: launched?.activeEngine || launched?.launchMode || null,
       clearedProfile: cleared,
       permissionsRepaired: Boolean(permissions?.repaired),
+      verification: repaired ? 'pending' : 'not-applicable',
+      verificationNote: repaired
+        ? 'The app restarted. RC-Brain is now checking that the original problem cleared before calling this a success.'
+        : null,
       note,
       error: repaired ? null : note,
     };
@@ -2334,10 +2500,20 @@ function createWindow() {
     });
   }
 
-  mainWindow.once('ready-to-show', () => {
+  let shown = false;
+  const showWindow = () => {
+    if (shown || !mainWindow || mainWindow.isDestroyed()) return;
+    shown = true;
     mainWindow.show();
     mainWindow.webContents.send('app:boot-sequence', { stage: 'ready' });
-  });
+  };
+  mainWindow.once('ready-to-show', showWindow);
+  // ready-to-show never fires when the renderer dies before its first paint.
+  // Showing anyway means the user sees the app (and its own error state) rather
+  // than a process running with no window at all.
+  const showFallback = setTimeout(showWindow, 4000);
+  if (showFallback.unref) showFallback.unref();
+  mainWindow.webContents.once('did-finish-load', showWindow);
 }
 
 app.whenReady().then(() => {
@@ -2650,6 +2826,39 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requested
 // these are the only renderer-facing entry points it has.
 ipcMain.handle('ai-status', async () => aiStatus());
 ipcMain.handle('ai-history', async () => aiHistory);
+ipcMain.handle('ai-experiences', async (_event, payload = {}) => experienceStore.list({ limit: payload.limit || 20 }));
+ipcMain.handle('ai-promote-experiences', async (_event, payload = {}) => {
+  // Promotion requires an explicit action from the user; the UI asks first.
+  const result = experienceStore.promote(payload.ids, { consent: payload.consent === true });
+  emitToRenderer('ai:status', aiStatus());
+  return result;
+});
+ipcMain.handle('ai-correct-experience', async (_event, payload = {}) => {
+  const result = experienceStore.correct(payload.id, payload);
+  emitToRenderer('ai:status', aiStatus());
+  return result;
+});
+ipcMain.handle('ai-rollback-model', async () => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(AI_REGISTRY_PATH, 'utf8'));
+    if (!raw.previous) return { rolledBack: false, reason: 'No previous model is recorded.' };
+    const previousFile = path.join(path.dirname(AI_REGISTRY_PATH), path.basename(raw.previous));
+    if (!fs.existsSync(previousFile)) return { rolledBack: false, reason: 'The previous model file is no longer on disk.' };
+    const updated = {
+      ...raw,
+      current: raw.previous,
+      previous: raw.current,
+      updatedAt: new Date().toISOString(),
+      history: [...(raw.history || []), { file: raw.previous, status: 'active', activatedAt: new Date().toISOString(), source: 'in-app-rollback' }].slice(-10),
+    };
+    fs.writeFileSync(AI_REGISTRY_PATH, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+    reloadBrain();
+    emitToRenderer('ai:status', aiStatus());
+    return { rolledBack: true, registry: aiRegistry() };
+  } catch (error) {
+    return { rolledBack: false, reason: error.message };
+  }
+});
 ipcMain.handle('ai-set-monitoring', async (_event, payload = {}) => {
   aiMonitoringEnabled = payload.enabled !== false;
   if (aiMonitoringEnabled) {

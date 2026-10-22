@@ -4,6 +4,22 @@
 
 export const UPDATES = [
   {
+    version: '0.6.6',
+    date: '2026-10-22',
+    title: 'RC-Brain 2: better evidence, verified repairs, a real learning loop',
+    changes: [
+      'RC-Brain 2 is a bigger model trained from scratch: 8,334 parameters over 65 structured observation features, 19 diagnoses and 11 actions. It now uses temporal evidence (how long a symptom persisted, recurrences, recoveries), exit-code classes, host pressure, misleading-log signals and contradictory evidence, not one error string.',
+      'Repairs are verified independently: after a restart, RC-Brain waits for three consecutive observations and re-checks the original condition. “Verified”, “unresolved” and “inconclusive” are reported honestly; a zero exit code is not treated as success.',
+      'A structured experience pipeline records the observation, the prediction, the action and the verified outcome locally, with paths and names redacted. Verified examples can be promoted with consent into a curated dataset; training a candidate and activating it are separate, gated offline steps, and the previous model can be rolled back in the AI tab.',
+      'Evaluation is reported by split: 99.6% on familiar holdout variants, 96.8% on whole unseen failure families, 96.5% on an untouched final split, 0 unsafe destructive actions and 0 repairs proposed for normal behaviour. The ambiguous/restraint split is reported separately instead of being averaged into a headline.',
+      'The AI tab now shows the model’s real capabilities and limits, the active and previous model files, monitoring health, verified outcomes, pending examples and the learning-loop status. It does not claim continuous learning while only collecting history.',
+      'Fixed a startup failure in the 0.6.5 installer: it shipped a main process that required a training-only dependency which packaging pruned, so the app could show a JavaScript error instead of opening. Inference is now dependency-free, and a packaging test fails the build if the shipped runtime requires a pruned package.',
+      'Fixed the Electron insecure-CSP warning on every launch, and the window now appears even if the renderer fails before its first paint. Startup failures are logged and explained instead of leaving invisible processes.',
+      'New Policies tab: terms of service, privacy, source code and self-hosting, responsible use of apps (no piracy), community conduct, and the fact that RunContainer is free.',
+      'Documentation: the installation guide now explains the Windows SmartScreen/Defender warning, how to verify the download and how to inspect or build the source. The FAQ no longer claims there is no official download.',
+    ],
+  },
+  {
     version: '0.6.5',
     date: '2026-10-22',
     title: 'RC-Brain: RunContainer\'s own AI model',

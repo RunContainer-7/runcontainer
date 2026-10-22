@@ -57,6 +57,9 @@ jest.mock("../services/containerService", () => ({
     },
   })),
   getAiHistory: jest.fn(async () => []),
+  getAiExperiences: jest.fn(async () => []),
+  promoteAiExperiences: jest.fn(async () => ({ promoted: 0 })),
+  rollbackAiModel: jest.fn(async () => ({ rolledBack: false, reason: "no previous model" })),
   setAiMonitoring: jest.fn(async () => ({ enabled: false, monitoring: false, available: true })),
   repairAppEnvironment: jest.fn(async () => ({ status: "repaired", clearedProfile: [] })),
   onAiDiagnosis: jest.fn(() => () => {}),
@@ -65,6 +68,7 @@ jest.mock("../services/containerService", () => ({
   onAiUnavailable: jest.fn(() => () => {}),
   onAiStatus: jest.fn(() => () => {}),
   onAiHistory: jest.fn(() => () => {}),
+  onAiVerified: jest.fn(() => () => {}),
 }));
 
 describe("ContainerManager", () => {
@@ -162,7 +166,7 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Info");
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).toContain("RunContainer v0.6.5");
+    expect(container.textContent).toContain("RunContainer v0.6.6");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
@@ -179,9 +183,9 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("restores all eight tabs including AI, Tweaks, Profiles, and Updates", () => {
+  it("restores every tab including AI, Policies, Tweaks, Profiles and Updates", () => {
     const container = render();
-    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"]) {
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Policies", "Info", "Updates"]) {
       expect(container.textContent).toContain(tab);
     }
     openTab(container, "Tweaks");
@@ -434,22 +438,30 @@ describe("ContainerManager", () => {
       knowledgeVersion: "2026-10-22.1",
       limits: ["Small local model, not a language model."],
       model: {
-        name: "RC-Brain 1",
-        version: "1.0.0",
-        parameters: 4229,
-        features: 44,
-        hiddenLayers: { diagnosis: [32, 16], action: [24, 12] },
+        name: "RC-Brain 2",
+        version: "2.0.0",
+        parameters: 8334,
+        features: 66,
+        hiddenLayers: { diagnosis: [64, 32], action: [40, 20] },
         createdAt: "2026-10-22T00:00:00.000Z",
-        evaluation: { diagnosisAccuracy: 0.989, actionAccuracy: 0.989, falsePositiveRate: 0, unsafeActions: 0, samples: 348 },
+        evaluation: {
+          familiar: { diagnosisAccuracy: 0.99, actionAccuracy: 0.98, falsePositiveRate: 0.01, unsafeActions: 0 },
+          unseen: { diagnosisAccuracy: 0.78, actionAccuracy: 0.75 },
+          final: { diagnosisAccuracy: 0.91, actionAccuracy: 0.9, unsafeActions: 0 },
+        },
+        capabilities: { diagnosisLabels: 19, actionLabels: 11 },
       },
+      registry: { current: "rc-brain-2.json", previous: null },
+      experiences: { verified: 0, failed: 0, inconclusive: 0, promoted: 0, pendingPromotion: 0 },
+      candidate: { examples: 0, minExamples: 20, canTrain: false },
     });
     setAiMonitoring.mockResolvedValue({ enabled: false, monitoring: false, available: true });
     const container = render();
     openTab(container, "AI");
     await act(async () => { await Promise.resolve(); });
     expect(container.textContent).toContain("RC-Brain");
-    expect(container.textContent).toContain("4,229 parameters");
-    expect(container.textContent).toContain("98.9% diagnosis accuracy");
+    expect(container.textContent).toContain("8,334 parameters");
+    expect(container.textContent).toContain("Familiar cases:");
     expect(container.textContent).toContain("Held-out evaluation");
     const pause = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent.includes("Pause monitoring"));
     expect(pause).not.toBeUndefined();
@@ -489,6 +501,22 @@ describe("ContainerManager", () => {
     });
     await act(async () => { await Promise.resolve(); });
     expect(container.textContent).toContain("Install & restart");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("has a Policies panel covering terms, privacy, source and responsible use", async () => {
+    const container = render();
+    openTab(container, "Policies");
+    await act(async () => { await Promise.resolve(); });
+    const text = container.textContent;
+    expect(text).toContain("Terms of service");
+    expect(text).toContain("Privacy policy");
+    expect(text).toContain("Source code and self-hosting");
+    expect(text).toContain("pirated software");
+    expect(text).toContain("Discord");
+    expect(text).toContain("free");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

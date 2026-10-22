@@ -1,6 +1,6 @@
 {
   "schema": "runcontainer.knowledge.v1",
-  "knowledgeVersion": "2026-10-22.1",
+  "knowledgeVersion": "2026-10-22.2",
   "product": {
     "name": "RunContainer",
     "purpose": "A Windows launcher that gives each imported executable its own folder, its own redirected profile and a verified isolation engine, so apps do not mix with each other or install into the rest of the PC.",
@@ -56,7 +56,9 @@
     "A first launch can take several seconds while runtimes initialise; slow is not the same as hung.",
     "A busy app may use a full CPU core while still writing files or logs; that is work, not a hang.",
     "A locked profile requests no network; on engines that cannot enforce it the app says so instead of pretending.",
-    "An update check failing while offline is not an app failure."
+    "An update check failing while offline is not an app failure.",
+    "A log that repeats the same progress line, or still contains crash text from an earlier session, is not by itself a failure while the app is visibly working.",
+    "Host disk or memory pressure is reported as evidence; it is only a failure when the app actually cannot proceed."
   ],
   "degradedOperation": [
     "The app runs but has not created a window yet after 10 seconds, with the engine still responsive.",
@@ -197,6 +199,7 @@
     { "id": "missing_runtime", "summary": "A Microsoft runtime DLL required by the app is missing from this PC.", "action": "advise_runtime_install" },
     { "id": "crash_unhandled", "summary": "The app crashed with an unhandled exception or fatal error.", "action": "restart_same_profile" },
     { "id": "corrupt_profile", "summary": "The app fails consistently while its own profile or configuration is in use.", "action": "restart_clean_profile" },
+    { "id": "profile_in_use", "summary": "Another process still holds the app's profile or data files open.", "action": "restart_same_profile" },
     { "id": "engine_unresponsive", "summary": "The isolation engine stopped answering for the app.", "action": "restart_engine" },
     { "id": "isolation_unsupported", "summary": "The requested isolation mode is not available on this PC or for this app.", "action": "advise_configuration" },
     { "id": "permission_denied", "summary": "The app cannot write where it needs to, usually inside its managed folder.", "action": "repair_permissions" },
@@ -209,7 +212,8 @@
     { "id": "exited_normally", "summary": "The app exited on its own with a normal exit.", "action": "none" }
   ],
   "limits": [
-    "RC-Brain is a small local neural classifier, not a large language model. It recognises patterns represented in its training scenarios and abstains when confidence is low; it cannot reason about arbitrary novel software.",
+    "RC-Brain is a small local neural classifier, not a large language model. It maps structured observation features to one of its fixed diagnoses and abstains when confidence is low; it cannot read arbitrary log text semantically or invent a new diagnosis.",
+    "Diagnoses outside its label set are reported as unknown_failure with an action to gather evidence, not as a confident guess.",
     "The monitor runs only while RunContainer is open. It is not a Windows service.",
     "Repairs are bounded per app. The model cannot elevate privileges, bypass isolation or execute arbitrary commands."
   ]

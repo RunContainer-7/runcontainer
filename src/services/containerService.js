@@ -261,6 +261,27 @@ export async function setAiMonitoring(enabled) {
   return requireIpc('Changing monitoring').invoke('ai-set-monitoring', { enabled: Boolean(enabled) });
 }
 
+export async function getAiExperiences(limit = 20) {
+  if (!ipcRenderer) return [];
+  try {
+    return await ipcRenderer.invoke('ai-experiences', { limit });
+  } catch (error) {
+    return [];
+  }
+}
+
+export async function promoteAiExperiences(ids, consent = false) {
+  return requireIpc('Promoting verified experiences').invoke('ai-promote-experiences', { ids, consent: Boolean(consent) });
+}
+
+export async function correctAiExperience(id, diagnosis, action, note = '') {
+  return requireIpc('Correcting a diagnosis').invoke('ai-correct-experience', { id, diagnosis, action, note });
+}
+
+export async function rollbackAiModel() {
+  return requireIpc('Rolling back the model').invoke('ai-rollback-model');
+}
+
 export async function repairAppEnvironment(appId, decision, approved = false) {
   return requireIpc('Repairing apps').invoke('repair-app-behaviour', { appId, decision, approved });
 }
@@ -294,4 +315,8 @@ export function onAiStatus(callback) {
 
 export function onAiHistory(callback) {
   return onAiEvent('ai:history', callback);
+}
+
+export function onAiVerified(callback) {
+  return onAiEvent('ai:verified', callback);
 }

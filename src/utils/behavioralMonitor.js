@@ -190,6 +190,9 @@ function createBehavioralSupervisor({
   onDecision = () => {},
   onRecovered = () => {},
   onUnavailable = () => {},
+  // Every tick's raw observation, used for independent repair verification and
+  // nothing else. It is not a second diagnosis path.
+  onSample = () => {},
   canRepairFn = canRepair,
   intervalMs = 5000,
   now = () => Date.now(),
@@ -244,6 +247,12 @@ function createBehavioralSupervisor({
             onUnavailable({ error: decision.error });
           }
           continue;
+        }
+
+        try {
+          onSample({ id: appRecord.id, name: appRecord.name || 'App', observation, decision });
+        } catch (error) {
+          logger(`Behavioural sample hook failed for ${appRecord.name || appRecord.id}: ${error.message}`);
         }
 
         const actionable = decision.decision !== 'monitor';

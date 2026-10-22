@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#020617">
+    <!-- The renderer only loads its own bundle, icons and inline styles. A real
+         policy also stops Electron from printing its insecure-CSP warning on
+         every launch, which users understandably read as an error. -->
+    <!-- 'unsafe-inline' covers the webpack bootstrap script Create React App
+         inlines into index.html; scripts are still restricted to this app. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>RunContainer</title>
     <link rel="icon" type="image/svg+xml" href="./runcontainer-icon.svg">
     <link rel="icon" type="image/png" href="./runcontainer-icon.png">

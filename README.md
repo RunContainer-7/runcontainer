@@ -40,18 +40,21 @@ A `locked` profile asks for no network access. That can only be enforced when th
 
 RunContainer has a small neural model trained from scratch on its own architecture and failure modes. It is not a cloud chatbot, and it is not a rules table with an AI label.
 
-- **RC-Brain 1** has **4,229 parameters** across two heads: one diagnoses, one chooses a repair action from a fixed catalogue.
-- While the app is open it watches running apps every few seconds: window handles, CPU/IO movement, engine liveness and the last 40 log lines.
-- It knows 18 RunContainer-specific states, from a missing Microsoft runtime to a trapped VM engine, and abstains when the evidence is weak instead of guessing.
+- **RC-Brain 2** has **8,334 parameters** across two heads: one diagnoses, one chooses a repair action from a fixed catalogue. It reads 66 structured observation features, including how long a symptom has persisted, whether it recurred, exit-code classes and host pressure.
+- While the app is open it watches running apps every few seconds: window handles, CPU/IO movement, engine liveness, the last 40 log lines and its own repair history.
+- It knows 19 RunContainer-specific states, from a missing Microsoft runtime to a trapped VM engine, and abstains when the evidence is weak instead of guessing.
 - Low-risk repairs (restart the app, restart its engine, repair its own folder permissions) run automatically. Clearing an app's profile needs approval. It never installs system software, deletes app data, weakens isolation or follows instructions found in logs.
-- Held-out evaluation: **98.9% diagnosis accuracy**, **98.9% action accuracy**, **0% false positives** on normal behaviour and **0 unsafe actions** across 348 unseen scenarios. A keyword baseline scores 49.7% and 58.6%.
+- After a repair it waits for three consecutive observations and re-checks the original condition; a restart alone is not reported as success.
+- Evaluation, split by construction: **99.6%** on familiar holdout variants, **96.8%** on whole failure families absent from training, **96.5%** on an untouched final split, **0 unsafe destructive actions** and **0 repairs proposed for normal behaviour**. A keyword baseline scores 48.6%, 93.5% and 53.7%.
+- Verified outcomes can be promoted, with consent, into a local curated dataset; training a candidate and activating it are separate, gated offline steps, and the previous model can be rolled back. Monitoring never updates weights by itself.
 - If the model is missing or corrupt, the **AI** tab says so and no diagnosis or repair happens. There is no silent rule-based fallback.
 
 Train and verify it locally:
 
 ```bash
-node scripts/train-ai-brain.js   # retrain + held-out evaluation (≈2–3 min)
-npm test -- --watchAll=false     # includes the shipped model's held-out scoring
+node scripts/train-ai-brain.js       # retrain + split evaluation (≈6–8 min)
+node scripts/promote-model.js --verify  # fail if the active model misses its gates
+npm test -- --watchAll=false         # corpus audit, parity, policy, verification, UI
 ```
 
 The model artefact, feature schema, knowledge specification and evaluation report live in `src/ai/` and `reports/ai-evaluation.md`. Details: the documentation's [RC-Brain page](https://runcontainer-7.github.io/9-runcontainer/guide/ai-brain).
@@ -100,7 +103,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.6.5 && git push origin v0.6.5
+git tag v0.6.6 && git push origin v0.6.6
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

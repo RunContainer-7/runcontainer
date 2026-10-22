@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -14,11 +14,11 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.5";
+const APP_VERSION_FALLBACK = "0.6.6";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
-const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"];
+const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Policies", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
@@ -26,6 +26,7 @@ const tabIcons = {
   Settings: "⚙",
   Profiles: "◧",
   AI: "◈",
+  Policies: "§",
   Info: "◌",
   Updates: "↓",
 };
@@ -65,6 +66,9 @@ export default function ContainerManager() {
   const [aiOutcome, setAiOutcome] = useState("idle");
   const [aiMessage, setAiMessage] = useState("");
   const [aiHistory, setAiHistory] = useState([]);
+  const [aiExperiences, setAiExperiences] = useState([]);
+  const [aiVerification, setAiVerification] = useState(null);
+  const [aiWorking, setAiWorking] = useState(false);
   const booting = useBootAnimation();
 
   useEffect(() => {
@@ -127,7 +131,23 @@ export default function ContainerManager() {
   useEffect(() => {
     Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); }).catch(() => {});
     Promise.resolve(getAiHistory()).then((history) => { if (Array.isArray(history)) setAiHistory(history); }).catch(() => {});
+    Promise.resolve(getAiExperiences()).then((items) => { if (Array.isArray(items)) setAiExperiences(items); }).catch(() => {});
   }, []);
+
+  // Verification is a separate event from "the repair command finished".
+  useEffect(() => onAiVerified((payload) => {
+    if (!payload?.verdict) return;
+    setAiVerification(payload);
+    const status = payload.verdict.status;
+    setAiOutcome(status === 'verified' ? 'repaired' : status === 'unresolved' ? 'failed' : 'idle');
+    setAiMessage(status === 'verified'
+      ? 'Verified: the original problem cleared and stayed clear.'
+      : status === 'unresolved'
+        ? `The repair did not clear the problem: ${payload.verdict.detail || 'it is still observable.'}`
+        : `Verification was inconclusive: ${payload.verdict.detail || 'not enough observations.'}`);
+    Promise.resolve(getAiExperiences()).then((items) => { if (Array.isArray(items)) setAiExperiences(items); }).catch(() => {});
+    Promise.resolve(getAiStatus()).then((statusValue) => { if (statusValue) setAiStatus(statusValue); }).catch(() => {});
+  }), []);
 
   // RC-Brain pushes each new diagnosis. The banner stays until the app recovers,
   // the user dismisses it, or the repair reports its result.
@@ -183,6 +203,37 @@ export default function ContainerManager() {
         setAiMessage(error?.message || "The repair failed before it could start.");
       })
       .finally(() => setAiRepairing(false));
+  }
+
+  function handlePromoteExperiences() {
+    const eligible = aiExperiences.filter((entry) => !entry.promoted && entry.labelsLocked === false && (entry.outcome === 'success' || entry.outcome === 'user_corrected'));
+    if (eligible.length === 0) {
+      setAiMessage('No verified experiences are waiting. A repair only becomes a training example after it is verified and reviewed.');
+      return;
+    }
+    if (!window.confirm(`Add ${eligible.length} verified experience(s) to the local curated dataset? They are sanitised and stay on this PC. This does not retrain the model.`)) return;
+    setAiWorking(true);
+    Promise.resolve(promoteAiExperiences(eligible.map((entry) => entry.id), true))
+      .then((result) => {
+        setAiMessage(result?.promoted
+          ? `${result.promoted} example(s) added to the local curated dataset. Training a candidate is a separate offline step.`
+          : 'Nothing was added: no eligible verified examples.');
+        return Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); });
+      })
+      .catch((error) => setAiMessage(error?.message || 'The experience could not be promoted.'))
+      .finally(() => setAiWorking(false));
+  }
+
+  function handleRollbackModel() {
+    if (!window.confirm('Load the previous RC-Brain model again? The current model stays on disk.')) return;
+    setAiWorking(true);
+    Promise.resolve(rollbackAiModel())
+      .then((result) => {
+        setAiMessage(result?.rolledBack ? 'Rolled back to the previous model. Monitoring restarted with it.' : (result?.reason || 'There is no previous model to roll back to.'));
+        return Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); });
+      })
+      .catch((error) => setAiMessage(error?.message || 'The model could not be rolled back.'))
+      .finally(() => setAiWorking(false));
   }
 
   function handleToggleAiMonitoring() {
@@ -977,10 +1028,29 @@ export default function ContainerManager() {
             <div className="profile-card">
               <strong>Held-out evaluation</strong>
               <span>
-                {aiStatus?.model?.evaluation
-                  ? `${(aiStatus.model.evaluation.diagnosisAccuracy * 100).toFixed(1)}% diagnosis accuracy, ${(aiStatus.model.evaluation.actionAccuracy * 100).toFixed(1)}% action selection, ${(aiStatus.model.evaluation.falsePositiveRate * 100).toFixed(1)}% false positives and ${aiStatus.model.evaluation.unsafeActions} unsafe actions across ${aiStatus.model.evaluation.samples} unseen scenarios.`
-                  : 'The evaluation results ship inside the model artefact and appear here once it is loaded.'}
+                {aiStatus?.model?.evaluation?.familiar
+                  ? `Familiar cases: ${(aiStatus.model.evaluation.familiar.diagnosisAccuracy * 100).toFixed(1)}% diagnosis. Unseen failure families: ${(aiStatus.model.evaluation.unseen.diagnosisAccuracy * 100).toFixed(1)}%. Final untouched split: ${(aiStatus.model.evaluation.final.diagnosisAccuracy * 100).toFixed(1)}%. False positives on normal behaviour: ${(aiStatus.model.evaluation.familiar.falsePositiveRate * 100).toFixed(1)}%.`
+                  : aiStatus?.model?.evaluation
+                    ? `${(aiStatus.model.evaluation.diagnosisAccuracy * 100).toFixed(1)}% diagnosis accuracy across ${aiStatus.model.evaluation.samples} held-out scenarios.`
+                    : 'The evaluation results ship inside the model artefact and appear here once it is loaded.'}
               </span>
+              <span className="muted">
+                All evaluation scenarios are synthetic and built from RunContainer’s own code and tests; no user logs or machines were used. Unseen-family numbers are lower on purpose: they measure generalisation, not memorisation.
+              </span>
+            </div>
+            <div className="profile-card">
+              <strong>What the model can and cannot do</strong>
+              <span>
+                {aiStatus?.capabilities
+                  ? `Fixed-label classifier: ${aiStatus.capabilities.diagnosisLabels} diagnoses, ${aiStatus.capabilities.actionLabels} actions. It reads structured observation features, not arbitrary log text, and cannot invent a diagnosis outside its labels. Unknown evidence becomes “unknown failure” plus “gather more evidence”.`
+                  : 'Capabilities are reported by the loaded model.'}
+              </span>
+              <span className="muted">
+                Model file: {aiStatus?.registry?.current || 'unknown'} · previous for rollback: {aiStatus?.registry?.previous || 'none'}
+              </span>
+              <div className="detail-actions">
+                <button className="settings-button ghost" disabled={aiWorking || !aiStatus?.registry?.previous} onClick={handleRollbackModel}>Roll back model</button>
+              </div>
             </div>
             <div className="profile-card">
               <strong>Monitoring</strong>
@@ -1005,6 +1075,46 @@ export default function ContainerManager() {
             <p className="status-line">RC-Brain is not loaded{aiStatus?.error ? `: ${aiStatus.error}` : '.'} Monitoring will not diagnose or repair anything until it is available.</p>
           )}
 
+          <h4>Verified outcomes and experience</h4>
+          <div className="profile-card">
+            <strong>Repair verification</strong>
+            <span>
+              {aiVerification?.verdict
+                ? `${aiVerification.verdict.status.replace('_', ' ')}: ${aiVerification.verdict.detail} (${aiVerification.verdict.observedChecks} check(s)).`
+                : `After a repair, RC-Brain waits for ${aiStatus?.verification?.minObservations || 3} consecutive observations and re-checks the original condition. A restart alone is not counted as success.`}
+            </span>
+            <span className="muted">
+              Verified: {aiStatus?.experiences?.verified || 0} · unresolved: {aiStatus?.experiences?.failed || 0} · inconclusive: {aiStatus?.experiences?.inconclusive || 0} · promoted to curated data: {aiStatus?.experiences?.promoted || 0}
+            </span>
+          </div>
+          <div className="profile-card">
+            <strong>Learning loop (honest version)</strong>
+            <span>
+              History remembers incidents. Retrieval shows similar past incidents next to a diagnosis. Verified outcomes can be added to a local curated dataset with your consent.
+              None of those change the model’s weights. Weights only change through an offline, gated training run, and the previous model stays available for rollback.
+            </span>
+            <span className="muted">
+              Curated examples: {aiStatus?.candidate?.examples || 0} (minimum {aiStatus?.candidate?.minExamples || 20} to train a candidate). Pending review: {aiStatus?.experiences?.pendingPromotion || 0}.
+            </span>
+            <div className="detail-actions">
+              <button className="settings-button" disabled={aiWorking} onClick={handlePromoteExperiences}>Promote verified examples</button>
+            </div>
+            <span className="muted">{aiStatus?.candidate?.note}</span>
+          </div>
+          {aiExperiences.length > 0 && (
+            <div className="ai-history">
+              {aiExperiences.slice(0, 5).map((entry) => (
+                <div className="ai-history-row" key={entry.id}>
+                  <div>
+                    <strong>{entry.diagnosis?.id || 'Diagnosis'} → {entry.action?.id || 'action'}</strong>
+                    <span className="muted"> {entry.app?.name || 'App'} · {entry.verification?.status || entry.outcome} · {new Date(entry.at).toLocaleString()}</span>
+                  </div>
+                  <div className="muted">{entry.action?.justification || ''}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
           <h4>Recent diagnoses</h4>
           {aiHistory.length === 0 ? (
             <p className="muted">No diagnoses yet. RC-Brain only records a decision when something departs from normal behaviour.</p>
@@ -1022,6 +1132,48 @@ export default function ContainerManager() {
             </div>
           )}
           <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
+        </div>
+      )}
+
+      {activeTab === "Policies" && (
+        <div className="placeholder-panel policies-panel">
+          <h3>Policies</h3>
+          <p className="muted">Short, plain-language rules for using RunContainer and its community spaces. They are not legal advice.</p>
+
+          <details className="policy-card" open>
+            <summary>Terms of service</summary>
+            <p>RunContainer is free software provided as-is, without warranty. You may use it for personal or commercial work. You are responsible for the apps you run in it and for having the right to use them.</p>
+            <p>Do not use RunContainer to break the law, to harm other people or their systems, or to bypass licences or protections you do not own. Updates may change these terms; the current version is always shown on this panel.</p>
+          </details>
+
+          <details className="policy-card">
+            <summary>Privacy policy</summary>
+            <p>RC-Brain runs on your PC. Monitoring, diagnoses, verification and the experience history stay in RunContainer’s app-data folder. Log snippets stored for diagnostics are redacted: file paths, user names, machine names, e-mail addresses and IP addresses are replaced before they are saved.</p>
+            <p>RunContainer contacts GitHub only to check for a newer release, and only reads the public release feed. No telemetry is sent unless a build has been given an explicit registry endpoint; the official build has none. You can inspect or delete the app-data folder at any time.</p>
+          </details>
+
+          <details className="policy-card">
+            <summary>Source code and self-hosting</summary>
+            <p>The source is public at <a href="https://github.com/RunContainer-7/runcontainer" onClick={(event) => { event.preventDefault(); openExternalUrl('https://github.com/RunContainer-7/runcontainer'); }}>github.com/RunContainer-7/runcontainer</a>. You may read it, clone it, build it yourself and check that the installer matches it. If you do not trust the prebuilt installer, build from source or compare its SHA-256 with the value on the downloads page.</p>
+            <p>Forks are welcome. If you publish a modified build, make clear that it is not the official release.</p>
+          </details>
+
+          <details className="policy-card">
+            <summary>Responsible use of apps</summary>
+            <p>RunContainer runs programs; it does not give you a licence to them. Do not use it to run pirated software, cracked installers, or anything you would not be allowed to install on your own PC. Respect each app’s licence and its vendor’s terms.</p>
+            <p>Isolation is a safety boundary, not a permission to do harm. Never point RunContainer at malware or use it to attack systems you do not own.</p>
+          </details>
+
+          <details className="policy-card">
+            <summary>Community and feedback</summary>
+            <p>In the <a href="https://discord.gg/rvMjMZJykE" onClick={(event) => { event.preventDefault(); openExternalUrl('https://discord.gg/rvMjMZJykE'); }}>Discord server</a>, treat the maintainers and other members with respect. Abuse, harassment, threats and personal attacks are not welcome.</p>
+            <p>Feedback should be constructive: describe what happened, what you expected and what you tried. RunContainer is free and maintained in spare time, so please be patient and appreciative rather than demanding. Reports are read; not every request can be built.</p>
+          </details>
+
+          <details className="policy-card">
+            <summary>Cost</summary>
+            <p>RunContainer is free to download and use. There is no paid tier and no account. If it saves you time, saying thanks (or helping someone else in Discord) is appreciated more than any payment.</p>
+          </details>
         </div>
       )}
 

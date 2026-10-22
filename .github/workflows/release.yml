@@ -52,6 +52,12 @@ jobs:
       - name: Verify shipped icon matches its source design
         run: node scripts/build-app-icon.js --check
 
+      # The active model must still match this build's feature schema and pass
+      # the same gates a candidate does. This catches a stale or hand-edited
+      # artefact before it ships.
+      - name: Verify active RC-Brain model
+        run: node scripts/promote-model.js --verify
+
       - name: Production build
         run: npm run build
 

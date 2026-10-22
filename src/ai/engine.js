@@ -1,23 +1,47 @@
 // RC-Brain inference.
 //
-// The trained artefact (model/rc-brain-1.json) is the decision maker: it maps a
-// structured observation to a diagnosis and a repair action. This module only
-// loads it, calibrates its outputs, and applies the explicit safety gate around
-// the decision. If the model is missing or corrupt, it reports that state; it
-// never substitutes hand-written diagnostic rules.
+// The trained artefact is the decision maker: it maps a structured observation
+// to a diagnosis and a repair action. This module only loads it, calibrates its
+// outputs, and applies the explicit safety policy around the decision. If the
+// model is missing or corrupt, it reports that state; it never substitutes
+// hand-written diagnostic rules.
+//
+// Which artefact loads is recorded in model/registry.json, so a new model can
+// be rolled back to the previous known-good file without a code change.
 
 const fs = require('fs');
 const path = require('path');
 const knowledge = require('./knowledge.json');
 const { FEATURE_NAMES, encodeObservation } = require('./features');
 const { validateNetwork, runNetwork } = require('./inference');
+const { gateDecision } = require('./policy');
 
-const DEFAULT_MODEL_PATH = path.join(__dirname, 'model', 'rc-brain-1.json');
+const MODEL_DIR = path.join(__dirname, 'model');
+const REGISTRY_PATH = path.join(MODEL_DIR, 'registry.json');
+const FALLBACK_MODEL = path.join(MODEL_DIR, 'rc-brain-2.json');
+const MODEL_SCHEMA = 'runcontainer.brain.v2';
 const DIAGNOSES = knowledge.diagnoses.map((entry) => entry.id);
 const ACTIONS = knowledge.actions.map((entry) => entry.id);
 const ACTION_BY_ID = Object.fromEntries(knowledge.actions.map((entry) => [entry.id, entry]));
 const DIAGNOSIS_BY_ID = Object.fromEntries(knowledge.diagnoses.map((entry) => [entry.id, entry]));
-const NON_FAILURE = new Set(['healthy', 'console_headless', 'exited_normally', 'starting_slow']);
+
+function readRegistry() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8'));
+    if (raw && typeof raw.current === 'string') return raw;
+  } catch (error) {
+    // A missing registry falls back to the shipped model file.
+  }
+  return { schema: 'runcontainer.brain.registry.v1', current: path.basename(FALLBACK_MODEL), previous: null, history: [] };
+}
+
+function resolveModelPath(modelPath) {
+  if (modelPath) return modelPath;
+  const registry = readRegistry();
+  const candidate = path.join(MODEL_DIR, path.basename(registry.current));
+  if (fs.existsSync(candidate)) return candidate;
+  return FALLBACK_MODEL;
+}
 
 function softmax(output, temperature = 1) {
   const scaled = Object.entries(output).map(([label, value]) => [label, value / (temperature || 1)]);
@@ -31,15 +55,16 @@ function topTwo(probabilities) {
   return Object.entries(probabilities).sort((a, b) => b[1] - a[1]).slice(0, 2);
 }
 
-function loadModel(modelPath = DEFAULT_MODEL_PATH) {
+function loadModel(modelPath) {
+  const resolvedPath = resolveModelPath(modelPath);
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(modelPath, 'utf8'));
+    raw = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
   } catch (error) {
     return { available: false, error: `The RC-Brain model could not be read: ${error.message}` };
   }
-  if (!raw || raw.schema !== 'runcontainer.brain.v1') {
-    return { available: false, error: 'The RC-Brain model file is not a RunContainer model.' };
+  if (!raw || raw.schema !== MODEL_SCHEMA) {
+    return { available: false, error: 'The RC-Brain model file is not a RunContainer v2 model.' };
   }
   if (!Array.isArray(raw.featureSchema) || raw.featureSchema.length !== FEATURE_NAMES.length
     || raw.featureSchema.some((name, index) => name !== FEATURE_NAMES[index])) {
@@ -53,6 +78,7 @@ function loadModel(modelPath = DEFAULT_MODEL_PATH) {
     validateNetwork(raw.nets.action, 'action network');
     return {
       available: true,
+      path: resolvedPath,
       meta: {
         id: raw.id,
         name: raw.name,
@@ -65,6 +91,15 @@ function loadModel(modelPath = DEFAULT_MODEL_PATH) {
         evaluation: raw.evaluation,
         training: raw.training,
         calibration: raw.calibration,
+        corpus: raw.corpus,
+        labels: raw.labels,
+        thresholds: raw.thresholds,
+        capabilities: {
+          diagnosisLabels: DIAGNOSES.length,
+          actionLabels: ACTIONS.length,
+          readsArbitraryText: false,
+          novelDiagnosis: false,
+        },
       },
       thresholds: raw.thresholds,
       temperature: raw.calibration?.temperature || 1,
@@ -75,26 +110,10 @@ function loadModel(modelPath = DEFAULT_MODEL_PATH) {
   }
 }
 
-function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {}) {
+function createBrain({ modelPath, logger = () => {}, retrieve = null } = {}) {
   const loaded = loadModel(modelPath);
   if (!loaded.available) logger(loaded.error);
-
-  function escalateDecision(reason, base) {
-    const action = ACTION_BY_ID.escalate;
-    return {
-      ...base,
-      action: {
-        id: 'escalate',
-        label: action.label,
-        description: action.description,
-        risk: action.risk,
-        autonomous: false,
-        requiresApproval: false,
-      },
-      decision: 'escalate',
-      reason,
-    };
-  }
+  const registry = readRegistry();
 
   function analyze(observation, history = {}) {
     if (!loaded.available) {
@@ -113,6 +132,9 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
     }
 
     const encoded = encodeObservation(observation);
+    // History arrives as a separate argument from the supervisor and is also
+    // embedded in the observation for stored/replayed cases; merge both.
+    const historyState = { ...(observation?.history || {}), ...(history || {}) };
     const probabilities = softmax(runNetwork(loaded.nets.diagnosis, encoded.values, 'diagnosis network'), loaded.temperature);
     const ranked = topTwo(probabilities);
     const confidence = ranked[0]?.[1] || 0;
@@ -123,75 +145,39 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
 
     const actionInput = [...encoded.values, ...DIAGNOSES.map((label) => (label === diagnosisId ? 1 : 0))];
     const actionProbabilities = softmax(runNetwork(loaded.nets.action, actionInput, 'action network'), loaded.temperature);
-    let actionId = Object.entries(actionProbabilities).sort((a, b) => b[1] - a[1])[0]?.[0] || 'observe';
-    let action = ACTION_BY_ID[actionId];
-    let securityNote = null;
-    if (!action) {
-      actionId = 'observe';
-      action = ACTION_BY_ID.observe;
-      securityNote = 'The model proposed an action outside the catalogue, so it was replaced with gathering more evidence.';
-    }
-    // Safety gate, deliberately separate from diagnosis: destructive actions on
-    // normal behaviour escalate instead of touching user data, and nothing is
-    // ever executed without its declared permission.
-    if (NON_FAILURE.has(diagnosisId) && (action.requiresApproval || action.risk === 'high')) {
-      return escalateDecision('The model proposed a destructive repair for an app that is not failing, so the safety gate stopped it and asked for attention.', {
-        available: true,
-        model: loaded.meta,
-        diagnosis: { id: diagnosisId, summary: diagnosis.summary, confidence: Number(confidence.toFixed(3)) },
-        evidence: encoded.evidence,
-        explanation: `${diagnosis.summary} The proposed repair would affect app data, and the evidence does not show a failure. Nothing was changed.`,
-        confidence: Number(confidence.toFixed(3)),
-        uncertain,
-      });
-    }
-
-    // History arrives as a separate argument from the supervisor and is also
-    // embedded in the observation for stored/replayed cases; merge both.
-    const historyState = { ...(observation?.history || {}), ...(history || {}) };
-    const repairBudgetSpent = Number(historyState.repairs || 0) >= 2;
-    const repeatedFailure = Boolean(historyState.lastRepairFailed) && Number(historyState.sameDiagnosisRepeats || 0) >= 1;
-    const actionable = !['none', 'wait', 'observe'].includes(actionId);
-    if (actionable && (repairBudgetSpent || repeatedFailure)) {
-      return escalateDecision(
-        repairBudgetSpent
-          ? 'Automatic repair has already run twice for this app in the monitoring window, so the model stopped instead of retrying.'
-          : 'The previous identical repair did not work, so the model stopped instead of repeating it.',
-        {
-          available: true,
-          model: loaded.meta,
-          diagnosis: { id: diagnosisId, summary: diagnosis.summary, confidence: Number(confidence.toFixed(3)) },
-          evidence: encoded.evidence,
-          explanation: `${diagnosis.summary} A repair was indicated, but the bounded-retry policy requires a person to look at it instead of trying again.`,
-          confidence: Number(confidence.toFixed(3)),
-          uncertain,
-        },
-      );
-    }
-
-    const decision = action.requiresApproval
-      ? 'awaiting_approval'
-      : actionId === 'observe'
-        ? 'abstain'
-        : ['advise_runtime_install', 'advise_configuration'].includes(actionId)
-          ? 'advise'
-          : actionId === 'escalate'
-            ? 'escalate'
-            : ['none', 'wait'].includes(actionId)
-              ? 'monitor'
-              : 'execute';
+    const actionId = Object.entries(actionProbabilities).sort((a, b) => b[1] - a[1])[0]?.[0] || 'observe';
+    const proposed = ACTION_BY_ID[actionId] ? { ...ACTION_BY_ID[actionId], id: actionId } : null;
+    const gate = gateDecision({
+      diagnosisId,
+      action: proposed,
+      confidence,
+      uncertain,
+      history: historyState,
+      injection: Boolean(encoded.signals?.injection),
+    });
+    const action = gate.action;
 
     const confidenceText = `${Math.round(confidence * 100)}%`;
-    const reason = uncertain
-      ? 'The evidence did not match any diagnosis strongly enough, so the model is gathering more observations rather than acting.'
-      : action.description;
     const explanation = uncertain
-      ? `${reason} Closest evidence: ${encoded.evidence.slice(0, 3).join('; ') || 'no structured evidence'}.`
-      : `${diagnosis.summary} ${action.description}`;
+      ? `The evidence did not match any diagnosis strongly enough, so the model is gathering more observations rather than acting. Closest evidence: ${encoded.evidence.slice(0, 3).join('; ') || 'no structured evidence'}.`
+      : `${diagnosis.summary} ${gate.reason}`;
+
+    // Previously verified incidents are retrieval context for the user and for
+    // the next review cycle. They are deliberately NOT fed back into the
+    // feature vector: a similar past case must not overrule current evidence.
+    let similar = [];
+    if (typeof retrieve === 'function') {
+      try {
+        similar = retrieve({ observation, diagnosisId, features: encoded.values }) || [];
+      } catch (error) {
+        similar = [];
+      }
+    }
 
     return {
       available: true,
       model: loaded.meta,
+      registry: { current: registry.current, previous: registry.previous || null },
       diagnosis: {
         id: diagnosisId,
         summary: diagnosis.summary,
@@ -201,20 +187,22 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
         alternatives: ranked.slice(1).map(([id, probability]) => ({ id, confidence: Number(probability.toFixed(3)) })),
       },
       action: {
-        id: actionId,
+        id: action.id,
         label: action.label,
         description: action.description,
         risk: action.risk,
         autonomous: Boolean(action.autonomous) && !action.requiresApproval,
         requiresApproval: Boolean(action.requiresApproval),
       },
-      decision,
-      reason,
+      decision: gate.decision,
+      reason: gate.reason,
       explanation,
       evidence: encoded.evidence,
       uncertain,
-      securityNote,
+      unknownToModel: diagnosisId === 'unknown_failure',
+      securityNote: proposed ? null : 'The model proposed an action outside the catalogue, so it was replaced with gathering more evidence.',
       features: encoded.values,
+      similarExperiences: similar,
     };
   }
 
@@ -222,17 +210,24 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
     available: loaded.available,
     error: loaded.available ? null : loaded.error,
     model: loaded.available ? loaded.meta : null,
+    registry,
     analyze,
   };
 }
 
 module.exports = {
-  DEFAULT_MODEL_PATH,
+  MODEL_DIR,
+  REGISTRY_PATH,
+  FALLBACK_MODEL,
+  DEFAULT_MODEL_PATH: FALLBACK_MODEL,
+  MODEL_SCHEMA,
   DIAGNOSES,
   ACTIONS,
   ACTION_BY_ID,
   DIAGNOSIS_BY_ID,
   softmax,
+  readRegistry,
+  resolveModelPath,
   loadModel,
   createBrain,
 };
