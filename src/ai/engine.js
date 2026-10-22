@@ -8,9 +8,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const brain = require('brain.js');
 const knowledge = require('./knowledge.json');
 const { FEATURE_NAMES, encodeObservation } = require('./features');
+const { validateNetwork, runNetwork } = require('./inference');
 
 const DEFAULT_MODEL_PATH = path.join(__dirname, 'model', 'rc-brain-1.json');
 const DIAGNOSES = knowledge.diagnoses.map((entry) => entry.id);
@@ -49,10 +49,8 @@ function loadModel(modelPath = DEFAULT_MODEL_PATH) {
     return { available: false, error: 'The RC-Brain model is missing one of its networks.' };
   }
   try {
-    const diagnosisNet = new brain.NeuralNetwork({ hiddenLayers: raw.hiddenLayers?.diagnosis });
-    diagnosisNet.fromJSON(raw.nets.diagnosis);
-    const actionNet = new brain.NeuralNetwork({ hiddenLayers: raw.hiddenLayers?.action });
-    actionNet.fromJSON(raw.nets.action);
+    validateNetwork(raw.nets.diagnosis, 'diagnosis network');
+    validateNetwork(raw.nets.action, 'action network');
     return {
       available: true,
       meta: {
@@ -70,8 +68,7 @@ function loadModel(modelPath = DEFAULT_MODEL_PATH) {
       },
       thresholds: raw.thresholds,
       temperature: raw.calibration?.temperature || 1,
-      diagnosisNet,
-      actionNet,
+      nets: { diagnosis: raw.nets.diagnosis, action: raw.nets.action },
     };
   } catch (error) {
     return { available: false, error: `The RC-Brain model could not be loaded: ${error.message}` };
@@ -116,7 +113,7 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
     }
 
     const encoded = encodeObservation(observation);
-    const probabilities = softmax(loaded.diagnosisNet.run(encoded.values), loaded.temperature);
+    const probabilities = softmax(runNetwork(loaded.nets.diagnosis, encoded.values, 'diagnosis network'), loaded.temperature);
     const ranked = topTwo(probabilities);
     const confidence = ranked[0]?.[1] || 0;
     const margin = confidence - (ranked[1]?.[1] || 0);
@@ -125,7 +122,7 @@ function createBrain({ modelPath = DEFAULT_MODEL_PATH, logger = () => {} } = {})
     const diagnosis = DIAGNOSIS_BY_ID[diagnosisId] || { id: diagnosisId, summary: 'Unrecognised diagnosis.' };
 
     const actionInput = [...encoded.values, ...DIAGNOSES.map((label) => (label === diagnosisId ? 1 : 0))];
-    const actionProbabilities = softmax(loaded.actionNet.run(actionInput), loaded.temperature);
+    const actionProbabilities = softmax(runNetwork(loaded.nets.action, actionInput, 'action network'), loaded.temperature);
     let actionId = Object.entries(actionProbabilities).sort((a, b) => b[1] - a[1])[0]?.[0] || 'observe';
     let action = ACTION_BY_ID[actionId];
     let securityNote = null;
