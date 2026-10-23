@@ -4,6 +4,18 @@
 
 export const UPDATES = [
   {
+    version: '0.7.1',
+    date: '2026-10-23',
+    title: 'Installer wizards run inside RunContainer, not on your desktop',
+    changes: [
+      'Installer wizards are now hosted inside RunContainer. Pressing Run on a setup program used to show its wizard as an ordinary desktop window; RunContainer now waits longer for an installer to create its window and hosts it like any other app window, so you complete setup inside the app.',
+      'If the main window cannot host it, a second RunContainer window opens and the installer (or the app) is shown there instead, under a RunContainer header with Stop app, Release window and a way back to the main window. Windows can still refuse hosting; when it does, RunContainer says so in that window instead of pretending the app is inside.',
+      'Virtual-machine environments are shown in a RunContainer window too. The Hyper-V console (VMConnect) and the QEMU display are hosted there, so a wizard running inside the guest is visible without a stray Virtual Machine Connection window. The guest display opens automatically after a VM launch and before an in-guest install.',
+      'Show app window now works for QEMU environments as well as Hyper-V, and it reports whether the window is really shown inside RunContainer or stayed on your desktop.',
+      'The Info tab links the RunContainer YouTube channel under Support & documentation, and the documentation support panel does the same.',
+    ],
+  },
+  {
     version: '0.7.0',
     date: '2026-10-23',
     title: 'Performance Engine: quicker launches, honest JIT reporting',

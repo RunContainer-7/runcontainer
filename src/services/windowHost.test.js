@@ -28,6 +28,17 @@ describe("window host launcher", () => {
     expect(csharp).toContain("WsPopup");
   });
 
+  it("makes the hosted window a real child and finds it again for release", () => {
+    const csharp = buildWindowHostCSharp();
+    // SetParent returns the previous parent handle; converting it to a number threw
+    // on every hosting attempt, which is why hosting never visibly worked.
+    expect(csharp).not.toContain("Convert.ToInt64(SetParent");
+    expect(csharp).toContain("SetLastError(0)");
+    expect(csharp).toContain("(style | WsChild) & ~WsPopup");
+    // A hosted window is no longer top-level, so release must search the host's children.
+    expect(csharp).toContain("EnumChildWindows");
+  });
+
   it("never claims hosting adds isolation and only re-parents visible top-level windows", () => {
     const csharp = buildWindowHostCSharp();
     expect(csharp).toContain("GetParent(hwnd) != IntPtr.Zero");
@@ -40,6 +51,16 @@ describe("window host launcher", () => {
       "-Mode", "embed", "-ProcessId", "42", "-Parent", "1234", "-TimeoutMs", "12000",
     ]);
     expect(buildWindowHostScriptArgs("C:\\w.ps1", { mode: "release", processId: 42, parentHandle: 1, timeoutMs: 500 })).toContain("release");
+  });
+
+  it("leaves room for RunContainer's own header in a second window", () => {
+    const args = buildWindowHostScriptArgs("C:\\w.ps1", { mode: "embed", processId: 7, parentHandle: 9, insetTop: 56 });
+    expect(args.slice(-2)).toEqual(["-InsetTop", "56"]);
+    expect(buildWindowHostScript().length).toBeGreaterThan(0);
+    expect(buildWindowHostScriptArgs("C:\\w.ps1", { mode: "embed", processId: 7, parentHandle: 9 })).not.toContain("-InsetTop");
+    const csharp = buildWindowHostCSharp();
+    expect(csharp).toContain("public static bool Embed(long childHandle, long parentHandle, int topInset)");
+    expect(csharp).toContain("MoveWindow(child, 0, inset, width, height, true)");
   });
 
   it("reads the result, including a refusal that must not be treated as success", () => {

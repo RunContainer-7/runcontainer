@@ -33,6 +33,9 @@ public static class RunContainerWindowHost
     static extern bool EnumWindows(EnumWindowsProc callback, IntPtr param);
 
     [DllImport("user32.dll", SetLastError = true)]
+    static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr param);
+
+    [DllImport("user32.dll", SetLastError = true)]
     static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("user32.dll")]
@@ -62,6 +65,9 @@ public static class RunContainerWindowHost
     [DllImport("user32.dll")]
     static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 
+    [DllImport("kernel32.dll")]
+    static extern void SetLastError(uint errorCode);
+
     [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
     static extern int GetWindowLong32(IntPtr hwnd, int index);
 
@@ -82,6 +88,7 @@ public static class RunContainerWindowHost
     const int GwlExStyle = -20;
     const int SwShow = 5;
     const int SwShowNormal = 1;
+    const uint SwpNoSize = 0x0001;
     const uint SwpNoZOrder = 0x0004;
     const uint SwpFrameChanged = 0x0020;
     const uint SwpShowWindow = 0x0040;
@@ -120,22 +127,62 @@ public static class RunContainerWindowHost
         }
     }
 
-    public static bool Embed(long childHandle, long parentHandle)
+    // topInset leaves that many pixels of the host window uncovered, so a window that
+    // RunContainer owns can keep its own header visible above the hosted app.
+    public static bool Embed(long childHandle, long parentHandle, int topInset)
     {
         IntPtr child = new IntPtr(childHandle);
         IntPtr parent = new IntPtr(parentHandle);
         if (!IsWindow(child) || !IsWindow(parent)) return false;
-        if (Convert.ToInt64(SetParent(child, parent)) == 0 && Marshal.GetLastWin32Error() != 0) return false;
+        // SetParent returns the previous parent handle (NULL for a top-level window),
+        // not a number: Convert.ToInt64 threw on it, which made every hosting attempt
+        // fail silently. Check the documented error pattern instead.
+        SetLastError(0);
+        IntPtr previous = SetParent(child, parent);
+        if (previous == IntPtr.Zero && Marshal.GetLastWin32Error() != 0) return false;
 
+        // SetParent deliberately leaves the WS_CHILD / WS_POPUP styles alone, and a
+        // window that is still WS_POPUP is not drawn inside its new parent. Make it a
+        // child window, then place it below the host's header strip.
+        int style = GetWindowLong32(child, GwlStyle);
+        SetWindowLong32(child, GwlStyle, (style | WsChild) & ~WsPopup);
+        SetWindowLong32(child, GwlExStyle, GetWindowLong32(child, GwlExStyle) & ~WsExAppWindow);
+
+        int inset = topInset > 0 ? topInset : 0;
         RECT client;
         if (GetClientRect(parent, out client))
         {
             int width = client.Right - client.Left;
-            int height = client.Bottom - client.Top;
-            if (width > 0 && height > 0) MoveWindow(child, 0, 0, width, height, true);
+            int height = (client.Bottom - client.Top) - inset;
+            if (width > 0 && height > 0) MoveWindow(child, 0, inset, width, height, true);
         }
+        SetWindowPos(child, IntPtr.Zero, 0, inset, 0, 0, SwpNoSize | SwpNoZOrder | SwpFrameChanged | SwpShowWindow);
         ShowWindow(child, SwShow);
         return GetParent(child) == parent;
+    }
+
+    // Fits an already-hosted window to a resized host. FindMainWindow cannot be used for
+    // this: a hosted window is a child now, so it is found through the host instead.
+    public static int ResizeProcessWindows(uint processId, long parentHandle, int topInset)
+    {
+        IntPtr parent = new IntPtr(parentHandle);
+        RECT client;
+        if (!GetClientRect(parent, out client)) return 0;
+        int inset = topInset > 0 ? topInset : 0;
+        int width = client.Right - client.Left;
+        int height = (client.Bottom - client.Top) - inset;
+        if (width <= 0 || height <= 0) return 0;
+        int resized = 0;
+        EnumChildWindows(parent, delegate(IntPtr hwnd, IntPtr param)
+        {
+            uint ownerPid;
+            GetWindowThreadProcessId(hwnd, out ownerPid);
+            if (ownerPid != processId) return true;
+            MoveWindow(hwnd, 0, inset, width, height, true);
+            resized += 1;
+            return true;
+        }, IntPtr.Zero);
+        return resized;
     }
 
     // Puts the window back on the desktop before the app is stopped or deleted, so nothing
@@ -144,7 +191,17 @@ public static class RunContainerWindowHost
     {
         IntPtr parent = new IntPtr(parentHandle);
         int released = 0;
-        foreach (IntPtr hwnd in TopLevelWindowsForProcess(processId))
+        // A hosted window is a child of the host, so EnumWindows no longer sees it:
+        // the children of the host window are enumerated instead.
+        List<IntPtr> hosted = new List<IntPtr>();
+        EnumChildWindows(parent, delegate(IntPtr hwnd, IntPtr param)
+        {
+            uint ownerPid;
+            GetWindowThreadProcessId(hwnd, out ownerPid);
+            if (ownerPid == processId) hosted.Add(hwnd);
+            return true;
+        }, IntPtr.Zero);
+        foreach (IntPtr hwnd in hosted)
         {
             if (GetParent(hwnd) != parent) continue;
             SetParent(hwnd, IntPtr.Zero);
@@ -164,7 +221,7 @@ public static class RunContainerWindowHost
 
 function buildWindowHostScript() {
   return [
-    'param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000)',
+    'param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0)',
     "$ErrorActionPreference = 'Stop'",
     "$source = @'",
     buildWindowHostCSharp(),
@@ -174,12 +231,15 @@ function buildWindowHostScript() {
     "  if ($Mode -eq 'release') {",
     '    $count = [RunContainerWindowHost]::ReleaseProcessWindows([uint32]$ProcessId, [int64]$Parent)',
     `    Write-Output ('${RESULT_PREFIX}' + (@{ released = $count } | ConvertTo-Json -Compress))`,
+    "  } elseif ($Mode -eq 'resize') {",
+    '    $count = [RunContainerWindowHost]::ResizeProcessWindows([uint32]$ProcessId, [int64]$Parent, $InsetTop)',
+    `    Write-Output ('${RESULT_PREFIX}' + (@{ resized = $count } | ConvertTo-Json -Compress))`,
     '  } else {',
     '    $child = [RunContainerWindowHost]::FindMainWindow([uint32]$ProcessId, $TimeoutMs)',
     '    if ($child -eq 0) {',
     `      Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $false; reason = 'the app did not open a window RunContainer could host' } | ConvertTo-Json -Compress))`,
     '    } else {',
-    '      $embedded = [RunContainerWindowHost]::Embed($child, [int64]$Parent)',
+    '      $embedded = [RunContainerWindowHost]::Embed($child, [int64]$Parent, $InsetTop)',
     `      Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $embedded; child = $child; reason = $(if ($embedded) { 'hosted' } else { 'Windows refused to re-parent the app window (this is expected for windows at a lower integrity level)' }) } | ConvertTo-Json -Compress))`,
     '    }',
     '  }',
@@ -189,13 +249,15 @@ function buildWindowHostScript() {
   ].join('\n');
 }
 
-function buildWindowHostScriptArgs(scriptPath, { mode, processId, parentHandle, timeoutMs = 12000 }) {
+function buildWindowHostScriptArgs(scriptPath, { mode, processId, parentHandle, timeoutMs = 12000, insetTop = 0 }) {
   return [
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
     '-Mode', mode,
     '-ProcessId', String(processId),
     '-Parent', String(parentHandle),
     '-TimeoutMs', String(timeoutMs),
+    // Only sent when a caller asks for a header strip, so existing calls stay identical.
+    ...(insetTop > 0 ? ['-InsetTop', String(insetTop)] : []),
   ];
 }
 

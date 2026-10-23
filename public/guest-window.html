@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:">
+    <title>RunContainer — App window</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0;
+            background: #020617;
+            color: #e2e8f0;
+            font-family: "Segoe UI", system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+        /* The hosted app or VM window is parented below this strip, so the header
+           stays visible and the window keeps RunContainer's identity. */
+        header {
+            height: 56px;
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0 14px;
+            border-bottom: 1px solid rgba(96, 165, 250, 0.22);
+            background: #0b1220;
+        }
+        .mark {
+            width: 30px;
+            height: 30px;
+            flex: none;
+            display: grid;
+            place-items: center;
+            border-radius: 9px;
+            background: rgba(96, 165, 250, 0.16);
+            color: #93c5fd;
+            font-size: 16px;
+        }
+        .titles { min-width: 0; flex: 1; }
+        .titles strong {
+            display: block;
+            font-size: 14px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .titles span {
+            display: block;
+            font-size: 11.5px;
+            color: #94a3b8;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .actions { flex: none; display: flex; gap: 8px; }
+        button {
+            border: 1px solid rgba(96, 165, 250, 0.3);
+            border-radius: 8px;
+            background: transparent;
+            color: #e2e8f0;
+            font: inherit;
+            font-size: 12px;
+            padding: 6px 10px;
+            cursor: pointer;
+        }
+        button:hover { background: rgba(96, 165, 250, 0.12); }
+        main {
+            flex: 1;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            text-align: center;
+        }
+        .empty { max-width: 460px; }
+        .empty h1 { font-size: 16px; margin: 0 0 8px; }
+        .empty p { margin: 0 0 6px; font-size: 13px; line-height: 1.55; color: #94a3b8; }
+        .status { font-size: 12px; color: #93c5fd; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="mark">◧</div>
+        <div class="titles">
+            <strong id="app-name">App window</strong>
+            <span id="app-note">This window belongs to RunContainer.</span>
+        </div>
+        <div class="actions">
+            <button id="stop">Stop app</button>
+            <button id="release">Release window</button>
+            <button id="main">RunContainer</button>
+        </div>
+    </header>
+    <main>
+        <div class="empty">
+            <h1>Loading the app window…</h1>
+            <p id="status" class="status">Waiting for the window to appear.</p>
+            <p>If Windows refuses to host it here, RunContainer says so and the app keeps its own window. Hosting is presentation only and does not change isolation.</p>
+        </div>
+    </main>
+    <script src="./guest-window.js"></script>
+</body>
+</html>

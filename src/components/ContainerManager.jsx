@@ -14,10 +14,11 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.0";
-// The only two project links the app opens, both official and public.
+const APP_VERSION_FALLBACK = "0.7.1";
+// The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
+const YOUTUBE_URL = "https://www.youtube.com/@RunContainer";
 const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
@@ -389,7 +390,9 @@ export default function ContainerManager() {
           setInstallMessage(`Could not open the app window: ${result?.error || 'Unknown error.'}`);
           return;
         }
-        setInstallMessage(`App window opened for ${container.name}.`);
+        setInstallMessage(result.embedded
+          ? `${container.name}: window shown inside RunContainer.`
+          : `${container.name}: ${result.note || 'the window opened on your desktop.'}`);
       })
       .catch((error) => {
         setInstallMessage(`Could not open the app window: ${error?.message || 'Unknown error.'}`);
@@ -837,7 +840,7 @@ export default function ContainerManager() {
               <div className="detail-actions">
                 {activeSession.status === 'Running' && <button className="settings-button ghost" onClick={() => handleKill(activeSession)}>Stop app</button>}
                 {(activeSession.status === 'Running' || activeSession.status === 'Unknown') && <button className="settings-button ghost" onClick={() => handleReset(activeSession)}>Reset</button>}
-                {(activeSession.hypervVm || activeSession.activeEngine === 'hyperv') && <button className="settings-button ghost" onClick={() => handleOpenDisplay(activeSession)}>Show app window</button>}
+                {(activeSession.hypervVm || activeSession.activeEngine === 'hyperv' || activeSession.activeEngine === 'qemu') && <button className="settings-button ghost" onClick={() => handleOpenDisplay(activeSession)}>Show app window</button>}
                 <button className="settings-button" onClick={() => setActiveSession(null)}>Back to app list</button>
                 {deletingId === activeSession.id
                   ? <button className="settings-button ghost" onClick={() => handleCancelDelete(activeSession)}>Cancel delete</button>
@@ -1331,6 +1334,23 @@ export default function ContainerManager() {
                 </div>
               </div>
               <div className="profile-card">
+                <strong>Video guides</strong>
+                <span>
+                  Watch the RunContainer YouTube channel to see how it works: installing your first
+                  app, keeping apps apart, and each feature demonstrated step by step. The videos are
+                  a good place to get help when a written guide is not enough.
+                </span>
+                <div className="detail-actions">
+                  <a
+                    className="settings-button info-link-button"
+                    href={YOUTUBE_URL}
+                    onClick={(event) => handleOpenProjectLink(event, YOUTUBE_URL)}
+                  >
+                    Watch on YouTube
+                  </a>
+                </div>
+              </div>
+              <div className="profile-card">
                 <strong>Community</strong>
                 <span>
                   Join the{" "}
@@ -1346,7 +1366,7 @@ export default function ContainerManager() {
               </div>
               <div className="profile-card">
                 <strong>Links open in your browser</strong>
-                <span>RunContainer only opens its own documentation, Discord server and GitHub pages. Every other address is refused.</span>
+                <span>RunContainer only opens its own documentation, YouTube channel, Discord server and GitHub pages. Every other address is refused.</span>
               </div>
             </div>
           </div>
@@ -1477,13 +1497,13 @@ export default function ContainerManager() {
                   <p className="muted">
                     {selectedApp.windowHosting === false
                       ? 'The app opens in its own window.'
-                      : 'Experimental: RunContainer can try to show the app inside its own window. This changes how it looks, not what it can reach, and Windows often refuses.'}
+                      : 'RunContainer shows the app in an app window of its own, with Stop, Release window and a way back to the main window. Installers are shown inside the main window instead. This changes how the app looks, not what it can reach, and Windows can still refuse.'}
                   </p>
                   <div className="detail-actions">
                     {selectedApp.windowHosting === false
-                      ? <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, true)}>Try experimental hosting</button>
+                      ? <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, true)}>Show inside RunContainer</button>
                       : <button className="settings-button ghost" onClick={() => handleSetWindowHosting(selectedApp, false)}>Open in its own window</button>}
-                    {(selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv') && (
+                    {(selectedApp.hypervVm || selectedApp.activeEngine === 'hyperv' || selectedApp.activeEngine === 'qemu') && (
                       <button className="settings-button ghost" onClick={() => handleOpenDisplay(selectedApp)}>Show app window</button>
                     )}
                   </div>

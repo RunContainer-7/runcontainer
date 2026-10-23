@@ -186,6 +186,19 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("links the YouTube channel under Support & documentation in Info", () => {
+    const container = render();
+    openTab(container, "Info");
+    expect(container.textContent).toContain("Video guides");
+    const link = Array.from(container.querySelectorAll("a"))
+      .find((entry) => entry.textContent === "Watch on YouTube");
+    expect(link).not.toBeUndefined();
+    expect(link.getAttribute("href")).toBe("https://www.youtube.com/@RunContainer");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("restores every app tab, including Tweaks, Profiles and Updates", () => {
     const container = render();
     for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"]) {

@@ -6,7 +6,7 @@ name: Stable release
 # - New users: the installer exe is attached to the GitHub Release itself, so
 #   the docs and the release page always point at the newest Setup file.
 #
-# Cut a stable release by tagging: git tag v0.7.0 && git push origin v0.7.0
+# Cut a stable release by tagging: git tag v0.7.1 && git push origin v0.7.1
 # Tags must match package.json. Pre-releases are manual (mark the release
 # "pre-release" on GitHub); this workflow only publishes what you tag.
 

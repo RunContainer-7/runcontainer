@@ -796,6 +796,11 @@ async function runWithHyperV(appRecord, sandboxRoot, logPath) {
     appendLog(logPath, `Running inside Hyper-V VM ${files.vmName}: guest PID ${guestPid} confirmed in-guest (guest list: ${guestPids.join(', ')}), zero host processes from this environment.`);
     monitorHyperVApp(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
+    // The app's window lives in the guest desktop, so it is shown in a RunContainer
+    // window; otherwise the user would see nothing after pressing Run.
+    showHyperVGuestDisplay(appRecord, logPath).catch((error) => {
+      appendLog(logPath, `The app is running, but its window could not be opened automatically: ${error.message} Use Show app window.`);
+    });
     return { id: appRecord.id, status: 'Running', pid: null, guestPid, guestPids, hypervVm: files.vmName, launchMode: 'hyperv', activeEngine: 'hyperv', isolationLevel: 'vm', isolated: true, embedded: false, reason: `Running inside Hyper-V VM ${files.vmName} (guest PID ${guestPid}, verified in-guest, nothing on the host).` };
   } catch (error) {
     appendLog(logPath, `VM launch failed: ${error.message}`);
@@ -1430,10 +1435,178 @@ async function repairAppBehavior(payload = {}) {
   });
 }
 
+// --- Second RunContainer window ------------------------------------------------
+// Not every app can be presented inside the main window: a VM console runs in its
+// own console process, and Windows sometimes refuses to re-parent a window. In those
+// cases RunContainer opens a second window of its own and hosts the app's window
+// under a RunContainer header there, instead of leaving it as a bare desktop window.
+// Hosting is presentation only and adds no isolation.
+const guestWindows = new Map();
+const GUEST_WINDOW_HEADER_PX = 56;
+
+function guestWindowPagePath() {
+  const candidates = [
+    path.join(__dirname, '..', 'build', 'guest-window.html'),
+    path.join(__dirname, '..', 'build', 'build', 'guest-window.html'),
+    path.join(process.resourcesPath || '', 'app', 'build', 'guest-window.html'),
+    path.join(process.resourcesPath || '', 'app', 'build', 'build', 'guest-window.html'),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function setGuestWindowStatus(win, text) {
+  if (!win || win.isDestroyed()) return;
+  win.__rcStatus = text;
+  // Messages sent before the page finishes loading are dropped, so the page asks
+  // for the latest status on load (see did-finish-load below).
+  if (!win.webContents.isLoading()) win.webContents.send('guest-window-status', { text });
+}
+
+function ensureGuestWindow(appRecord, note) {
+  const existing = guestWindows.get(appRecord.id);
+  if (existing && !existing.isDestroyed()) {
+    existing.show();
+    existing.focus();
+    if (note) setGuestWindowStatus(existing, note);
+    return existing;
+  }
+  const title = `RunContainer — ${appRecord.name || 'App window'}`;
+  const win = new BrowserWindow({
+    width: 1180,
+    height: 840,
+    minWidth: 760,
+    minHeight: 480,
+    title,
+    backgroundColor: '#020617',
+    icon: path.join(__dirname, 'runcontainer-icon.ico'),
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+  win.__rcNote = note || '';
+  win.setTitle(title);
+  win.setMenuBarVisibility(false);
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  guestWindows.set(appRecord.id, win);
+
+  win.webContents.once('did-finish-load', () => {
+    if (win.__rcStatus) win.webContents.send('guest-window-status', { text: win.__rcStatus });
+  });
+  // The hosted child is positioned by the main process, so it has to be moved again
+  // when the window changes size. Throttled: resizing fires many events at once.
+  let resizeTimer = null;
+  win.on('resize', () => {
+    if (!win.__rcHostPid) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (win.isDestroyed() || !win.__rcHostPid) return;
+      const handle = nativeHandleToInt(win.getNativeWindowHandle());
+      if (!handle) return;
+      runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+        mode: 'resize',
+        processId: win.__rcHostPid,
+        parentHandle: handle,
+        insetTop: GUEST_WINDOW_HEADER_PX,
+      })).catch(() => {});
+    }, 400);
+    if (resizeTimer.unref) resizeTimer.unref();
+  });
+
+  const pagePath = guestWindowPagePath();
+  const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`;
+  if (pagePath) {
+    win.loadFile(pagePath, { search }).catch((error) => {
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load: ${error.message}`);
+    });
+  } else {
+    // Development without a build: the dev server serves public/ directly.
+    win.loadURL(`http://localhost:3000/guest-window.html?${search}`).catch((error) => {
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load from the dev server: ${error.message}`);
+    });
+  }
+
+  // A hosted child window must be released before its parent disappears, so closing
+  // the window runs the release in the main process first.
+  let closing = false;
+  win.on('close', (event) => {
+    if (closing) return;
+    event.preventDefault();
+    closing = true;
+    const record = getStoredApp(appRecord.id) || appRecord;
+    releaseGuestWindowWindows(record, [...trackedPids(record), record.hostedWindowPid]).finally(() => {
+      if (!win.isDestroyed()) win.destroy();
+    });
+  });
+  win.on('closed', () => {
+    guestWindows.delete(appRecord.id);
+  });
+  return win;
+}
+
+// Re-parents the app's (or the VM console's) window under a second RunContainer
+// window. Returns the host result so callers can say what actually happened.
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000 } = {}) {
+  if (process.platform !== 'win32' || !pid) return null;
+  if (appRecord?.windowHosting === false) return null;
+  const win = ensureGuestWindow(appRecord, note);
+  const parentHandle = nativeHandleToInt(win.getNativeWindowHandle());
+  if (!parentHandle) return null;
+  try {
+    const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+      mode: 'embed',
+      processId: pid,
+      parentHandle,
+      timeoutMs,
+      insetTop: GUEST_WINDOW_HEADER_PX,
+    }));
+    if (result.embedded) {
+      win.__rcHostPid = pid;
+      appendLog(logPath, 'Hosted the window inside a second RunContainer window (window hosting only; it does not change isolation).');
+      setGuestWindowStatus(win, 'Shown inside RunContainer.');
+    } else {
+      appendLog(logPath, `The window stays on the desktop: ${result.reason || 'Windows refused window hosting'}. Isolation is unaffected.`);
+      setGuestWindowStatus(win, `Windows refused to host this window here (${result.reason || 'hosting refused'}), so it is on your desktop instead.`);
+    }
+    const updated = loadApps().map((entry) => (entry.id === appRecord.id
+      ? { ...entry, windowHosted: Boolean(result.embedded), guestWindow: Boolean(result.embedded), hostedWindowPid: result.embedded ? pid : null }
+      : entry));
+    saveApps(updated);
+    return result;
+  } catch (error) {
+    appendLog(logPath, `Window hosting in the second window failed: ${error.message} The window stays on the desktop.`);
+    setGuestWindowStatus(win, `This window could not be hosted: ${error.message}`);
+    return null;
+  }
+}
+
+async function releaseGuestWindowWindows(appRecord, pids, logPath) {
+  const win = guestWindows.get(appRecord?.id);
+  if (!win || win.isDestroyed()) return 0;
+  const parentHandle = nativeHandleToInt(win.getNativeWindowHandle());
+  if (!parentHandle) return 0;
+  const candidates = [...new Set([...(pids || []), appRecord?.hostedWindowPid]
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
+  let released = 0;
+  for (const pid of candidates) {
+    try {
+      const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+        mode: 'release',
+        processId: pid,
+        parentHandle,
+      }));
+      released += Number(result?.released) || 0;
+    } catch (error) {
+      if (logPath) appendLog(logPath, `Could not move the window out of the second RunContainer window: ${error.message}`);
+    }
+  }
+  return released;
+}
+
 // Re-parents the app's window into RunContainer's window. This is presentation only: it adds
 // no isolation, and Windows can refuse it (a lower-integrity window usually cannot be hosted
 // by a higher-integrity one). A failure is logged and the app keeps running normally.
-async function hostAppWindow(appRecord, pid, logPath) {
+async function hostAppWindow(appRecord, pid, logPath, { timeoutMs = 12000 } = {}) {
   if (process.platform !== 'win32' || !pid) return null;
   if (appRecord?.windowHosting === false) return null;
   if (!mainWindow || mainWindow.isDestroyed()) return null;
@@ -1444,7 +1617,7 @@ async function hostAppWindow(appRecord, pid, logPath) {
       mode: 'embed',
       processId: pid,
       parentHandle,
-      timeoutMs: 12000,
+      timeoutMs,
     }));
     if (result.embedded) {
       appendLog(logPath, 'Hosted the app window inside RunContainer (window hosting only; it does not change isolation).');
@@ -1460,28 +1633,77 @@ async function hostAppWindow(appRecord, pid, logPath) {
   }
 }
 
+// Hosts the app window in the main window first and, when Windows refuses that,
+// opens a second RunContainer window and hosts it there. Returns whichever result
+// actually applied, so callers can report it instead of assuming success.
+// Runs of normal apps: presented in a second RunContainer window, whose header keeps
+// Stop, Release window and a way back to the main window reachable. Hosting an
+// ordinary app straight into the main window would cover RunContainer's own controls
+// for as long as the app stays open, so that is only used for installers.
+async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000 } = {}) {
+  if (appRecord?.windowHosting === false) return null;
+  if (process.platform !== 'win32') return null;
+  // Bootstrappers and launchers often create their window in a child process, so the
+  // tracked processes are tried as well before giving up on hosting.
+  const candidates = [...new Set([pid, ...trackedPids(appRecord)])]
+    .filter((candidate) => Number.isSafeInteger(candidate) && candidate > 0)
+    .slice(0, 3);
+  let last = null;
+  for (const candidate of candidates) {
+    last = await hostInGuestWindow(appRecord, candidate, logPath, { note, timeoutMs });
+    if (last?.embedded) return last;
+  }
+  return last;
+}
+
+// Installers are different: the wizard is the whole interaction and closes when setup
+// finishes, so it is hosted in the main RunContainer window when Windows allows it, and
+// otherwise in a second RunContainer window. Either way it does not look like a bare
+// desktop installer.
+async function hostInstallerWindow(appRecord, pid, logPath) {
+  if (appRecord?.windowHosting === false) return null;
+  if (process.platform !== 'win32') return null;
+  const candidates = [...new Set([pid, ...trackedPids(appRecord)])]
+    .filter((candidate) => Number.isSafeInteger(candidate) && candidate > 0)
+    .slice(0, 3);
+  for (const candidate of candidates) {
+    const hosted = await hostAppWindow(appRecord, candidate, logPath, { timeoutMs: 45000 });
+    if (hosted?.embedded) {
+      appendLog(logPath, 'Installer wizard hosted inside the main RunContainer window.');
+      return hosted;
+    }
+  }
+  return hostAppWindowEverywhere(appRecord, pid, logPath, {
+    note: 'Installer wizard: complete it here — it installs into this environment, not your PC.',
+    timeoutMs: 45000,
+  });
+}
+
 // Puts the app's window back on the desktop before the app is stopped or its sandbox deleted,
 // so no window is left parented to a window that is about to be destroyed.
 async function releaseAppWindow(appRecord, pids, logPath) {
   if (process.platform !== 'win32') return null;
-  if (!appRecord?.windowHosted && !appRecord?.pid) return null;
-  if (!mainWindow || mainWindow.isDestroyed()) return null;
-  const parentHandle = nativeHandleToInt(mainWindow.getNativeWindowHandle());
-  const candidates = [...new Set([...(pids || []), appRecord.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
-  if (candidates.length === 0 || !parentHandle) return null;
+  const candidates = [...new Set([...(pids || []), appRecord?.pid, appRecord?.hostedWindowPid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
+  if (!appRecord?.windowHosted && candidates.length === 0 && !guestWindows.has(appRecord?.id)) return null;
   let released = 0;
-  for (const pid of candidates) {
-    try {
-      const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
-        mode: 'release',
-        processId: pid,
-        parentHandle,
-      }));
-      released += Number(result?.released) || 0;
-    } catch (error) {
-      appendLog(logPath, `Could not move the app window back to the desktop: ${error.message}`);
+  const parentHandle = mainWindow && !mainWindow.isDestroyed()
+    ? nativeHandleToInt(mainWindow.getNativeWindowHandle())
+    : 0;
+  if (parentHandle) {
+    for (const pid of candidates) {
+      try {
+        const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+          mode: 'release',
+          processId: pid,
+          parentHandle,
+        }));
+        released += Number(result?.released) || 0;
+      } catch (error) {
+        appendLog(logPath, `Could not move the app window back to the desktop: ${error.message}`);
+      }
     }
   }
+  released += await releaseGuestWindowWindows(appRecord, candidates, logPath);
   if (released > 0) appendLog(logPath, `Returned ${released} app window(s) to the desktop.`);
   return released;
 }
@@ -1583,7 +1805,9 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
     broadcastContainerStatus(updatedApp);
     // Hosting is presentation only and must never hold up the launch or fail it, so it runs
     // after the launch result is already decided.
-    hostAppWindow(updatedApp, pid, logPath).then(() => {
+    hostAppWindowEverywhere(updatedApp, pid, logPath, {
+      note: 'This app runs in its own environment. Its window is hosted here.',
+    }).then(() => {
       const latest = getStoredApp(appRecord.id);
       if (latest) broadcastContainerStatus(latest);
     }).catch(() => {});
@@ -1844,7 +2068,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     broadcastContainerStatus(updatedApp);
     // Hosting is presentation only and must never hold up the launch or fail it, so it runs
     // after the launch result is already decided.
-    hostAppWindow(updatedApp, pid, logPath).then(() => {
+    hostAppWindowEverywhere(updatedApp, pid, logPath, {
+      note: 'This app runs in its own environment. Its window is hosted here.',
+    }).then(() => {
       const latest = getStoredApp(appRecord.id);
       if (latest) broadcastContainerStatus(latest);
     }).catch(() => {});
@@ -2306,6 +2532,17 @@ async function runWithQemu(appRecord, sandboxRoot, logPath) {
       throw new Error(`QEMU backend is not ready: ${status.missing.join(' ')}`);
     }
     const { port } = await bootQemuEnv(appRecord);
+    // Put the VM's display in a RunContainer window while it boots, so the guest
+    // desktop (and any setup wizard inside it) is visible there from the start.
+    const qemuPidForDisplay = qemuProcs.get(appRecord.id)?.pid;
+    if (qemuPidForDisplay) {
+      hostInGuestWindow(appRecord, qemuPidForDisplay, logPath, {
+        note: 'The app and any installer wizard run inside this virtual machine.',
+        timeoutMs: 30000,
+      }).catch((error) => {
+        appendLog(logPath, `The VM window could not be hosted: ${error.message}`);
+      });
+    }
     appendLog(logPath, 'Waiting for the guest agent (Windows must be installed in the base image with qemu-guest-agent)…');
     await waitQemuAgent(port);
     const fresh = getStoredApp(appRecord.id) || appRecord;
@@ -3165,6 +3402,10 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
     const installedGuestPath = String(requestedAppRecord?.installedExeGuestPath || '').trim();
     try {
       const { files, credFile } = await ensureHyperVGuestReady(appRecord, sandboxRoot, logPath);
+      appendLog(logPath, 'Opening the guest display inside RunContainer so the installer wizard is visible.');
+      await showHyperVGuestDisplay(appRecord, logPath).catch((displayError) => {
+        appendLog(logPath, `Guest display could not be opened automatically: ${displayError.message}`);
+      });
       const guestInstaller = `C:\\RunContainer\\${appRecord.id}\\installers\\${path.win32.basename(staged)}`;
       appendLog(logPath, `Copying installer into the guest: ${guestInstaller}`);
       await runHyperVScript(hv.buildCopyToGuestScript({ vm: files.vmName, hostPath: staged, guestPath: guestInstaller }), logPath);
@@ -3207,9 +3448,7 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
     const decision = selectIsolationEngine({ platform: process.platform, appRecord, hypervReady: true });
     return { id: appRecord.id, status: 'Failed', error: `${decision.reason} The installer was not run on the host.` };
   }
-  // AppContainer installer run: same verified launch path as apps, result tracked.
-  const installerRecord = { ...appRecord, source: staged };
-  const scriptPath = ensureIsolationScript();
+  // AppContainer installer run: same verified launch path as apps, result tracked.    const scriptPath = ensureIsolationScript();
   const containerName = appContainerName(appRecord.id);
   try {
     const sidResult = await runIsolationScript(buildAppContainerScriptArgs(scriptPath, { mode: 'sid', containerName }));
@@ -3228,7 +3467,11 @@ ipcMain.handle('install-in-environment', async (_event, requestedAppRecord, inst
     saveApps(loadApps().map((e) => (e.id === appRecord.id ? { ...withTrackedPids(base, pids.length ? pids : [launch.pid]), lastInstallerAt: new Date().toISOString(), lastInstallerPid: launch.pid } : e)));
     appendLog(logPath, `Installer running inside AppContainer ${containerName} (PID ${launch.pid}); children tracked for Delete.`);
     monitorAppProcesses(appRecord.id, logPath);
-    return { id: appRecord.id, status: 'Running', engine: 'appcontainer', pid: launch.pid, detail: 'Installer is running inside the AppContainer; its children stay tracked after it exits.' };
+    // The installer's wizard is the only thing the user can interact with, so it is
+    // hosted in RunContainer like any app window — never left as a bare desktop window.
+    // Installers can take longer to show a window than an app, so the wait is longer.
+    hostInstallerWindow(getStoredApp(appRecord.id) || appRecord, launch.pid, logPath).catch(() => {});
+    return { id: appRecord.id, status: 'Running', engine: 'appcontainer', pid: launch.pid, detail: 'Installer is running inside the AppContainer; its wizard is hosted in RunContainer, and its children stay tracked after it exits.' };
   } catch (error) {
     appendLog(logPath, `Installer launch failed: ${error.message}`);
     return { id: appRecord.id, status: 'Failed', error: `${error.message} The installer was not run without isolation.` };
@@ -3391,32 +3634,107 @@ ipcMain.handle('reset-environment', async (_event, requestedAppRecord) => {
   }
 });
 
-// Guest display: opens the supported VM console (VMConnect) for this
-// environment's VM. This is a separate display window, not embedding, and is
-// never presented as isolation.
+// Guest display: shows the VM console for this environment inside a second
+// RunContainer window when Windows lets RunContainer host it. This is presentation
+// only and is never presented as isolation.
+async function showHyperVGuestDisplay(appRecord, logPath) {
+  const existing = guestWindows.get(appRecord.id);
+  if (existing && !existing.isDestroyed() && existing.__rcHostPid) {
+    existing.show();
+    existing.focus();
+    return { vm: appRecord.hypervVm, embedded: true, reused: true };
+  }
+  const hv = require('./hyperv-runtime');
+  const vmInfo = await runHyperVScript(hv.buildGetVmScript(appRecord.hypervVm), logPath);
+  if (!vmInfo.exists) throw new Error(`VM ${appRecord.hypervVm} does not exist. Run the app to recreate it from its disk.`);
+  if (vmInfo.state !== 'Running') {
+    await runHyperVScript(hv.buildStartVmScript(appRecord.hypervVm), logPath);
+    await runHyperVScript(hv.buildWaitForGuestReadyScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), timeoutSec: 300 }), logPath);
+  }
+  const child = spawn('vmconnect.exe', ['localhost', appRecord.hypervVm], { detached: true, stdio: 'ignore', windowsHide: false });
+  child.unref();
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  // VMConnect is the supported console for Hyper-V. Hosting it puts the guest
+  // desktop — and any installer wizard running inside it — in a RunContainer window.
+  const hosted = await hostInGuestWindow(appRecord, child.pid, logPath, {
+    note: 'The app and any installer wizard run inside this virtual machine.',
+    timeoutMs: 45000,
+  });
+  return { vm: appRecord.hypervVm, vmconnectPid: child.pid, embedded: Boolean(hosted?.embedded) };
+}
+
 ipcMain.handle('open-guest-display', async (_event, requestedAppRecord) => {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
-  if (!appRecord.hypervVm) return { id: appRecord.id, status: 'Failed', error: 'Guest display needs a Hyper-V environment (this app has no VM yet — Run it once first).' };
-  if (process.platform !== 'win32') return { id: appRecord.id, status: 'Failed', error: 'Guest display requires Windows.' };
+  if (process.platform !== 'win32') return { id: appRecord.id, status: 'Failed', error: 'Opening an app window requires Windows.' };
+  const appLog = path.join(appRecord.logsRoot || path.join(appRecord.sandboxRoot || '', 'logs'), `${sanitizeName(appRecord.name || 'app')}.log`);
   try {
-    const hv = require('./hyperv-runtime');
-    const vmInfo = await runHyperVScript(hv.buildGetVmScript(appRecord.hypervVm), path.join(app.getPath('userData'), 'runcontainer-error.log'));
-    if (!vmInfo.exists) throw new Error(`VM ${appRecord.hypervVm} does not exist. Run the app to recreate it from its disk.`);
-    if (vmInfo.state !== 'Running') {
-      await runHyperVScript(hv.buildStartVmScript(appRecord.hypervVm), path.join(app.getPath('userData'), 'runcontainer-error.log'));
-      await runHyperVScript(hv.buildWaitForGuestReadyScript({ vm: appRecord.hypervVm, credFile: guestCredentialFile(), timeoutSec: 300 }), path.join(app.getPath('userData'), 'runcontainer-error.log'));
+    if (isQemuEnv(appRecord)) {
+      const qemuPid = qemuProcs.get(appRecord.id)?.pid || appRecord.qemuPid || appRecord.pid;
+      if (!qemuPid) throw new Error('The virtual machine is not running. Run the app first.');
+      const hosted = await hostInGuestWindow(appRecord, qemuPid, appLog, {
+        note: 'The app and any installer wizard run inside this virtual machine.',
+        timeoutMs: 30000,
+      });
+      return {
+        id: appRecord.id,
+        status: 'Displaying',
+        engine: 'qemu',
+        embedded: Boolean(hosted?.embedded),
+        note: hosted?.embedded
+          ? 'Shown inside RunContainer.'
+          : 'Windows refused to host the VM window, so it stays on your desktop.',
+      };
     }
-    const child = spawn('vmconnect.exe', ['localhost', appRecord.hypervVm], { detached: true, stdio: 'ignore', windowsHide: false });
-    child.unref();
-    await new Promise((resolve, reject) => {
-      child.once('spawn', resolve);
-      child.once('error', reject);
+    if (appRecord.hypervVm) {
+      const shown = await showHyperVGuestDisplay(appRecord, appLog);
+      return {
+        id: appRecord.id,
+        status: 'Displaying',
+        engine: 'hyperv',
+        vm: shown.vm,
+        embedded: Boolean(shown.embedded),
+        note: shown.embedded
+          ? 'Shown inside RunContainer.'
+          : 'Windows refused to host the VM console, so it stays on your desktop.',
+      };
+    }
+    const pids = trackedPids(appRecord);
+    if (pids.length === 0) throw new Error('This app is not running. Run it first, then open its window.');
+    const hosted = await hostInGuestWindow(appRecord, appRecord.pid || pids[0], appLog, {
+      note: 'This app runs in its own environment. Its window is hosted here.',
+      timeoutMs: 30000,
     });
-    return { id: appRecord.id, status: 'Displaying', vm: appRecord.hypervVm };
+    if (!hosted?.embedded) {
+      throw new Error('Windows refused to host this app’s window inside RunContainer, so it keeps its own window. Isolation is unaffected.');
+    }
+    return { id: appRecord.id, status: 'Displaying', embedded: true, note: 'Shown inside RunContainer.' };
   } catch (error) {
-    return { id: appRecord.id, status: 'Failed', error: `Could not open the guest display: ${error.message}` };
+    return { id: appRecord.id, status: 'Failed', error: `Could not open the app window: ${error.message}` };
   }
+});
+
+ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
+  const appRecord = getStoredApp(payload.appId);
+  if (!appRecord?.id) return { ok: false, error: 'That app is no longer in RunContainer’s app list.' };
+  const win = guestWindows.get(appRecord.id);
+  if (payload.action === 'focus-main') {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    return { ok: true };
+  }
+  if (payload.action === 'release') {
+    const released = await releaseGuestWindowWindows(appRecord, [...trackedPids(appRecord), appRecord.hostedWindowPid]);
+    if (win && !win.isDestroyed()) win.__rcHostPid = null;
+    return { ok: true, released };
+  }
+  return { ok: false, error: 'Unknown window action.' };
 });
 
 // The UI asks the main process for the version, so package.json stays the single source.
@@ -3735,9 +4053,9 @@ ipcMain.handle('qemu-set-guest-exe', async (_event, requestedAppRecord) => {
   return { id: appRecord.id, status: updated.status, installedExeGuestPath: guestPath };
 });
 
-// Documented project links only (docs site, Discord, source). The renderer never
-// gets to open an arbitrary URL: anything else is refused with a reason.
-const EXTERNAL_LINK_HOSTS = ['runcontainer-7.github.io', 'discord.gg', 'discord.com', 'github.com'];
+// Documented project links only (docs site, YouTube channel, Discord, source). The
+// renderer never gets to open an arbitrary URL: anything else is refused with a reason.
+const EXTERNAL_LINK_HOSTS = ['runcontainer-7.github.io', 'youtube.com', 'www.youtube.com', 'discord.gg', 'discord.com', 'github.com'];
 ipcMain.handle('open-external-url', async (_event, url) => {
   let parsed = null;
   try {
