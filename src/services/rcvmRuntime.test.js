@@ -74,6 +74,27 @@ describe('RCVM user-mode container backend', () => {
     expect(script.indexOf('Write-Output $startJson')).toBeLessThan(script.indexOf('[RcvmLauncher]::WaitForExit'));
   });
 
+  it('keeps the job alive until the last process in it exits', () => {
+    // A bootstrapper can exit as soon as it has started the real program. If the
+    // launcher closed the job at that moment, kill-on-close would end that child.
+    const script = buildRcvmLaunchScript(SCRIPT_OPTS);
+    expect(script).toContain('INFO_BASIC_ACCOUNTING');
+    expect(script).toContain('ActiveProcesses(job)');
+    expect(script).toContain('JOBOBJECT_BASIC_ACCOUNTING_INFORMATION');
+    // The wait must poll the job after the root process has exited.
+    const wait = script.slice(script.indexOf('public static string WaitForExit'));
+    expect(wait).toContain('WaitForSingleObject(proc, INFINITE)');
+    expect(wait.indexOf('WaitForSingleObject')).toBeLessThan(wait.indexOf('ActiveProcesses(job)'));
+    expect(wait.indexOf('ActiveProcesses(job)')).toBeLessThan(wait.indexOf('CloseHandle(current)'));
+  });
+
+  it('passes only validated runtime environment entries to the app', () => {
+    const script = buildRcvmLaunchScript({ ...SCRIPT_OPTS, runtimeEnv: { DOTNET_TieredPGO: '1' } });
+    expect(script).toContain("$env:DOTNET_TieredPGO = '1'");
+    expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, runtimeEnv: { PATH: 'C:\\x' } })).toThrow();
+    expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, runtimeEnv: { DOTNET_TieredPGO: "1'; Remove-Item C:\\x" } })).toThrow();
+  });
+
   it('requires the profile folder for the launcher', () => {
     expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, userProfileDir: undefined })).toThrow();
   });

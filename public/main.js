@@ -59,6 +59,7 @@ const behavioralMonitor = require('../src/utils/behavioralMonitor');
 const { createBrain, REGISTRY_PATH: AI_REGISTRY_PATH } = require('../src/ai/engine');
 const { createExperienceStore } = require('../src/ai/experiences');
 const repairVerification = require('../src/utils/repairVerifier');
+const runtimeProfile = require('../src/services/runtimeProfile');
 const aiKnowledge = require('../src/ai/knowledge.json');
 
 // A failure while loading the main process would otherwise surface as Electron's
@@ -122,6 +123,25 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 app.setName('RunContainer');
 app.setAppUserModelId('RunContainer');
+
+// Reads only the PE header area of the copied executable: no launching, no disk
+// scan. The result is what the Tweaks panel reports, so the claim about JIT
+// comes from the file itself rather than from its name or extension.
+function detectAppRuntime(sourcePath) {
+  try {
+    if (!sourcePath || !fs.existsSync(sourcePath)) return null;
+    const handle = fs.openSync(sourcePath, 'r');
+    try {
+      const buffer = Buffer.alloc(4096);
+      const read = fs.readSync(handle, buffer, 0, buffer.length, 0);
+      return runtimeProfile.detectRuntime(buffer.subarray(0, read));
+    } finally {
+      fs.closeSync(handle);
+    }
+  } catch (error) {
+    return null;
+  }
+}
 
 function ensureStoreFile() {
   if (!fs.existsSync(appStorePath)) {
@@ -455,6 +475,12 @@ function withTrackedPids(appRecord, pids) {
   return { ...appRecord, knownPids: [...new Set([...trackedPids(appRecord), ...(pids || [])])] };
 }
 
+// One Windows process-table query costs roughly 0.6s (see
+// scripts/benchmark-launch.js). Polling every 1.5s therefore kept a PowerShell
+// process busy almost half the time an app was open. Five seconds still notices
+// a closed app quickly and matches RC-Brain's own observation cadence.
+const PROCESS_POLL_INTERVAL_MS = 5000;
+
 function monitorAppProcesses(appId, logPath) {
   stopMonitor(appId);
   // A PowerShell process query can take longer than the poll interval; skip ticks while one is still running.
@@ -467,8 +493,47 @@ function monitorAppProcesses(appId, logPath) {
     } finally {
       checking = false;
     }
-  }, 1500);
+  }, PROCESS_POLL_INTERVAL_MS);
   sandboxMonitors.set(appId, interval);
+}
+
+// Measured launch timings for the Settings card. These are observations from
+// this PC, never estimates, and the file is bounded so it cannot grow forever.
+const performancePath = path.join(app.getPath('userData'), 'runcontainer-performance.json');
+function loadPerformance() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(performancePath, 'utf8'));
+    return Array.isArray(parsed?.launches) ? parsed : { launches: [] };
+  } catch (error) {
+    return { launches: [] };
+  }
+}
+function recordLaunchTiming(entry) {
+  try {
+    const data = loadPerformance();
+    data.launches = [...data.launches, entry].slice(-50);
+    fs.writeFileSync(performancePath, JSON.stringify(data), 'utf8');
+  } catch (error) {
+    // Timings are best-effort; a launch never fails because of them.
+  }
+}
+function performanceSummary() {
+  const launches = loadPerformance().launches.filter((entry) => Number.isFinite(entry?.totalMs));
+  const values = launches.map((entry) => entry.totalMs).sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  const median = values.length === 0
+    ? null
+    : (values.length % 2 ? values[mid] : Math.round((values[mid - 1] + values[mid]) / 2));
+  const last = launches[launches.length - 1] || null;
+  return {
+    sampleCount: launches.length,
+    medianLaunchMs: median,
+    lastLaunchMs: last?.totalMs ?? null,
+    lastLaunchAt: last?.at || null,
+    lastAppName: last?.name || null,
+    backend: 'RCVM containment (Job Object caps + per-app profile)',
+    monitorIntervalMs: PROCESS_POLL_INTERVAL_MS,
+  };
 }
 
 async function checkAppProcesses(appId, logPath) {
@@ -1619,6 +1684,7 @@ async function stopRcvmLauncher(appRecord, logPath) {
 // Anything that cannot be contained fails closed; nothing runs uncontained.
 async function runWithRcvm(appRecord, sandboxRoot, logPath) {
   const rcvm = require('./rcvm-runtime');
+  const launchStartedAt = Date.now();
   let launcherChild = null;
   try {
     const limitCheck = rcvm.validateRcvmLimits({
@@ -1631,6 +1697,11 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     const argCheck = require('./hyperv-runtime').validateLaunchArgs(appRecord.launchArgs);
     if (!argCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argCheck.reason} Nothing was launched.`);
     const profile = ensureRcvmProfile(sandboxRoot);
+    // The only runtime knobs RunContainer sets are documented .NET ones, and
+    // only for a managed app. Native code gets no environment changes.
+    const runtimeEnv = runtimeProfile.sanitizeEnvironment(
+      runtimeProfile.runtimeEnvironment(appRecord.runtimeJit, appRecord.runtime?.kind),
+    );
     const scriptText = rcvm.buildRcvmLaunchScript({
       jobName: rcvm.rcvmJobName(appRecord.id),
       executablePath: appRecord.source,
@@ -1640,9 +1711,14 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       tempDir: profile.temp,
       userProfileDir: profile.userProfile,
       launchArgs: argCheck.args || '',
+      runtimeEnv,
       memoryCapBytes: limitCheck.limits.memoryCapBytes,
       cpuRate: limitCheck.limits.cpuRate,
       maxProcesses: limitCheck.limits.maxProcesses,
+      // Compiling the launcher's C# dominated launch latency; the compiled
+      // assembly is cached per launcher version under RunContainer's data.
+      launcherCacheDir: path.join(app.getPath('userData'), 'rcvm-cache'),
+      launcherCacheKey: rcvm.rcvmLauncherCacheKey(),
     });
     const scriptPath = path.join(app.getPath('userData'), `runcontainer-rcvm-${appRecord.id}.ps1`);
     fs.writeFileSync(scriptPath, scriptText, 'utf8');
@@ -1651,6 +1727,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     // The launcher's pipes are the only live stdout/stderr a detached GUI app has;
     // the monitor reads them alongside the app's log file.
     launcherChild.stdout?.on('data', (chunk) => liveLogBuffer(appRecord.id).push(String(chunk)));
+    if (Object.keys(runtimeEnv).length > 0) {
+      appendLog(logPath, `Runtime strategy “${runtimeProfile.strategyLabel(appRecord.runtimeJit)}” applied to this managed .NET app: ${Object.entries(runtimeEnv).map(([key, value]) => `${key}=${value}`).join(', ')}.`);
+    }
     const launcherPid = launcherChild.pid;
     rcvmLaunchers.set(appRecord.id, launcherChild);
     let launcherOutput = '';
@@ -1733,7 +1812,13 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       if (pids.length > 0) break;
       await delay(400);
     }
-    if (pids.length === 0) throw new Error('The contained process exited before RunContainer could confirm it.');
+    if (pids.length === 0) {
+      // The launcher reports the app's own exit code when the process it started
+      // ends. Naming it turns "it exited" into something a user can act on.
+      const launcherState = rcvm.parseRcvmLauncherOutput(launcherOutput);
+      const exitCode = Number.isInteger(launcherState.exitCode) ? ` (exit code ${launcherState.exitCode})` : '';
+      throw new Error(`The contained process exited before RunContainer could confirm it${exitCode}. Nothing is left running in its environment. Installers and launchers that refuse to start inside a Job Object need a virtual machine environment instead.`);
+    }
 
     const base = getStoredApp(appRecord.id) || appRecord;
     const updatedApp = {
@@ -1752,6 +1837,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updatedApp : entry)));
     appendLog(logPath, `Launched contained (RCVM job ${updatedApp.rcvmJob}, memory cap ${limitCheck.limits.memoryMB} MB, ${limitCheck.limits.cpuCount} CPUs of compute, ${limitCheck.limits.maxProcesses} processes), PID ${pid}. Profile folders redirected under the environment.`);
+    const totalMs = Date.now() - launchStartedAt;
+    appendLog(logPath, `Launch confirmed ${totalMs} ms after the request (measured on this PC).`);
+    recordLaunchTiming({ at: new Date().toISOString(), appId: appRecord.id, name: appRecord.name, totalMs });
     monitorAppProcesses(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
     // Hosting is presentation only and must never hold up the launch or fail it, so it runs
@@ -2574,18 +2662,24 @@ ipcMain.handle('list-apps', async () => {
       // Keep the persisted state if the process query is temporarily unavailable.
     }
   }));
+  let runtimeFilled = false;
   const reconciled = loadApps().map((entry) => {
     const root = entry.sandboxRoot || (entry.source ? path.dirname(entry.source) : '');
+    // Apps installed before runtime detection existed get classified once, then
+    // the answer is stored with the record.
+    const runtime = entry.runtime || (entry.source ? detectAppRuntime(entry.source) : null);
+    if (!entry.runtime && runtime) runtimeFilled = true;
     return {
       ...entry,
+      runtime,
       envDirPresent: root ? fs.existsSync(root) : false,
       sourcePresent: entry.source ? fs.existsSync(entry.source) : false,
       diskPresent: entry.hypervVhd ? fs.existsSync(entry.hypervVhd) : null,
     };
   });
-  if (updatesById.size === 0) return reconciled;
+  if (updatesById.size === 0 && !runtimeFilled) return reconciled;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
-  const current = mergeStatusUpdates(reconciled, updatesById);
+  const current = updatesById.size ? mergeStatusUpdates(reconciled, updatesById) : reconciled;
   saveApps(current.map(({ envDirPresent, sourcePresent, diskPresent, ...rest }) => rest));
   return current;
 });
@@ -2621,6 +2715,7 @@ async function installExe(exePath) {
     programFilesRoot: sandboxLayout.programFiles,
     programDataRoot: sandboxLayout.programData,
     metadata,
+    runtime: detectAppRuntime(destination),
     iconPath: extractedIcon || null,
     permissions: { network: profile.network, filesystem: profile.filesystem, registry: profile.registry },
     profile: 'default',
@@ -3213,6 +3308,15 @@ ipcMain.handle('set-app-config', async (_event, requestedAppRecord) => {
     }
     patch.vmCpuCount = cpu;
   }
+  if (requestedAppRecord?.runtimeJit !== undefined) {
+    const strategy = runtimeProfile.normalizeStrategy(requestedAppRecord.runtimeJit);
+    const runtime = appRecord.runtime || detectAppRuntime(appRecord.source);
+    if (runtime && !appRecord.runtime) patch.runtime = runtime;
+    if (strategy !== 'auto' && runtime?.kind !== 'dotnet') {
+      return { id: appRecord.id, status: 'Failed', error: 'This app is not a managed .NET program, so there is no JIT strategy to set.' };
+    }
+    patch.runtimeJit = strategy;
+  }
   if (requestedAppRecord?.networkEnabled !== undefined) {
     patch.networkEnabled = requestedAppRecord.networkEnabled !== false;
   }
@@ -3317,6 +3421,9 @@ ipcMain.handle('open-guest-display', async (_event, requestedAppRecord) => {
 
 // The UI asks the main process for the version, so package.json stays the single source.
 ipcMain.handle('get-app-version', async () => ({ version: app.getVersion() }));
+
+// Measured launch timings for the Settings card (this PC only, no telemetry).
+ipcMain.handle('get-performance', async () => performanceSummary());
 
 // Update checks against GitHub Releases (stable only). Cached so launch and the
 // Updates tab share one result; force:true re-checks. Never throws: failures

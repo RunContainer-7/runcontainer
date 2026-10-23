@@ -118,6 +118,15 @@ export async function checkForUpdate() {
   }
 }
 
+export async function getPerformance() {
+  if (!ipcRenderer) return null;
+  try {
+    return await ipcRenderer.invoke('get-performance');
+  } catch (error) {
+    return null;
+  }
+}
+
 export async function getAppVersion() {
   if (!ipcRenderer) return null;
   try {

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.10";
+const APP_VERSION_FALLBACK = "0.7.0";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -58,6 +58,8 @@ export default function ContainerManager() {
   const [tweakArgs, setTweakArgs] = useState("");
   const [tweakMemory, setTweakMemory] = useState("4096");
   const [tweakCpu, setTweakCpu] = useState("2");
+  const [tweakRuntime, setTweakRuntime] = useState("auto");
+  const [performanceInfo, setPerformanceInfo] = useState(null);
   const [aiStatus, setAiStatus] = useState(null);
   const [aiDecision, setAiDecision] = useState(null);
   const [aiRepairing, setAiRepairing] = useState(false);
@@ -125,6 +127,14 @@ export default function ContainerManager() {
     if (record.status) updateContainerStatus(record.id, record.status);
     setActiveSession((current) => current?.id === record.id ? { ...current, ...record } : current);
   }), [updateContainerStatus]);
+
+  // Measured launch timings, read when Settings is opened. They are observations
+  // from this PC, so the card can stay silent until something has been launched.
+  useEffect(() => {
+    if (activeTab !== 'Settings') return undefined;
+    Promise.resolve(getPerformance()).then((info) => { if (info) setPerformanceInfo(info); }).catch(() => {});
+    return undefined;
+  }, [activeTab]);
 
   useEffect(() => {
     Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); }).catch(() => {});
@@ -390,7 +400,7 @@ export default function ContainerManager() {
     if (!container) return;
     // Network follows the profile only; saving tweaks must not turn a locked app
     // back online by writing a default networkEnabled.
-    setAppConfig({ id: container.id, launchArgs: tweakArgs, vmMemoryMB: Number(tweakMemory), vmCpuCount: Number(tweakCpu) })
+    setAppConfig({ id: container.id, launchArgs: tweakArgs, vmMemoryMB: Number(tweakMemory), vmCpuCount: Number(tweakCpu), runtimeJit: tweakRuntime })
       .then((result) => {
         if (result?.status === 'Failed') {
           setInstallMessage(`Could not save tweaks: ${result.error}`);
@@ -928,6 +938,7 @@ export default function ContainerManager() {
                   setTweakArgs(picked.launchArgs || "");
                   setTweakMemory(String(picked.vmMemoryMB || 4096));
                   setTweakCpu(String(picked.vmCpuCount || 2));
+                  setTweakRuntime(picked.runtimeJit || "auto");
                 }
               }}
             >
@@ -947,6 +958,52 @@ export default function ContainerManager() {
             </div>
             <p className="muted">Memory and CPU limits apply the next time you press Run.</p>
           </div>
+          {(() => {
+            // JIT is a property of a runtime, not a dial for a native exe. This
+            // card reports what the selected app actually runs on, and only
+            // offers a strategy when the .NET runtime is the one doing the work.
+            const picked = appContainers.find((entry) => entry.id === tweakAppId);
+            const runtime = picked?.runtime;
+            const isManaged = runtime?.kind === "dotnet";
+            return (
+              <div className="profile-list runtime-panel">
+                <div className="profile-card active">
+                  <strong>Runtime &amp; JIT</strong>
+                  <span>
+                    {runtime
+                      ? `${runtime.label}${runtime.machine ? ` · ${runtime.machine}` : ""}${runtime.subsystem && runtime.subsystem !== "unknown" ? ` · ${runtime.subsystem}` : ""}`
+                      : "Select an app to see what it runs on."}
+                  </span>
+                  <span className="muted">
+                    {runtime?.jit || "Detection reads the app’s own executable header; nothing is launched."}
+                  </span>
+                </div>
+                <div className="profile-card">
+                  <strong>.NET JIT strategy</strong>
+                  <span>
+                    {isManaged
+                      ? "The .NET runtime compiles this app’s IL itself. Pick how it balances startup work against long-run speed."
+                      : "Not applicable: a native app is already machine code, so there is no JIT strategy to set."}
+                  </span>
+                  <div className="detail-actions">
+                    <select
+                      aria-label="JIT strategy"
+                      value={tweakRuntime}
+                      onChange={(event) => setTweakRuntime(event.target.value)}
+                      disabled={!isManaged || !picked}
+                    >
+                      <option value="auto">Automatic (runtime default)</option>
+                      <option value="fast-start">Fast start (less background compilation)</option>
+                      <option value="throughput">Maximum speed (tiered compilation + PGO)</option>
+                    </select>
+                  </div>
+                  <span className="muted">
+                    RunContainer runs on Electron’s V8, which already JIT-compiles JavaScript. That is built in, and there is no per-app switch for it. Changes apply the next time you press Run.
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1009,6 +1066,31 @@ export default function ContainerManager() {
             <div className="profile-card">
               <strong>Logs</strong>
               <span>Launch, stop and exit events are written to each app’s log, which you can open with the Logs button.</span>
+            </div>
+          </div>
+
+          <div className="profile-list performance-panel">
+            <div className="profile-card">
+              <strong>Performance on this PC</strong>
+              <span className="muted">{performanceInfo?.backend || "RCVM containment: Job Object caps and a per-app profile."}</span>
+              {performanceInfo?.sampleCount > 0 ? (
+                <>
+                  <span>
+                    Last launch: <strong>{performanceInfo.lastLaunchMs} ms</strong>
+                    {performanceInfo.lastAppName ? ` (${performanceInfo.lastAppName})` : ""}. Median of the last {performanceInfo.sampleCount} launch{performanceInfo.sampleCount === 1 ? "" : "es"}: <strong>{performanceInfo.medianLaunchMs} ms</strong>.
+                  </span>
+                  <span className="muted">
+                    Measured from the moment you press Run to the moment containment is confirmed; application readiness is not included. These numbers are recorded locally and never uploaded.
+                  </span>
+                </>
+              ) : (
+                <span className="muted">
+                  No launch has been measured yet. Press Run once and the time from request to confirmed containment appears here.
+                </span>
+              )}
+              <span className="muted">
+                Running apps are checked every {Math.round((performanceInfo?.monitorIntervalMs || 5000) / 1000)} seconds. Each check queries Windows for the app’s processes, so this interval is the main background cost.
+              </span>
             </div>
           </div>
 

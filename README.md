@@ -103,7 +103,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.6.10 && git push origin v0.6.10
+git tag v0.7.0 && git push origin v0.7.0
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

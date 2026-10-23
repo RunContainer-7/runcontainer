@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.6.10"
+#define MyAppVersion "0.7.0"
 #endif
 #ifndef MyAppRoot
 #define MyAppRoot "C:\RunContainer\runcontainer"

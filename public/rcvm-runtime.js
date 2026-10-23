@@ -73,6 +73,12 @@ function validateRcvmLimits({ memoryMB, cpuCount, maxProcesses, processorCount }
   };
 }
 
+// Identifies the C# source so a cached assembly can only be reused for the same
+// launcher. Change RCVM_CSHARP and the key changes with it.
+function rcvmLauncherCacheKey() {
+  return crypto.createHash('sha256').update(RCVM_CSHARP).digest('hex').slice(0, 16);
+}
+
 function rcvmJobName(appId) {
   const hash = crypto.createHash('sha256').update(String(appId)).digest('hex').slice(0, 12);
   return `RunContainer-RCVM-${hash}`;
@@ -97,6 +103,7 @@ public class RcvmLauncher {
   const uint LIMIT_ACTIVE_PROCESS = 0x00000008;
   const int INFO_EXTENDED_LIMIT = 9;
   const int INFO_CPU_RATE = 15;
+  const int INFO_BASIC_ACCOUNTING = 1;
   const uint CPU_ENABLE = 0x1;
   const uint CPU_HARD_CAP = 0x4;
 
@@ -139,6 +146,18 @@ public class RcvmLauncher {
   struct JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
     public uint ControlFlags;
     public uint CpuRate;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+    public long TotalUserTime;
+    public long TotalKernelTime;
+    public long ThisPeriodTotalUserTime;
+    public long ThisPeriodTotalKernelTime;
+    public uint TotalPageFaultCount;
+    public uint TotalProcesses;
+    public uint ActiveProcesses;
+    public uint TotalTerminatedProcesses;
   }
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -356,18 +375,48 @@ public class RcvmLauncher {
     }
   }
 
+  // Number of processes still alive in the job. Zero also means the query failed,
+  // which ends the wait rather than holding a job open forever.
+  static uint ActiveProcesses(IntPtr job) {
+    int size = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+    IntPtr buf = Marshal.AllocHGlobal(size);
+    try {
+      if (!QueryInformationJobObject(job, INFO_BASIC_ACCOUNTING, buf, (uint)size, IntPtr.Zero)) return 0;
+      var info = (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(buf, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+      return info.ActiveProcesses;
+    } finally { Marshal.FreeHGlobal(buf); }
+  }
+
   public static string WaitForExit(string jobName, int pid) {
     try {
       IntPtr proc;
-      lock (jobs) { JobProcessHandles.TryGetValue(jobName, out proc); }
+      IntPtr job;
+      lock (jobs) {
+        JobProcessHandles.TryGetValue(jobName, out proc);
+        jobs.TryGetValue(jobName, out job);
+      }
       if (proc == IntPtr.Zero) return "{\\"pid\\":" + pid + ",\\"exitCode\\":null,\\"note\\":\\"launcher lost the process handle\\"}";
       WaitForSingleObject(proc, INFINITE);
       uint code;
       GetExitCodeProcess(proc, out code);
       CloseHandle(proc);
+      // A bootstrapper (installer, updater, launcher) can exit after handing the
+      // real work to a child. Closing the job here would end that child through
+      // kill-on-close, so keep the job - and its caps - until the job is empty.
+      // Three quiet checks (~450ms) cover a child that is still being created.
+      int quiet = 0;
+      while (job != IntPtr.Zero) {
+        if (ActiveProcesses(job) == 0) {
+          quiet += 1;
+          if (quiet >= 3) break;
+        } else {
+          quiet = 0;
+        }
+        System.Threading.Thread.Sleep(150);
+      }
       lock (jobs) {
-        IntPtr job;
-        if (jobs.TryGetValue(jobName, out job)) { CloseHandle(job); jobs.Remove(jobName); }
+        IntPtr current;
+        if (jobs.TryGetValue(jobName, out current)) { CloseHandle(current); jobs.Remove(jobName); }
         JobProcessHandles.Remove(jobName);
       }
       return "{\\"pid\\":" + pid + ",\\"exitCode\\":" + code + "}";
@@ -381,8 +430,13 @@ public class RcvmLauncher {
 // Builds the .ps1 launcher. Profile dirs must already exist (Node creates them).
 // $env: overrides are set AFTER Add-Type so compiler temp files use the real
 // profile; the app inherits the redirected profile from the launcher.
-
-
+//
+// Compiling the C# with Add-Type costs roughly as much as starting the app, so
+// when launcherCacheDir is given the assembly is compiled once and loaded from
+// disk afterwards. launcherCacheKey must change whenever RCVM_CSHARP does, so a
+// cached assembly from an older build is never loaded (main.js hashes the
+// source). Without a cache dir the launcher compiles in memory every run, which
+// is what the unit tests and the verification script exercise.
 function buildRcvmLaunchScript({
   jobName,
   executablePath,
@@ -395,12 +449,28 @@ function buildRcvmLaunchScript({
   memoryCapBytes,
   cpuRate,
   maxProcesses,
+  runtimeEnv = {},
+  launcherCacheDir,
+  launcherCacheKey,
 } = {}) {
   if (!jobName || !executablePath || !workingDirectory || !appDataDir || !localAppDataDir || !tempDir || !userProfileDir) {
     throw new Error('RCVM launcher needs a job name, executable, working directory, and profile folders.');
   }
   if (!Number.isSafeInteger(memoryCapBytes) || !Number.isSafeInteger(cpuRate) || !Number.isSafeInteger(maxProcesses)) {
     throw new Error('RCVM launcher needs numeric job limits (validate them first).');
+  }
+  if (launcherCacheDir && !launcherCacheKey) {
+    throw new Error('RCVM launcher cache needs a key so a stale assembly cannot load.');
+  }
+  // Runtime knobs (currently only documented .NET switches) must be plain
+  // NAME=value pairs; anything else is refused instead of reaching PowerShell.
+  const runtimeEnvEntries = Object.entries(runtimeEnv || {});
+  for (const [key, value] of runtimeEnvEntries) {
+    // Variable names keep their documented spelling (DOTNET_TieredPGO), so
+    // letters of either case are allowed; values stay to plain tokens.
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) || !/^[0-9A-Za-z._-]{1,64}$/.test(String(value))) {
+      throw new Error(`Refusing to set an unsafe runtime environment entry: ${key}.`);
+    }
   }
   // USERPROFILE/HOMEDRIVE/HOMEPATH are set alongside APPDATA so more
   // well-behaved apps resolve into the per-app profile. This is still
@@ -410,10 +480,31 @@ function buildRcvmLaunchScript({
   const driveMatch = normalized.match(/^([A-Za-z]:)(\\.*)?$/);
   const homeDrive = driveMatch ? driveMatch[1] : 'C:';
   const homePath = driveMatch && driveMatch[2] ? driveMatch[2] : '\\';
+  const loader = launcherCacheDir
+    ? [
+      `$cacheDll = ${psQuote(`${launcherCacheDir.replace(/[\\/]+$/, '')}\\RcvmLauncher-${launcherCacheKey}.dll`)}`,
+      '$cacheReady = $false',
+      'if (Test-Path -LiteralPath $cacheDll) {',
+      '  try { Add-Type -Path $cacheDll; $cacheReady = $true } catch { $cacheReady = $false }',
+      '}',
+      'if (-not $cacheReady) {',
+      `  $csharp = @'\n${RCVM_CSHARP}\n'@`,
+      '  try {',
+      '    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cacheDll)',
+      '    Add-Type -TypeDefinition $csharp -Language CSharp -OutputAssembly $cacheDll -OutputType Library',
+      '    Add-Type -Path $cacheDll',
+      '  } catch {',
+      '    Add-Type -TypeDefinition $csharp -Language CSharp',
+      '  }',
+      '}',
+    ]
+    : [
+      `$csharp = @'\n${RCVM_CSHARP}\n'@`,
+      'Add-Type -TypeDefinition $csharp -Language CSharp',
+    ];
   return [
     '$ErrorActionPreference = \'Stop\'',
-    `$csharp = @'\n${RCVM_CSHARP}\n'@`,
-    'Add-Type -TypeDefinition $csharp -Language CSharp',
+    ...loader,
     `$env:APPDATA = ${psQuote(appDataDir)}`,
     `$env:LOCALAPPDATA = ${psQuote(localAppDataDir)}`,
     `$env:TEMP = ${psQuote(tempDir)}`,
@@ -421,6 +512,7 @@ function buildRcvmLaunchScript({
     `$env:USERPROFILE = ${psQuote(userProfileDir)}`,
     `$env:HOMEDRIVE = ${psQuote(homeDrive)}`,
     `$env:HOMEPATH = ${psQuote(homePath)}`,
+    ...runtimeEnvEntries.map(([key, value]) => `$env:${key} = ${psQuote(value)}`),
     `$startJson = [RcvmLauncher]::Start(${psQuote(jobName)}, ${psQuote(executablePath)}, ${psQuote(launchArgs)}, ${psQuote(workingDirectory)}, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses})`,
     'Write-Output $startJson',
     '[Console]::Out.Flush()',
@@ -473,6 +565,7 @@ module.exports = {
   cpuRateForCount,
   validateRcvmLimits,
   rcvmJobName,
+  rcvmLauncherCacheKey,
   buildRcvmLaunchScript,
   parseRcvmLauncherOutput,
 };

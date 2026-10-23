@@ -32,6 +32,7 @@ jest.mock("../services/containerService", () => ({
   installDownloadedUpdate: jest.fn(async () => ({ started: true })),
   onUpdateDownloadProgress: jest.fn(() => () => {}),
   getQemuStatus: jest.fn(async () => null),
+  getPerformance: jest.fn(async () => null),
   detectQemu: jest.fn(),
   browseQemuBase: jest.fn(),
   setQemuBase: jest.fn(),
@@ -303,6 +304,42 @@ describe("ContainerManager", () => {
     await act(async () => { await Promise.resolve(); });
     openTab(container, "Profiles");
     expect(container.textContent).toContain("no network requested (not enforced on this PC)");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("reports what an app runs on, and offers no JIT strategy for native code", async () => {
+    listContainers.mockResolvedValue([
+      {
+        id: "native-app",
+        name: "Native demo",
+        source: "C:\\apps\\native\\app.exe",
+        status: "Installed",
+        runtime: {
+          kind: "native",
+          label: "Native code",
+          machine: "x64",
+          subsystem: "Windows GUI",
+          jit: "Already compiled machine code. There is nothing for a JIT to translate.",
+        },
+      },
+    ]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Tweaks");
+    const appSelect = container.querySelector("#tweak-app");
+    act(() => {
+      appSelect.value = "native-app";
+      appSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("Native code · x64 · Windows GUI");
+    expect(container.textContent).toContain("Already compiled machine code");
+    // A native exe has no IL, so the strategy must not be offered as if it did.
+    const strategy = container.querySelector('select[aria-label="JIT strategy"]');
+    expect(strategy).not.toBeNull();
+    expect(strategy.disabled).toBe(true);
+    expect(container.textContent).toContain("already JIT-compiles JavaScript");
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

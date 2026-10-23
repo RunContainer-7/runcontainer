@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.7.0',
+    date: '2026-10-23',
+    title: 'Performance Engine: quicker launches, honest JIT reporting',
+    changes: [
+      'Launching is quicker. The launcher’s helper assembly is now compiled once and loaded from disk afterwards instead of being compiled on every Run; measured on this project’s test laptop the time from Run to confirmed containment fell from 712 ms to 563 ms (−21%) and to a reported PID from 637 ms to 493 ms (−23%). The benchmark and its raw samples ship in reports/performance-0.7.0.md.',
+      'Background cost is lower. Checking whether an app is still running costs one Windows process query (about 0.64 s), and the monitor used to run it every 1.5 s. It now runs every 5 s, cutting that duty cycle from roughly 40% to roughly 13% while still noticing a closed app within seconds.',
+      'Tweaks has a Runtime & JIT card. It reads the selected app’s own executable header: a native Windows program is reported as already compiled machine code, with no JIT strategy offered, because there is nothing for a JIT to translate. Managed .NET programs get a strategy choice (automatic, fast start, or maximum speed) that sets only documented .NET runtime switches at launch. RunContainer’s own Electron/V8 JIT is reported as built in rather than presented as a switch.',
+      'Settings shows measured performance: the last launch time, the median of recent launches, the active backend, and the monitor interval. These are observations recorded locally from your own launches, never uploaded.',
+      'Fixed containment killing a bootstrapper’s child. When an installer or launcher starts the real program and then exits, its job object used to close immediately, ending that child through kill-on-close. The job now stays alive until its last process exits, so hand-off launchers remain contained instead of being killed.',
+      'Launch failures now name the app’s own exit code. “Exited before RunContainer could confirm it (exit code 1)” replaces a message that could not distinguish a crash from an app refusing to run inside a Job Object.',
+    ],
+  },
+  {
     version: '0.6.10',
     date: '2026-10-23',
     title: 'RC-Brain moves into Settings, and the tab bar gets shorter',
