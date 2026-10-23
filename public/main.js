@@ -44,6 +44,7 @@ const {
   isWithinDirectory,
 } = require('./isolated-launch');
 const {
+  buildWindowHostCSharp,
   buildWindowHostScript,
   buildWindowHostScriptArgs,
   parseWindowHostOutput,
@@ -142,6 +143,13 @@ function detectAppRuntime(sourcePath) {
   } catch (error) {
     return null;
   }
+}
+
+// A GUI app can be started with a hidden first window, so its window is hosted before
+// it is ever drawn on the desktop. A console app must not be started hidden: its
+// console window is the only thing the user would see.
+function startsHidden(sourcePath) {
+  return detectAppRuntime(sourcePath)?.subsystem === 'Windows GUI';
 }
 
 function ensureStoreFile() {
@@ -1031,7 +1039,9 @@ async function probeAppBehavior(appRecord, state) {
   let probe = null;
   if (!isVm && process.platform === 'win32' && pids.length > 0) {
     try {
-      const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids), {
+      // A hosted window is a child of RunContainer's host window; the probe needs our
+      // own PID to recognise it instead of reporting the app as windowless.
+      const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids, process.pid), {
         timeout: 15000,
         maxBuffer: 1024 * 1024,
       });
@@ -1049,6 +1059,11 @@ async function probeAppBehavior(appRecord, state) {
   const ioIdle = Boolean(probe && previous && probe.ioBytes !== null && previous.ioBytes !== null && probe.ioBytes <= previous.ioBytes);
   probeSamples.set(appRecord.id, { now, cpuMs: probe ? probe.cpuMs : null, ioBytes: probe ? probe.ioBytes : null });
   const system32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  // The window age must restart with the app. Without this, a restart inherited the
+  // old launch's age, so the first sample taken before the new window was hosted looked
+  // like a window that had been missing for minutes and RC-Brain restarted the app again.
+  const launchedAt = Date.parse(appRecord.lastLaunchedAt || '') || 0;
+  const windowSince = Math.max(state?.firstSeenAt || 0, launchedAt) || now;
   return {
     now,
     running: true,
@@ -1058,7 +1073,7 @@ async function probeAppBehavior(appRecord, state) {
     windowExpected: !isVm && behavioralMonitor.isGuiExecutable(appRecord.source),
     windowVisible: probe ? Boolean(probe.windowVisible) : null,
     windowHung: probe ? Boolean(probe.windowHung) : false,
-    windowAgeMs: now - (state?.firstSeenAt || now),
+    windowAgeMs: now - windowSince,
     ageMs: now - (state?.firstSeenAt || now),
     engineResponsive: behavioralEngineResponsive(appRecord),
     cpuPercent,
@@ -1471,6 +1486,33 @@ function windowHostStopFile(appId) {
   return path.join(windowHostStateDir(), `${sanitizeName(appId || 'app')}.stop`);
 }
 
+// The Win32 host is C# compiled by Add-Type. Compiling it on every launch cost about a
+// second between pressing Run and the app's window moving inside RunContainer; the
+// compiled assembly is cached per source revision instead.
+function windowHostCachePath() {
+  const digest = crypto.createHash('sha1').update(buildWindowHostCSharp()).digest('hex').slice(0, 12);
+  return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.dll`);
+}
+
+// Compiles the host once per revision in the background, so the first Run after an
+// install or update is as fast as every later one.
+function prewarmWindowHost() {
+  if (process.platform !== 'win32') return;
+  try {
+    const scriptPath = ensureWindowHostScript();
+    const child = spawn('powershell.exe', buildWindowHostScriptArgs(scriptPath, {
+      mode: 'prewarm',
+      parentHandle: 0,
+      cachePath: windowHostCachePath(),
+      timeoutMs: 60000,
+    }), { windowsHide: true, stdio: 'ignore' });
+    child.once('error', () => {});
+    if (child.unref) child.unref();
+  } catch (error) {
+    // Prewarming is an optimisation; hosting still compiles the host when it runs.
+  }
+}
+
 // The watcher re-reads this file while it runs, so PIDs discovered later (an installer's
 // second process, an app's child process) are matched without restarting it.
 function writeWindowHostPids(appRecord) {
@@ -1500,13 +1542,14 @@ function handleWindowHostEvent(appRecord, state, event, logPath) {
   if (event.event === 'embedded') {
     state.embedded = true;
     state.embeddedPid = event.pid || state.embeddedPid;
-    const win = state.target === 'guest' ? guestWindows.get(appRecord.id) : null;
+    const win = guestWindows.get(appRecord.id);
     if (win && !win.isDestroyed()) {
       win.__rcHostPid = event.pid || null;
       setGuestWindowStatus(win, 'Shown inside RunContainer.');
-      // The window is kept hidden until there is something to show, so a slow app does
-      // not leave an empty duplicate window on screen.
-      if (!win.isVisible()) win.showInactive();
+      // Bring the window forward: the user pressed Run, so this is where the app should
+      // be. Without this a slow app could be hosted behind the main window.
+      win.show();
+      win.focus();
     }
     appendLog(logPath, 'Hosted a window inside RunContainer (window hosting only; it does not change isolation).');
     recordWindowHosted(appRecord.id, true, {
@@ -1520,6 +1563,17 @@ function handleWindowHostEvent(appRecord, state, event, logPath) {
       const win = state.target === 'guest' ? guestWindows.get(appRecord.id) : null;
       if (win) setGuestWindowStatus(win, 'Windows refused to host this window here, so it stays on your desktop. Isolation is unaffected.');
     }
+  } else if (event.event === 'revealed') {
+    // A hidden launch with nowhere to host it: showing the window on the desktop is
+    // better than leaving the app running invisibly. Hosting keeps being attempted.
+    const shown = Number(event.shown) || 0;
+    if (shown > 0) appendLog(logPath, `The app window could not be hosted yet, so ${shown} window(s) were shown on the desktop. RunContainer keeps trying to host it.`);
+    const win = guestWindows.get(appRecord.id);
+    if (win && !win.isDestroyed()) {
+      setGuestWindowStatus(win, shown > 0
+        ? 'The app’s window is on your desktop for now. RunContainer keeps trying to bring it in here.'
+        : 'Waiting for the app to open a window…');
+    }
   } else if (event.event === 'error') {
     state.error = event.error || 'The window host failed.';
     appendLog(logPath, `Window hosting failed: ${state.error}`);
@@ -1529,6 +1583,14 @@ function handleWindowHostEvent(appRecord, state, event, logPath) {
 }
 
 async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop = 0, logPath }) {
+  // A launch starts its window host before the app does (so the watcher is already
+  // running when the app's first window exists). The later call with the real PID must
+  // adopt that watcher, not stop and restart it: restarting would lose that head start.
+  const live = appWindowHosts.get(appRecord?.id);
+  if (live && !live.exited && !live.error && live.parentHandle === parentHandle && live.insetTop === insetTop) {
+    writeWindowHostPids(appRecord);
+    return live;
+  }
   await stopAppWindowWatcher(appRecord.id);
   const pidFile = windowHostPidFile(appRecord.id);
   const stopFile = windowHostStopFile(appRecord.id);
@@ -1543,6 +1605,8 @@ async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop
     target,
     pidFile,
     stopFile,
+    parentHandle,
+    insetTop,
     embedded: false,
     embeddedPid: null,
     refused: null,
@@ -1558,6 +1622,9 @@ async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop
       pidFile,
       sandboxRoot: appRecord.sandboxRoot || (appRecord.source ? path.dirname(appRecord.source) : ''),
       stopFile,
+      cachePath: windowHostCachePath(),
+      // A hidden launch must not leave an app invisible if Windows refuses to host it.
+      revealAfterMs: 9000,
     }), { windowsHide: true });
     state.child = child;
     appWindowHosts.set(appRecord.id, state);
@@ -1720,6 +1787,11 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
   const win = ensureGuestWindow(appRecord, note);
+  // Show the window as soon as Run is pressed. The app's own window appears inside it a
+  // moment later; until then the window says what is happening instead of leaving the
+  // user with no visible response (or a stray app window on the desktop).
+  if (!win.isVisible()) win.showInactive();
+  setGuestWindowStatus(win, 'Starting the app. Its window appears here as soon as it opens.');
   const parentHandle = nativeHandleToInt(win.getNativeWindowHandle());
   if (!parentHandle) return null;
   const state = await startAppWindowWatcher({ ...appRecord, pid }, {
@@ -1770,60 +1842,28 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
   return released;
 }
 
-// Re-parents an app's window into RunContainer's main window. This is presentation only:
-// it adds no isolation, and Windows can refuse it (a higher-integrity wizard usually cannot
-// be hosted by a lower-integrity host). A failure is logged and the app keeps running.
-async function hostInMainWindow(appRecord, pid, logPath, { timeoutMs = 6000 } = {}) {
-  if (process.platform !== 'win32' || !pid) return null;
-  if (appRecord?.windowHosting === false) return null;
-  if (!mainWindow || mainWindow.isDestroyed()) return null;
-  const parentHandle = nativeHandleToInt(mainWindow.getNativeWindowHandle());
-  if (!parentHandle) return null;
-  const state = await startAppWindowWatcher({ ...appRecord, pid }, {
-    parentHandle,
-    target: 'main',
-    insetTop: 0,
-    logPath,
-  });
-  await waitForWindowHost(state, timeoutMs);
-  if (state.embedded) return { embedded: true, pid: state.embeddedPid || pid, target: 'main' };
-  if (state.refused) return { embedded: false, reason: state.refused };
-  return null;
-}
-
-// Runs of normal apps: presented in a second RunContainer window, whose header keeps
-// Stop, Release window and a way back to the main window reachable. Hosting an
-// ordinary app straight into the main window would cover RunContainer's own controls
-// for as long as the app stays open, so that is only used for installers. The watcher
-// keeps running after this returns, hosting windows that appear later.
+// Every launch is presented the same way: its window is hosted under a second
+// RunContainer window, whose header keeps Stop, Release window and a way back to the
+// main window reachable. Hosting into the main window was removed: once an app covers
+// the main window, RunContainer's own controls are unreachable for as long as it
+// stays open. The watcher keeps running after this returns, so windows that appear
+// later (a splash, an installer's second process) are hosted too.
 async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000 } = {}) {
   if (appRecord?.windowHosting === false) return null;
   if (process.platform !== 'win32') return null;
   return hostInGuestWindow({ ...appRecord, pid }, pid, logPath, { note, timeoutMs });
 }
 
-// Installers are different: the wizard is the whole interaction and closes when setup
-// finishes, so it goes inside the main RunContainer window when Windows allows it. If it
-// is slow to appear, a second RunContainer window takes over instead of leaving the wizard
-// on the desktop while RunContainer waits.
+// Installers use the same surface: the wizard is the whole interaction, and it closes
+// when setup finishes. A longer wait gives a slow self-extractor time to open its window.
 async function hostInstallerWindow(appRecord, pid, logPath) {
   if (appRecord?.windowHosting === false) return null;
   if (process.platform !== 'win32') return null;
-  const inMain = await hostInMainWindow(appRecord, pid, logPath, { timeoutMs: 8000 });
-  if (inMain?.embedded) {
-    appendLog(logPath, 'Installer wizard hosted inside the main RunContainer window.');
-    return inMain;
-  }
-  if (inMain?.embedded === false) {
-    // Windows refused the wizard in the main window (it runs at a higher integrity level),
-    // so a second RunContainer window could not host it either. Report it, do not duplicate.
-    return inMain;
-  }
   const hosted = await hostInGuestWindow(appRecord, pid, logPath, {
     note: 'Installer wizard: complete it here — it installs into this environment, not your PC.',
-    timeoutMs: 12000,
+    timeoutMs: 15000,
   });
-  if (hosted?.embedded) appendLog(logPath, 'Installer wizard hosted inside a second RunContainer window.');
+  if (hosted?.embedded) appendLog(logPath, 'Installer wizard hosted inside a RunContainer window.');
   return hosted;
 }
 
@@ -1836,23 +1876,6 @@ async function releaseAppWindow(appRecord, pids, logPath) {
   const candidates = [...new Set([...(pids || []), appRecord?.pid, appRecord?.hostedWindowPid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
   if (!appRecord?.windowHosted && candidates.length === 0 && !guestWindows.has(appRecord?.id)) return null;
   let released = 0;
-  const parentHandle = mainWindow && !mainWindow.isDestroyed()
-    ? nativeHandleToInt(mainWindow.getNativeWindowHandle())
-    : 0;
-  if (parentHandle) {
-    for (const pid of candidates) {
-      try {
-        const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
-          mode: 'release',
-          processId: pid,
-          parentHandle,
-        }));
-        released += Number(result?.released) || 0;
-      } catch (error) {
-        appendLog(logPath, `Could not move the app window back to the desktop: ${error.message}`);
-      }
-    }
-  }
   released += await releaseGuestWindowWindows(appRecord, candidates, logPath);
   if (released > 0) appendLog(logPath, `Returned ${released} app window(s) to the desktop.`);
   return released;
@@ -1918,6 +1941,7 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
       workingDirectory: sandboxRoot,
       capabilities: caps,
       appArgs: argCheck.args || undefined,
+      showState: startsHidden(appRecord.source) ? 0 : -1,
     }));
 
     if (!launch.verified || launch.processSid !== launch.containerSid) {
@@ -2089,6 +2113,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       userProfileDir: profile.userProfile,
       launchArgs: argCheck.args || '',
       runtimeEnv,
+      startHidden: startsHidden(appRecord.source),
       memoryCapBytes: limitCheck.limits.memoryCapBytes,
       cpuRate: limitCheck.limits.cpuRate,
       maxProcesses: limitCheck.limits.maxProcesses,
@@ -3019,6 +3044,10 @@ app.whenReady().then(() => {
   }
   createWindow();
   startBehavioralSupervisor();
+  // Warm the window host in the background after the UI is up, so the first Run does
+  // not pay for compiling it.
+  const warm = setTimeout(prewarmWindowHost, 1500);
+  if (warm.unref) warm.unref();
 });
 
 app.on('window-all-closed', () => {
@@ -3265,6 +3294,14 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? alreadyRunning : entry)));
     monitorAppProcesses(appRecord.id, logPath);
     broadcastContainerStatus(alreadyRunning);
+    // Pressing Run on an app that is already running must still present it inside
+    // RunContainer; otherwise its window sits on the desktop and Run appears to do nothing.
+    hostAppWindowEverywhere(alreadyRunning, existingPids[0], logPath, {
+      note: 'This app was already running. Its window is hosted here.',
+    }).then(() => {
+      const latest = getStoredApp(appRecord.id);
+      if (latest) broadcastContainerStatus(latest);
+    }).catch(() => {});
     return {
       id: appRecord.id,
       status: 'Running',
@@ -3274,7 +3311,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
       activeEngine: appRecord.activeEngine || appRecord.launchMode || 'profile',
       isolated: Boolean(appRecord.isolated),
       embedded: false,
-      reason: 'This app is already running, so RunContainer did not start a second copy.',
+      reason: 'This app is already running, so RunContainer did not start a second copy. Its window is being hosted here.',
     };
   }
   fs.writeFileSync(logPath, `Launch started at ${new Date().toISOString()}\n`, 'utf8');
@@ -3283,6 +3320,16 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   clearLiveLog(appRecord.id);
 
   appendLog(logPath, 'Launch requested; dispatching the selected engine under an operation lock.');
+  // Start the second RunContainer window and its window host now, not after the engine
+  // reports success. Launching containment takes a couple of seconds; that is time the
+  // host can spend starting, so the app's first window is hosted the moment it exists.
+  if (appRecord.windowHosting !== false && process.platform === 'win32') {
+    hostAppWindowEverywhere({ ...appRecord, pid: null }, null, logPath, {
+      note: 'This app runs in its own environment. Its window is hosted here.',
+      timeoutMs: 600,
+    }).catch(() => {});
+  }
+
   const performLaunch = async () => {
     const lockedEngine = selectEngine(getStoredApp(appRecord.id) || appRecord);
     if (lockedEngine === 'refused') {
@@ -3310,7 +3357,13 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     }
     return failedLaunch(appRecord, 'No isolation engine is available for this app. Nothing was launched.');
   };
-  return lockHeld ? performLaunch() : withOpLock(appRecord.id, 'run', performLaunch);
+  const result = await (lockHeld ? performLaunch() : withOpLock(appRecord.id, 'run', performLaunch));
+  // A launch that did not start an app must not leave an empty RunContainer window behind.
+  if (result?.status !== 'Running') {
+    await stopAppWindowWatcher(appRecord.id);
+    closeGuestWindow(appRecord.id);
+  }
+  return result;
 }
 
 ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requestedAppRecord));

@@ -235,7 +235,7 @@ public static class RunContainerAppContainer
 
     // Launches the executable inside the named AppContainer and returns
     // "<pid>|<containerSid>|<verifiedSidOrEmpty>".
-    public static string Launch(string name, string executablePath, string workingDirectory, string[] capabilityNames, string arguments)
+    public static string Launch(string name, string executablePath, string workingDirectory, string[] capabilityNames, string arguments, int showState)
     {
         IntPtr containerSid = EnsureAppContainerSid(name);
         string containerSidText = SidToString(containerSid);
@@ -279,6 +279,9 @@ public static class RunContainerAppContainer
 
             startupInfo.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOEX));
             startupInfo.lpAttributeList = attributeList;
+            // 0 (SW_HIDE) makes a GUI app create its first window hidden, so it can be
+            // hosted inside RunContainer before it is ever drawn on the desktop.
+            if (showState >= 0) { startupInfo.StartupInfo.dwFlags = 1; startupInfo.StartupInfo.wShowWindow = (ushort)showState; }
 
             StringBuilder commandLine = new StringBuilder("\\"" + executablePath + "\\"" + (string.IsNullOrEmpty(arguments) ? "" : " " + arguments));
             bool created = CreateProcess(
@@ -357,7 +360,7 @@ public static class RunContainerAppContainer
 // string appended to the sandboxed command line (empty = none).
 function buildAppContainerScript() {
   return [
-    'param([string]$Mode, [string]$Name, [string]$Exe, [string]$Dir, [string]$Caps = \'internetClient\', [string]$Args = \'\')',
+    'param([string]$Mode, [string]$Name, [string]$Exe, [string]$Dir, [string]$Caps = \'internetClient\', [string]$Args = \'\', [int]$ShowState = -1)',
     "$ErrorActionPreference = 'Stop'",
     // The C# has to live in a literal here-string. Raw C# emitted as bare script lines is
     // not valid PowerShell, and the script would fail to parse before Add-Type ever ran.
@@ -378,7 +381,7 @@ function buildAppContainerScript() {
     '    [RunContainerAppContainer]::DeleteProfile($Name)',
     `    Write-Output ('${RESULT_PREFIX}' + (@{ deleted = $true } | ConvertTo-Json -Compress))`,
     '  } else {',
-    '    $result = [RunContainerAppContainer]::Launch($Name, $Exe, $Dir, $capabilities, $Args)',
+    '    $result = [RunContainerAppContainer]::Launch($Name, $Exe, $Dir, $capabilities, $Args, $ShowState)',
     '    $parts = $result.Split("|")',
     '    $output = @{ pid = [int]$parts[0]; containerSid = $parts[1]; processSid = $parts[2]; verified = ($parts[1] -eq $parts[2]) }',
     `    Write-Output ('${RESULT_PREFIX}' + ($output | ConvertTo-Json -Compress))`,
@@ -390,7 +393,7 @@ function buildAppContainerScript() {
   ].join('\n');
 }
 
-function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executablePath, workingDirectory, capabilities, appArgs }) {
+function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executablePath, workingDirectory, capabilities, appArgs, showState = -1 }) {
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Mode', mode, '-Name', containerName];
   // Only a launch needs the executable, working directory, capabilities and args;
   // the sid and delete modes must not receive them, so a delete can never
@@ -400,6 +403,8 @@ function buildAppContainerScriptArgs(scriptPath, { mode, containerName, executab
     // An explicit empty list means locked (no capabilities); undefined keeps the script default.
     if (capabilities !== undefined) args.push('-Caps', capabilities.length ? buildAppContainerCapabilities(capabilities).join(',') : '');
     if (appArgs) args.push('-Args', String(appArgs));
+    // -1 keeps Windows' default; 0 starts a GUI app hidden until it is hosted.
+    if (showState >= 0) args.push('-ShowState', String(showState));
   }
   return args;
 }

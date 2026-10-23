@@ -4,6 +4,20 @@
 
 export const UPDATES = [
   {
+    version: '0.7.3',
+    date: '2026-10-23',
+    title: 'Run opens inside RunContainer, with no stray window and no restart loop',
+    changes: [
+      'Apps no longer appear on the desktop first. A graphical app is now launched with a hidden first window, and the window is moved inside RunContainer the moment it exists. The second RunContainer window opens as soon as you press Run and says it is starting the app, so there is a RunContainer surface on screen from the first second.',
+      'Fixed RC-Brain restarting an app that was shown inside RunContainer. Its window check only looked at ordinary top-level windows, so a hosted window (which belongs to the RunContainer host) counted as missing; after a few seconds the app was diagnosed as hung and restarted. The check now walks the whole window tree and recognises windows hosted by RunContainer itself.',
+      'Fixed a false “window missing” right after a restart: how long an app has been without a window is now measured from its latest launch, not from when it was first seen.',
+      'Hosting starts earlier. The Win32 host is compiled once and cached, warmed in the background when RunContainer starts, and the watcher is started before the app so a slow launcher no longer leaves the window waiting. On this PC the window was inside RunContainer 126 ms after containment was confirmed, instead of about two seconds later.',
+      'Pressing Run on an app that is already running now hosts its existing window instead of leaving it on the desktop and reporting “already running”.',
+      'Installers use the same RunContainer window as apps. Hosting a wizard in the main window covered RunContainer’s own controls for as long as setup was open; that path is gone.',
+      'If Windows refuses to host a window (an app that asks for administrator rights, for example), the app is shown on the desktop instead of staying invisible, and RunContainer keeps trying while it runs.',
+    ],
+  },
+  {
     version: '0.7.2',
     date: '2026-10-23',
     title: 'Every window stays inside RunContainer, without the glitches',

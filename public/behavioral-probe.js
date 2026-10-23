@@ -22,40 +22,73 @@ public static class RunContainerBehaviorProbe
     delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr param);
 
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr param);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc callback, IntPtr param);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint command);
     [DllImport("user32.dll")] static extern bool IsHungAppWindow(IntPtr hwnd);
 
-    public static int VisibleWindowCount(uint processId)
+    // Walks the whole window tree, not just top-level windows. A window hosted inside
+    // RunContainer is a child of RunContainer's host window, so an EnumWindows-only
+    // probe reported "no window" for an app whose window was visibly right there, and
+    // RunContainer restarted the app. Both top-level windows and hosted children count.
+    sealed class Tally
     {
-        int count = 0;
-        EnumWindows(delegate(IntPtr hwnd, IntPtr param)
-        {
-            uint owner;
-            GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == processId && IsWindowVisible(hwnd)
-                && GetParent(hwnd) == IntPtr.Zero && GetWindow(hwnd, 4u) == IntPtr.Zero)
-            {
-                count += 1;
-            }
-            return true;
-        }, IntPtr.Zero);
-        return count;
+        public uint ProcessId;
+        public uint HostProcessId;
+        public int Count;
+        public bool Hung;
     }
 
-    public static bool IsHung(uint processId)
+    static void Visit(IntPtr hwnd, Tally tally)
     {
-        bool hung = false;
-        EnumWindows(delegate(IntPtr hwnd, IntPtr param)
+        uint owner;
+        GetWindowThreadProcessId(hwnd, out owner);
+        if (owner == tally.ProcessId && IsWindowVisible(hwnd))
         {
-            uint owner;
-            GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == processId && IsWindowVisible(hwnd) && IsHungAppWindow(hwnd)) hung = true;
+            IntPtr windowParent = GetParent(hwnd);
+            if (windowParent == IntPtr.Zero)
+            {
+                if (GetWindow(hwnd, 4u) == IntPtr.Zero) tally.Count += 1;
+            }
+            else
+            {
+                // A window hosted by RunContainer's own host window still counts.
+                uint parentOwner;
+                GetWindowThreadProcessId(windowParent, out parentOwner);
+                if (tally.HostProcessId != 0 && parentOwner == tally.HostProcessId) tally.Count += 1;
+            }
+            if (IsHungAppWindow(hwnd)) tally.Hung = true;
+        }
+        EnumChildWindows(hwnd, delegate(IntPtr child, IntPtr param)
+        {
+            Visit(child, tally);
             return true;
         }, IntPtr.Zero);
-        return hung;
+    }
+
+    static Tally Inspect(uint processId, uint hostProcessId)
+    {
+        Tally tally = new Tally();
+        tally.ProcessId = processId;
+        tally.HostProcessId = hostProcessId;
+        EnumWindows(delegate(IntPtr hwnd, IntPtr param)
+        {
+            Visit(hwnd, tally);
+            return true;
+        }, IntPtr.Zero);
+        return tally;
+    }
+
+    public static int VisibleWindowCount(uint processId, uint hostProcessId)
+    {
+        return Inspect(processId, hostProcessId).Count;
+    }
+
+    public static bool IsHung(uint processId, uint hostProcessId)
+    {
+        return Inspect(processId, hostProcessId).Hung;
     }
 }
 `;
@@ -63,18 +96,21 @@ public static class RunContainerBehaviorProbe
 
 function buildBehaviorProbeScript() {
   return [
-    'param([string]$Pids)',
+    'param([string]$Pids, [string]$HostPid = \'0\')',
     "$ErrorActionPreference = 'SilentlyContinue'",
     "$source = @'",
     buildProbeCSharp(),
     "'@",
     'Add-Type -TypeDefinition $source -Language CSharp',
     '$ids = @($Pids -split \',\' | Where-Object { $_ -match \'^\\d+$\' } | ForEach-Object { [uint32]$_ })',
+    '$hostId = 0',
+    '$parsedHost = 0',
+    'if ([int]::TryParse($HostPid, [ref]$parsedHost) -and $parsedHost -gt 0) { $hostId = [uint32]$parsedHost }',
     '$windows = @()',
     '$perf = @()',
     'foreach ($procId in $ids) {',
-    '  $count = [RunContainerBehaviorProbe]::VisibleWindowCount($procId)',
-    '  $hung = [RunContainerBehaviorProbe]::IsHung($procId)',
+    '  $count = [RunContainerBehaviorProbe]::VisibleWindowCount($procId, $hostId)',
+    '  $hung = [RunContainerBehaviorProbe]::IsHung($procId, $hostId)',
     '  $windows += [pscustomobject]@{ pid = [int]$procId; visible = ($count -gt 0); windows = [int]$count; hung = [bool]$hung }',
     '  $row = Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$procId" | Select-Object -First 1',
     '  if ($row) {',
@@ -90,11 +126,14 @@ function buildBehaviorProbeScript() {
   ].join('\n');
 }
 
-function buildBehaviorProbeArgs(scriptPath, pids) {
+function buildBehaviorProbeArgs(scriptPath, pids, hostPid = 0) {
   const list = (Array.isArray(pids) ? pids : [])
     .filter((pid) => Number.isSafeInteger(pid) && pid > 0)
     .join(',');
-  return ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Pids', list];
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Pids', list];
+  // RunContainer's own PID, so a window hosted inside it still counts as the app's window.
+  if (Number.isSafeInteger(hostPid) && hostPid > 0) args.push('-HostPid', String(hostPid));
+  return args;
 }
 
 function parseBehaviorProbeOutput(stdout) {

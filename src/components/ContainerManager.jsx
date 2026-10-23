@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.2";
+const APP_VERSION_FALLBACK = "0.7.3";
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -824,7 +824,7 @@ export default function ContainerManager() {
                   {activeSession.status === 'Launching'
                     ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
-                      ? `${activeSession.windowHosted ? 'Shown inside RunContainer (visual only, experimental).' : 'Running in its own window.'}`
+                      ? `${activeSession.windowHosted ? 'Shown in its own RunContainer window (visual only).' : 'Running. Its window opens in a RunContainer window.'}`
                       : 'All processes for this app have exited.'}
                 </div>
                 {(activeSession.status === 'Running' || activeSession.status === 'Unknown') && (
@@ -1497,7 +1497,7 @@ export default function ContainerManager() {
                   <p className="muted">
                     {selectedApp.windowHosting === false
                       ? 'The app opens in its own window.'
-                      : 'RunContainer shows the app in an app window of its own, with Stop, Release window and a way back to the main window. Installers are shown inside the main window instead. This changes how the app looks, not what it can reach, and Windows can still refuse.'}
+                      : 'RunContainer shows the app in an app window of its own, with Stop, Release window and a way back to the main window. This changes how the app looks, not what it can reach, and Windows can still refuse (an app that asks for administrator rights cannot be hosted).'}
                   </p>
                   <div className="detail-actions">
                     {selectedApp.windowHosting === false

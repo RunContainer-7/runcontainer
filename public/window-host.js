@@ -145,7 +145,13 @@ public static class RunContainerWindowHost
     const int WsChild = 0x40000000;
     const int WsPopup = unchecked((int)0x80000000);
     const int WsExAppWindow = 0x00040000;
+    const int WsExToolWindow = 0x00000080;
+    // A launch started with a hidden window has no window to host until the app creates
+    // one, and that first window must be found before it ever reaches the desktop.
+    // Polling fast for the first seconds costs little and closes the gap.
+    const int WatchTickFastMs = 120;
     const int WatchTickMs = 400;
+    const int FastWatchMs = 6000;
     const int WatchMaxHours = 8;
 
     static void Report(string kind, uint processId, long child)
@@ -155,6 +161,17 @@ public static class RunContainerWindowHost
         line.Append("\\"event\\":\\"").Append(kind).Append("\\"");
         line.Append(",\\"pid\\":").Append(processId);
         line.Append(",\\"child\\":").Append(child);
+        line.Append("}");
+        Console.WriteLine(line.ToString());
+        Console.Out.Flush();
+    }
+
+    static void ReportShown(int shown)
+    {
+        StringBuilder line = new StringBuilder();
+        line.Append("${RESULT_PREFIX}{");
+        line.Append("\\"event\\":\\"revealed\\"");
+        line.Append(",\\"shown\\":").Append(shown);
         line.Append("}");
         Console.WriteLine(line.ToString());
         Console.Out.Flush();
@@ -453,22 +470,69 @@ public static class RunContainerWindowHost
         return matches;
     }
 
-    // A window worth hosting: visible, top-level, not a tiny helper, and owned by this
-    // app's process tree (or by a process running from its environment folder).
-    static bool IsAppWindow(IntPtr hwnd, HashSet<uint> seeds, Dictionary<uint, uint> parents, string sandboxRoot)
+    // Owned by this app's process tree, or by a process running from its environment folder.
+    static bool OwnedByApp(IntPtr hwnd, HashSet<uint> seeds, Dictionary<uint, uint> parents, string sandboxRoot)
     {
-        if (!IsWindowVisible(hwnd)) return false;
-        if (IsIconic(hwnd)) return false;
-        if (GetParent(hwnd) != IntPtr.Zero) return false;
-        if (GetWindowTextLength(hwnd) == 0) return false;
-        RECT rect;
-        if (!GetWindowRect(hwnd, out rect)) return false;
-        if (rect.Right - rect.Left < 24 || rect.Bottom - rect.Top < 24) return false;
         uint processId;
         GetWindowThreadProcessId(hwnd, out processId);
         if (processId == 0) return false;
         if (InProcessLineage(processId, seeds, parents)) return true;
         return MatchesSandbox(processId, sandboxRoot);
+    }
+
+    // A window the user would recognise as the app: titled, top-level, and not a helper.
+    static bool LooksLikeMain(IntPtr hwnd)
+    {
+        if (GetParent(hwnd) != IntPtr.Zero) return false;
+        if (GetWindowTextLength(hwnd) == 0) return false;
+        RECT rect;
+        if (!GetWindowRect(hwnd, out rect)) return false;
+        if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 150) return false;
+        return true;
+    }
+
+    // A window worth hosting: visible, top-level, not a tiny helper, and owned by this
+    // app. Hidden main windows are included: an app started with a hidden window has to
+    // be hosted before it is ever shown, or it would flash onto the desktop first.
+    static bool IsAppWindow(IntPtr hwnd, HashSet<uint> seeds, Dictionary<uint, uint> parents, string sandboxRoot)
+    {
+        if (IsIconic(hwnd)) return false;
+        if (!OwnedByApp(hwnd, seeds, parents, sandboxRoot)) return false;
+        if (!IsWindowVisible(hwnd))
+        {
+            // Hidden windows are only matched when they look like the app's main window:
+            // a hidden 0x0 helper or a tool palette must never be pulled on screen.
+            if (!LooksLikeMain(hwnd)) return false;
+            if ((GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0) return false;
+            if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return false;
+            return true;
+        }
+        if (GetParent(hwnd) != IntPtr.Zero) return false;
+        if (GetWindowTextLength(hwnd) == 0) return false;
+        RECT rect;
+        if (!GetWindowRect(hwnd, out rect)) return false;
+        if (rect.Right - rect.Left < 24 || rect.Bottom - rect.Top < 24) return false;
+        return true;
+    }
+
+    // If hosting never happens, a hidden launch would leave the app invisible. Showing
+    // the windows that still look like its main window keeps a failure recoverable
+    // instead of hiding the app entirely.
+    static int RevealHiddenWindows(HashSet<uint> seeds, Dictionary<uint, uint> parents, string sandboxRoot)
+    {
+        int shown = 0;
+        EnumWindows(delegate(IntPtr hwnd, IntPtr param)
+        {
+            if (IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
+            if (!LooksLikeMain(hwnd)) return true;
+            if ((GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0) return true;
+            if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return true;
+            if (!OwnedByApp(hwnd, seeds, parents, sandboxRoot)) return true;
+            ShowWindow(hwnd, SwShow);
+            shown += 1;
+            return true;
+        }, IntPtr.Zero);
+        return shown;
     }
 
     static HashSet<uint> ReadSeeds(string pidFilePath)
@@ -492,13 +556,15 @@ public static class RunContainerWindowHost
 
     // Hosts windows as they appear, keeps the main one fitted, and stops when RunContainer
     // closes the host window, asks it to stop (stop file), or the safety limit is reached.
-    public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath)
+    public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath, int revealAfterMs)
     {
         IntPtr parent = new IntPtr(parentHandle);
         long mainWindow = 0;
         int lastWidth = 0;
         int lastHeight = 0;
         HashSet<long> refused = new HashSet<long>();
+        bool revealed = false;
+        int revealAt = revealAfterMs > 0 ? revealAfterMs : 9000;
         Stopwatch clock = Stopwatch.StartNew();
         string reason = "ended";
         while (true)
@@ -506,6 +572,7 @@ public static class RunContainerWindowHost
             if (!IsWindow(parent)) { reason = "host-window-gone"; break; }
             if (!string.IsNullOrEmpty(stopFilePath) && File.Exists(stopFilePath)) { reason = "stop-requested"; break; }
             if (clock.Elapsed.TotalHours > WatchMaxHours) { reason = "time-limit"; break; }
+            int tick = clock.ElapsedMilliseconds < FastWatchMs ? WatchTickFastMs : WatchTickMs;
 
             HashSet<uint> seeds = ReadSeeds(pidFilePath);
             Dictionary<uint, uint> parents = ProcessParents();
@@ -516,7 +583,7 @@ public static class RunContainerWindowHost
             int height = (client.Bottom - client.Top) - inset;
             if (width <= 0 || height <= 0)
             {
-                Thread.Sleep(WatchTickMs);
+                Thread.Sleep(tick);
                 continue;
             }
 
@@ -544,8 +611,19 @@ public static class RunContainerWindowHost
                 else
                 {
                     refused.Add(hwnd.ToInt64());
+                    // A hidden window that cannot be hosted must not stay invisible.
+                    ShowWindow(hwnd, SwShow);
                     Report("refused", processId, hwnd.ToInt64());
                 }
+            }
+
+            // The safety net for a hidden launch: if nothing could be hosted in time,
+            // show the app's window on the desktop rather than leaving it invisibly running.
+            if (mainWindow == 0 && !revealed && clock.ElapsedMilliseconds >= revealAt)
+            {
+                int shown = RevealHiddenWindows(seeds, parents, sandboxRoot);
+                revealed = true;
+                ReportShown(shown);
             }
 
             if (mainWindow != 0)
@@ -563,7 +641,7 @@ public static class RunContainerWindowHost
             }
             lastWidth = width;
             lastHeight = height;
-            Thread.Sleep(WatchTickMs);
+            Thread.Sleep(tick);
         }
         ReportEnd(reason);
         Console.Out.Flush();
@@ -574,17 +652,36 @@ public static class RunContainerWindowHost
 
 function buildWindowHostScript() {
   return [
-    'param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0, [string]$PidFile = \'\', [string]$SandboxRoot = \'\', [string]$StopFile = \'\')',
+    "param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0, [string]$PidFile = '', [string]$SandboxRoot = '', [string]$StopFile = '', [string]$CachePath = '', [int]$RevealAfterMs = 9000)",
     "$ErrorActionPreference = 'Stop'",
-    "$source = @'",
+    // Compiling the Win32 host dominated the time between pressing Run and the app's
+    // window moving inside RunContainer. The compiled assembly is cached per source
+    // version, so a warm cache loads in about a tenth of the compile time.
+    '$loaded = $false',
+    'if ($CachePath -and (Test-Path $CachePath)) {',
+    '  try { Add-Type -Path $CachePath -ErrorAction Stop; $loaded = $true } catch { $loaded = $false }',
+    '}',
+    'if (-not $loaded) {',
+    "  $source = @'",
     buildWindowHostCSharp(),
     "'@",
-    'Add-Type -TypeDefinition $source -Language CSharp',
+    '  if ($CachePath) {',
+    '    try {',
+    '      if (Test-Path $CachePath) { Remove-Item $CachePath -Force }',
+    '      Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $CachePath -OutputType Library -ErrorAction Stop',
+    '      Add-Type -Path $CachePath -ErrorAction Stop',
+    '    } catch { Add-Type -TypeDefinition $source -Language CSharp }',
+    '  } else {',
+    '    Add-Type -TypeDefinition $source -Language CSharp',
+    '  }',
+    '}',
     'try {',
-    "  if ($Mode -eq 'embeddebug') {",
+    "  if ($Mode -eq 'prewarm') {",
+    `    Write-Output ('${RESULT_PREFIX}' + (@{ event = 'ready' } | ConvertTo-Json -Compress))`,
+    "  } elseif ($Mode -eq 'embeddebug') {",
     '    Write-Output ([RunContainerWindowHost]::EmbedSteps([int64]$ProcessId, [int64]$Parent))',
     "  } elseif ($Mode -eq 'watch') {",
-    '    [RunContainerWindowHost]::Watch([int64]$Parent, $InsetTop, $PidFile, $SandboxRoot, $StopFile)',
+    '    [RunContainerWindowHost]::Watch([int64]$Parent, $InsetTop, $PidFile, $SandboxRoot, $StopFile, $RevealAfterMs)',
     "  } elseif ($Mode -eq 'release') {",
     '    $count = [RunContainerWindowHost]::ReleaseProcessWindows([uint32]$ProcessId, [int64]$Parent)',
     `    Write-Output ('${RESULT_PREFIX}' + (@{ released = $count } | ConvertTo-Json -Compress))`,
@@ -615,6 +712,8 @@ function buildWindowHostScriptArgs(scriptPath, {
   pidFile,
   sandboxRoot,
   stopFile,
+  cachePath,
+  revealAfterMs = 0,
 } = {}) {
   const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Mode', mode];
   if (Number.isSafeInteger(processId) && processId > 0) args.push('-ProcessId', String(processId));
@@ -623,6 +722,8 @@ function buildWindowHostScriptArgs(scriptPath, {
   if (mode !== 'watch') args.push('-TimeoutMs', String(timeoutMs));
   // Only sent when a caller asks for a header strip, so existing calls stay identical.
   if (insetTop > 0) args.push('-InsetTop', String(insetTop));
+  if (cachePath) args.push('-CachePath', cachePath);
+  if (revealAfterMs > 0) args.push('-RevealAfterMs', String(revealAfterMs));
   if (pidFile) args.push('-PidFile', pidFile);
   if (sandboxRoot) args.push('-SandboxRoot', sandboxRoot);
   if (stopFile) args.push('-StopFile', stopFile);

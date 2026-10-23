@@ -40,11 +40,27 @@ describe("window host launcher", () => {
     expect(csharp).toContain("EnumChildWindows");
   });
 
-  it("never claims hosting adds isolation and only re-parents visible top-level windows", () => {
+  it("hosts only top-level app windows, including a hidden first window", () => {
     const csharp = buildWindowHostCSharp();
     expect(csharp).toContain("GetParent(hwnd) != IntPtr.Zero");
-    expect(csharp).toContain("if (!IsWindowVisible(hwnd)) return false;");
     expect(csharp).toContain("if (IsIconic(hwnd)) return false;");
+    // A GUI app is launched with a hidden first window so it is hosted before it is ever
+    // drawn on the desktop. Hidden windows are only matched when they look like the main
+    // window; helpers, tool palettes and owned windows must never be pulled on screen.
+    expect(csharp).toContain("if (!IsWindowVisible(hwnd))");
+    expect(csharp).toContain("if (!LooksLikeMain(hwnd)) return false;");
+    expect(csharp).toContain("(GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0");
+    expect(csharp).toContain("GetWindow(hwnd, GwOwner) != IntPtr.Zero");
+  });
+
+  it("reveals the app window if hosting never succeeds", () => {
+    const csharp = buildWindowHostCSharp();
+    // A hidden launch with no hosting would leave the app invisible, so the watcher
+    // shows the window on the desktop instead and keeps trying.
+    expect(csharp).toContain("static int RevealHiddenWindows(");
+    expect(csharp).toContain("ReportShown(shown)");
+    expect(csharp).toContain("if (mainWindow == 0 && !revealed && clock.ElapsedMilliseconds >= revealAt)");
+    expect(buildWindowHostScriptArgs("C:\\w.ps1", { mode: "watch", parentHandle: 9, revealAfterMs: 9000 }).join(" ")).toContain("-RevealAfterMs 9000");
   });
 
   it("only moves the hosted window itself when the host resizes", () => {
@@ -64,9 +80,12 @@ describe("window host launcher", () => {
     expect(csharp).toContain("ProcessParents()");
     expect(csharp).toContain("InProcessLineage");
     expect(csharp).toContain("CreateToolhelp32Snapshot");
-    expect(csharp).toContain("public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath)");
+    expect(csharp).toContain("public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath, int revealAfterMs)");
     expect(csharp).toContain("File.Exists(stopFilePath)");
     expect(csharp).toContain("IsAppWindow(hwnd, seeds, parents, sandboxRoot)");
+    // Fast polling while a launch is settling, then a cheaper steady tick.
+    expect(csharp).toContain("WatchTickFastMs = 120");
+    expect(csharp).toContain("clock.ElapsedMilliseconds < FastWatchMs ? WatchTickFastMs : WatchTickMs");
     // A second (dialog) window keeps its own size instead of filling the host.
     expect(csharp).toContain("public static bool EmbedCentered(long childHandle, long parentHandle, int topInset)");
     expect(csharp).toContain("ShowWindow(child, SwHide)");
@@ -96,6 +115,16 @@ describe("window host launcher", () => {
     expect(args.join(" ")).toContain("-SandboxRoot C:\\apps\\a1");
     expect(args.join(" ")).toContain("-InsetTop 56");
     expect(buildWindowHostScript()).toContain("[RunContainerWindowHost]::Watch");
+  });
+
+  it("loads a compiled host instead of recompiling it on every launch", () => {
+    const script = buildWindowHostScript();
+    expect(script).toContain("[string]$CachePath = ''");
+    expect(script).toContain("Add-Type -Path $CachePath");
+    expect(script).toContain("-OutputAssembly $CachePath -OutputType Library");
+    expect(script).toContain("$Mode -eq 'prewarm'");
+    const args = buildWindowHostScriptArgs("C:\\w.ps1", { mode: "prewarm", parentHandle: 0, cachePath: "C:\\c\\host.dll" });
+    expect(args.join(" ")).toContain("-CachePath C:\\c\\host.dll");
   });
 
   it("passes the process, the parent handle and a timeout", () => {

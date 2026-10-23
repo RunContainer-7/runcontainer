@@ -242,7 +242,7 @@ public class RcvmLauncher {
   }
 
   public static string Start(string jobName, string exe, string cmdArgs, string workDir,
-      long memoryCapBytes, int cpuRate, int maxProcesses) {
+      long memoryCapBytes, int cpuRate, int maxProcesses, int showState) {
     IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
     if (job == IntPtr.Zero) return JsonError("CreateJobObject failed: " + Marshal.GetLastWin32Error());
     try {
@@ -275,6 +275,10 @@ public class RcvmLauncher {
       if (!string.IsNullOrEmpty(cmdArgs)) { cmd.Append(' ').Append(cmdArgs); }
       var si = new STARTUPINFO();
       si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+      // showState 0 (SW_HIDE) makes a GUI app create its first window hidden, so the
+      // window host can put it inside RunContainer instead of it appearing on the
+      // desktop first. Console apps pass -1 and keep Windows' default behaviour.
+      if (showState >= 0) { si.dwFlags = 0x00000001; si.wShowWindow = (short)showState; }
       PROCESS_INFORMATION pi;
       bool created = CreateProcessW(null, cmd, IntPtr.Zero, IntPtr.Zero, false,
         CREATE_SUSPENDED, IntPtr.Zero, workDir, ref si, out pi);
@@ -450,6 +454,7 @@ function buildRcvmLaunchScript({
   cpuRate,
   maxProcesses,
   runtimeEnv = {},
+  startHidden = false,
   launcherCacheDir,
   launcherCacheKey,
 } = {}) {
@@ -513,7 +518,7 @@ function buildRcvmLaunchScript({
     `$env:HOMEDRIVE = ${psQuote(homeDrive)}`,
     `$env:HOMEPATH = ${psQuote(homePath)}`,
     ...runtimeEnvEntries.map(([key, value]) => `$env:${key} = ${psQuote(value)}`),
-    `$startJson = [RcvmLauncher]::Start(${psQuote(jobName)}, ${psQuote(executablePath)}, ${psQuote(launchArgs)}, ${psQuote(workingDirectory)}, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses})`,
+    `$startJson = [RcvmLauncher]::Start(${psQuote(jobName)}, ${psQuote(executablePath)}, ${psQuote(launchArgs)}, ${psQuote(workingDirectory)}, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses}, ${startHidden ? 0 : -1})`,
     'Write-Output $startJson',
     '[Console]::Out.Flush()',
     '$start = $startJson | ConvertFrom-Json',

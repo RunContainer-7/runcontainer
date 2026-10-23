@@ -1,4 +1,4 @@
-const { buildBehaviorProbeScript, buildBehaviorProbeArgs, parseBehaviorProbeOutput, summarizeProbe } = require('../../public/behavioral-probe');
+const { buildProbeCSharp, buildBehaviorProbeScript, buildBehaviorProbeArgs, parseBehaviorProbeOutput, summarizeProbe } = require('../../public/behavioral-probe');
 
 describe('behavioural probe', () => {
   it('builds a script that asks Win32 for windows and reads CPU/IO counters', () => {
@@ -13,6 +13,20 @@ describe('behavioural probe', () => {
   it('passes only positive numeric PIDs to PowerShell', () => {
     const args = buildBehaviorProbeArgs('C:\\probe.ps1', [12, 0, -3, 'abc', 44]);
     expect(args).toEqual(['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\probe.ps1', '-Pids', '12,44']);
+  });
+
+  it('counts a window hosted inside RunContainer as the app window', () => {
+    // A hosted window is a child of RunContainer's host window. An EnumWindows-only
+    // probe reported it as missing, so the supervisor restarted an app that was visible.
+    const csharp = buildProbeCSharp();
+    expect(csharp).toContain('EnumChildWindows');
+    expect(csharp).toContain('parentOwner == tally.HostProcessId');
+    expect(csharp).toContain('Visit(hwnd, tally)');
+    expect(csharp).toContain('tally.Count += 1');
+    expect(buildBehaviorProbeScript()).toContain('VisibleWindowCount($procId, $hostId)');
+    expect(buildBehaviorProbeArgs('C:\\probe.ps1', [12], 4242)).toEqual([
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\probe.ps1', '-Pids', '12', '-HostPid', '4242',
+    ]);
   });
 
   it('parses the result line and tolerates damaged rows', () => {
