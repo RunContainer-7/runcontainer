@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.7.2',
+    date: '2026-10-23',
+    title: 'Every window stays inside RunContainer, without the glitches',
+    changes: [
+      'RunContainer now keeps watching while an app runs, instead of looking for a window once at launch. Installer wizards that open their real window from a second process, apps that show a splash first, and dialogs that appear later are all hosted as they appear, usually within half a second, so they no longer sit on your desktop.',
+      'Fixed the glitchy layout. When a hosted window was resized, RunContainer moved every descendant window it found — including the app’s own buttons, panels and text boxes — which threw the app’s interface apart. Only the window RunContainer actually hosts is moved now, so an app’s controls keep the layout its own code gave them.',
+      'Dialogs keep their own size and are centred in the window instead of being stretched edge to edge. Maximised windows are restored before hosting, and windows are hidden while they are moved, so they no longer jump across the screen.',
+      'A launched process is no longer confused with the window. RunContainer follows the app’s process tree (an installer that re-launches itself from a temporary folder is still recognised) and also matches windows running from the app’s own folder.',
+      'A second RunContainer window only appears when there is something in it: it stays hidden until the first app window is hosted, and it closes when the app ends instead of leaving a blank window behind.',
+      'Stopping an app no longer flashes its window on the desktop first; the window disappears with the process it belongs to.',
+    ],
+  },
+  {
     version: '0.7.1',
     date: '2026-10-23',
     title: 'Installer wizards run inside RunContainer, not on your desktop',

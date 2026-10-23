@@ -6,13 +6,22 @@
 // RunContainer" on Windows means two separate things:
 //
 //   1. Process isolation  - the app runs in its own process under an AppContainer or a
-//      Sandboxie-Plus box. This is what keeps it away from the rest of the system.
-//   2. Window hosting     - the app's top-level window is re-parented into RunContainer's
+//      Job Object (RCVM). This is what keeps it away from the rest of the system.
+//   2. Window hosting     - the app's top-level window is re-parented into a RunContainer
 //      window so the app visually appears inside the app. This adds no isolation at all.
 //
 // This module implements only (2). Hosting is best-effort: Windows can refuse to re-parent a
 // window across integrity levels, and some apps misbehave when hosted, so a failure is
-// logged and the app keeps running in its own window.
+// reported and the app keeps running in its own window.
+//
+// Two things make hosting feel seamless rather than glitchy:
+//   - A watcher (Watch mode) keeps looking while the app runs, instead of one blocking
+//     look at launch. Installers and launchers routinely create their real window in a
+//     second (or third) process, seconds after the process we started; one-shot hosting
+//     missed those windows and left them on the desktop.
+//   - Only the window that was actually parented is moved when the host resizes.
+//     EnumChildWindows walks every descendant, including the app's own buttons and panels,
+//     so resizing "all windows of this process" used to throw the app's inner layout apart.
 //
 // Only text is built and parsed here, so it can be unit tested off Windows.
 
@@ -23,7 +32,10 @@ function buildWindowHostCSharp() {
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 
 public static class RunContainerWindowHost
 {
@@ -43,6 +55,12 @@ public static class RunContainerWindowHost
 
     [DllImport("user32.dll")]
     static extern bool IsWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    static extern bool IsIconic(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    static extern bool IsZoomed(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     static extern IntPtr GetWindow(IntPtr hwnd, uint command);
@@ -65,36 +83,93 @@ public static class RunContainerWindowHost
     [DllImport("user32.dll")]
     static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 
+    [DllImport("user32.dll")]
+    static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    static extern int GetWindowTextLength(IntPtr hwnd);
+
     [DllImport("kernel32.dll")]
     static extern void SetLastError(uint errorCode);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
     static extern int GetWindowLong32(IntPtr hwnd, int index);
 
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
-    static extern IntPtr GetWindowLongPtr64(IntPtr hwnd, int index);
-
     [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
     static extern int SetWindowLong32(IntPtr hwnd, int index, int value);
 
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
-    static extern IntPtr SetWindowLongPtr64(IntPtr hwnd, int index, IntPtr value);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool Process32First(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
 
     [StructLayout(LayoutKind.Sequential)]
     struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PROCESSENTRY32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
     const uint GwOwner = 4;
+    const uint Th32csSnapProcess = 0x00000002;
     const int GwlStyle = -16;
     const int GwlExStyle = -20;
+    const int SwHide = 0;
     const int SwShow = 5;
-    const int SwShowNormal = 1;
+    const int SwRestore = 9;
     const uint SwpNoSize = 0x0001;
+    const uint SwpNoMove = 0x0002;
     const uint SwpNoZOrder = 0x0004;
+    const uint SwpNoActivate = 0x0010;
     const uint SwpFrameChanged = 0x0020;
     const uint SwpShowWindow = 0x0040;
     const int WsChild = 0x40000000;
     const int WsPopup = unchecked((int)0x80000000);
     const int WsExAppWindow = 0x00040000;
+    const int WatchTickMs = 400;
+    const int WatchMaxHours = 8;
+
+    static void Report(string kind, uint processId, long child)
+    {
+        StringBuilder line = new StringBuilder();
+        line.Append("${RESULT_PREFIX}{");
+        line.Append("\\"event\\":\\"").Append(kind).Append("\\"");
+        line.Append(",\\"pid\\":").Append(processId);
+        line.Append(",\\"child\\":").Append(child);
+        line.Append("}");
+        Console.WriteLine(line.ToString());
+        Console.Out.Flush();
+    }
+
+    static void ReportEnd(string reason)
+    {
+        StringBuilder line = new StringBuilder();
+        line.Append("${RESULT_PREFIX}{");
+        line.Append("\\"event\\":\\"end\\"");
+        line.Append(",\\"reason\\":\\"").Append(reason).Append("\\"");
+        line.Append("}");
+        Console.WriteLine(line.ToString());
+        Console.Out.Flush();
+    }
 
     static List<IntPtr> TopLevelWindowsForProcess(uint processId)
     {
@@ -105,8 +180,8 @@ public static class RunContainerWindowHost
             GetWindowThreadProcessId(hwnd, out ownerPid);
             if (ownerPid != processId) return true;
             if (!IsWindowVisible(hwnd)) return true;
+            if (IsIconic(hwnd)) return true;
             if (GetParent(hwnd) != IntPtr.Zero) return true;
-            if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return true;
             found.Add(hwnd);
             return true;
         }, IntPtr.Zero);
@@ -127,54 +202,137 @@ public static class RunContainerWindowHost
         }
     }
 
-    // topInset leaves that many pixels of the host window uncovered, so a window that
-    // RunContainer owns can keep its own header visible above the hosted app.
-    public static bool Embed(long childHandle, long parentHandle, int topInset)
+    static int InsetFor(IntPtr parent, int topInset)
     {
-        IntPtr child = new IntPtr(childHandle);
-        IntPtr parent = new IntPtr(parentHandle);
+        int inset = topInset > 0 ? topInset : 0;
+        RECT client;
+        if (!GetClientRect(parent, out client)) return -1;
+        int width = client.Right - client.Left;
+        int height = (client.Bottom - client.Top) - inset;
+        if (width <= 0 || height <= 0) return -1;
+        return inset;
+    }
+
+    // Re-parents one window. topInset leaves that many pixels of the host uncovered, so a
+    // window that RunContainer owns can keep its own header visible above the hosted app.
+    // fill=true makes the window take the whole area (the app's main window); fill=false
+    // keeps a dialog at its own size, centred, instead of stretching it edge to edge.
+    static bool EmbedWindow(IntPtr child, IntPtr parent, int topInset, bool fill)
+    {
         if (!IsWindow(child) || !IsWindow(parent)) return false;
-        // SetParent returns the previous parent handle (NULL for a top-level window),
-        // not a number: Convert.ToInt64 threw on it, which made every hosting attempt
-        // fail silently. Check the documented error pattern instead.
+        // Hide first: re-parenting a visible window makes it jump across the screen.
+        ShowWindow(child, SwHide);
+        // A maximized window makes a poor child; restore it so it fits the host area.
+        if (IsZoomed(child)) ShowWindow(child, SwRestore);
         SetLastError(0);
         IntPtr previous = SetParent(child, parent);
-        if (previous == IntPtr.Zero && Marshal.GetLastWin32Error() != 0) return false;
+        if (previous == IntPtr.Zero && Marshal.GetLastWin32Error() != 0)
+        {
+            ShowWindow(child, SwShow);
+            return false;
+        }
 
         // SetParent deliberately leaves the WS_CHILD / WS_POPUP styles alone, and a
         // window that is still WS_POPUP is not drawn inside its new parent. Make it a
-        // child window, then place it below the host's header strip.
+        // child window, then place it inside the host area.
         int style = GetWindowLong32(child, GwlStyle);
         SetWindowLong32(child, GwlStyle, (style | WsChild) & ~WsPopup);
         SetWindowLong32(child, GwlExStyle, GetWindowLong32(child, GwlExStyle) & ~WsExAppWindow);
 
-        int inset = topInset > 0 ? topInset : 0;
+        int inset = InsetFor(parent, topInset);
+        if (inset < 0) return false;
         RECT client;
-        if (GetClientRect(parent, out client))
+        GetClientRect(parent, out client);
+        int width = client.Right - client.Left;
+        int height = (client.Bottom - client.Top) - inset;
+        if (fill)
         {
-            int width = client.Right - client.Left;
-            int height = (client.Bottom - client.Top) - inset;
-            if (width > 0 && height > 0) MoveWindow(child, 0, inset, width, height, true);
+            MoveWindow(child, 0, inset, width, height, true);
         }
-        SetWindowPos(child, IntPtr.Zero, 0, inset, 0, 0, SwpNoSize | SwpNoZOrder | SwpFrameChanged | SwpShowWindow);
+        else
+        {
+            RECT own;
+            GetWindowRect(child, out own);
+            int ownWidth = Math.Min(Math.Max(own.Right - own.Left, 320), Math.Max(width - 48, 320));
+            int ownHeight = Math.Min(Math.Max(own.Bottom - own.Top, 200), Math.Max(height - 48, 200));
+            int left = Math.Max((width - ownWidth) / 2, 0);
+            int top = inset + Math.Max((height - ownHeight) / 2, 0);
+            MoveWindow(child, left, top, ownWidth, ownHeight, true);
+        }
+        SetWindowPos(child, IntPtr.Zero, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate | SwpShowWindow);
         ShowWindow(child, SwShow);
         return GetParent(child) == parent;
     }
 
-    // Fits an already-hosted window to a resized host. FindMainWindow cannot be used for
-    // this: a hosted window is a child now, so it is found through the host instead.
+    // Kept as the single-window entry point (tests and one-shot callers).
+    public static bool Embed(long childHandle, long parentHandle, int topInset)
+    {
+        return EmbedWindow(new IntPtr(childHandle), new IntPtr(parentHandle), topInset, true);
+    }
+
+    public static bool EmbedCentered(long childHandle, long parentHandle, int topInset)
+    {
+        return EmbedWindow(new IntPtr(childHandle), new IntPtr(parentHandle), topInset, false);
+    }
+
+    // Diagnostics for a refused embed: the Win32 error and where the window ended up.
+    public static int LastError()
+    {
+        return Marshal.GetLastWin32Error();
+    }
+
+    public static string EmbedSteps(long childHandle, long parentHandle)
+    {
+        IntPtr child = new IntPtr(childHandle);
+        IntPtr parent = new IntPtr(parentHandle);
+        StringBuilder log = new StringBuilder();
+        log.Append("childWindow=").Append(IsWindow(child));
+        log.Append(" parentWindow=").Append(IsWindow(parent));
+        log.Append(" childParent=").Append(GetParent(child).ToInt64());
+        SetLastError(0);
+        IntPtr previous = SetParent(child, parent);
+        log.Append(" previous=").Append(previous.ToInt64());
+        log.Append(" error=").Append(Marshal.GetLastWin32Error());
+        log.Append(" parentNow=").Append(GetParent(child).ToInt64());
+        return log.ToString();
+    }
+
+    public static long ParentOf(long handle)
+    {
+        return GetParent(new IntPtr(handle)).ToInt64();
+    }
+
+    // Fits the app's main window to a resized host. Only this window is moved: the app's
+    // own controls keep the layout its own code gave them.
+    public static bool FitMainWindow(long childHandle, long parentHandle, int topInset)
+    {
+        IntPtr child = new IntPtr(childHandle);
+        IntPtr parent = new IntPtr(parentHandle);
+        if (!IsWindow(child) || !IsWindow(parent)) return false;
+        if (GetParent(child) != parent) return false;
+        int inset = InsetFor(parent, topInset);
+        if (inset < 0) return false;
+        RECT client;
+        GetClientRect(parent, out client);
+        return MoveWindow(child, 0, inset, client.Right - client.Left, (client.Bottom - client.Top) - inset, true);
+    }
+
+    // Fits an already-hosted window to a resized host.
     public static int ResizeProcessWindows(uint processId, long parentHandle, int topInset)
     {
         IntPtr parent = new IntPtr(parentHandle);
+        int inset = InsetFor(parent, topInset);
+        if (inset < 0) return 0;
         RECT client;
-        if (!GetClientRect(parent, out client)) return 0;
-        int inset = topInset > 0 ? topInset : 0;
+        GetClientRect(parent, out client);
         int width = client.Right - client.Left;
         int height = (client.Bottom - client.Top) - inset;
-        if (width <= 0 || height <= 0) return 0;
         int resized = 0;
         EnumChildWindows(parent, delegate(IntPtr hwnd, IntPtr param)
         {
+            // Direct children only. Every button, edit and panel inside the app is also a
+            // descendant of the host, and moving those destroyed the app's inner layout.
+            if (GetParent(hwnd) != parent) return true;
             uint ownerPid;
             GetWindowThreadProcessId(hwnd, out ownerPid);
             if (ownerPid != processId) return true;
@@ -192,28 +350,223 @@ public static class RunContainerWindowHost
         IntPtr parent = new IntPtr(parentHandle);
         int released = 0;
         // A hosted window is a child of the host, so EnumWindows no longer sees it:
-        // the children of the host window are enumerated instead.
-        List<IntPtr> hosted = new List<IntPtr>();
+        // the direct children of the host window are enumerated instead.
         EnumChildWindows(parent, delegate(IntPtr hwnd, IntPtr param)
         {
+            if (GetParent(hwnd) != parent) return true;
             uint ownerPid;
             GetWindowThreadProcessId(hwnd, out ownerPid);
-            if (ownerPid == processId) hosted.Add(hwnd);
-            return true;
-        }, IntPtr.Zero);
-        foreach (IntPtr hwnd in hosted)
-        {
-            if (GetParent(hwnd) != parent) continue;
+            if (ownerPid != processId) return true;
             SetParent(hwnd, IntPtr.Zero);
             int style = GetWindowLong32(hwnd, GwlStyle);
             style = (style & ~WsChild) | WsPopup;
             SetWindowLong32(hwnd, GwlStyle, style);
             SetWindowLong32(hwnd, GwlExStyle, GetWindowLong32(hwnd, GwlExStyle) | WsExAppWindow);
             SetWindowPos(hwnd, IntPtr.Zero, 80, 80, 1024, 768, SwpNoZOrder | SwpFrameChanged | SwpShowWindow);
-            ShowWindow(hwnd, SwShowNormal);
+            ShowWindow(hwnd, SwRestore);
             released += 1;
-        }
+            return true;
+        }, IntPtr.Zero);
         return released;
+    }
+
+    // The process table is what makes late windows discoverable: an installer that
+    // re-launches itself from %TEMP%, or an app that starts a second process for its real
+    // UI, still names one of the launched PIDs as an ancestor.
+    public static Dictionary<uint, uint> ProcessParents()
+    {
+        Dictionary<uint, uint> parents = new Dictionary<uint, uint>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
+        if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) return parents;
+        try
+        {
+            PROCESSENTRY32 entry = new PROCESSENTRY32();
+            entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            if (!Process32First(snapshot, ref entry)) return parents;
+            do
+            {
+                parents[entry.th32ProcessID] = entry.th32ParentProcessID;
+            }
+            while (Process32Next(snapshot, ref entry));
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+        return parents;
+    }
+
+    static bool InProcessLineage(uint processId, HashSet<uint> seeds, Dictionary<uint, uint> parents)
+    {
+        if (seeds == null || seeds.Count == 0) return false;
+        uint current = processId;
+        for (int depth = 0; depth < 32; depth += 1)
+        {
+            if (seeds.Contains(current)) return true;
+            uint parent;
+            if (!parents.TryGetValue(current, out parent)) return false;
+            if (parent == 0 || parent == current) return false;
+            current = parent;
+        }
+        return false;
+    }
+
+    // Compares whole path segments, so one app's folder cannot be a prefix of another's.
+    static bool PathIsInside(string path, string root)
+    {
+        if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(root)) return false;
+        string normalized = root.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        if (path.Length < normalized.Length) return false;
+        if (string.Compare(path, 0, normalized, 0, normalized.Length, StringComparison.OrdinalIgnoreCase) != 0) return false;
+        return path.Length == normalized.Length
+            || path[normalized.Length] == System.IO.Path.DirectorySeparatorChar
+            || path[normalized.Length] == System.IO.Path.AltDirectorySeparatorChar;
+    }
+
+    // Opening another process to read its image path is not free, and the watcher runs
+    // four times a second. Results are cached briefly: long enough to keep the loop cheap,
+    // short enough that a reused PID cannot keep an unrelated window matched for long.
+    static Dictionary<uint, bool> sandboxMatches = new Dictionary<uint, bool>();
+    static DateTime sandboxCacheReset = DateTime.UtcNow;
+
+    static bool MatchesSandbox(uint processId, string sandboxRoot)
+    {
+        if (string.IsNullOrEmpty(sandboxRoot)) return false;
+        if ((DateTime.UtcNow - sandboxCacheReset).TotalSeconds > 30)
+        {
+            sandboxMatches.Clear();
+            sandboxCacheReset = DateTime.UtcNow;
+        }
+        bool cached;
+        if (sandboxMatches.TryGetValue(processId, out cached)) return cached;
+        bool matches = false;
+        try
+        {
+            string executable = Process.GetProcessById((int)processId).MainModule.FileName;
+            matches = PathIsInside(executable, sandboxRoot);
+        }
+        catch (Exception)
+        {
+            matches = false;
+        }
+        sandboxMatches[processId] = matches;
+        return matches;
+    }
+
+    // A window worth hosting: visible, top-level, not a tiny helper, and owned by this
+    // app's process tree (or by a process running from its environment folder).
+    static bool IsAppWindow(IntPtr hwnd, HashSet<uint> seeds, Dictionary<uint, uint> parents, string sandboxRoot)
+    {
+        if (!IsWindowVisible(hwnd)) return false;
+        if (IsIconic(hwnd)) return false;
+        if (GetParent(hwnd) != IntPtr.Zero) return false;
+        if (GetWindowTextLength(hwnd) == 0) return false;
+        RECT rect;
+        if (!GetWindowRect(hwnd, out rect)) return false;
+        if (rect.Right - rect.Left < 24 || rect.Bottom - rect.Top < 24) return false;
+        uint processId;
+        GetWindowThreadProcessId(hwnd, out processId);
+        if (processId == 0) return false;
+        if (InProcessLineage(processId, seeds, parents)) return true;
+        return MatchesSandbox(processId, sandboxRoot);
+    }
+
+    static HashSet<uint> ReadSeeds(string pidFilePath)
+    {
+        HashSet<uint> seeds = new HashSet<uint>();
+        if (string.IsNullOrEmpty(pidFilePath) || !File.Exists(pidFilePath)) return seeds;
+        try
+        {
+            foreach (string line in File.ReadAllLines(pidFilePath))
+            {
+                uint value;
+                if (uint.TryParse(line.Trim(), out value) && value > 0) seeds.Add(value);
+            }
+        }
+        catch (Exception)
+        {
+            // A refresh can be mid-write; the next tick reads it again.
+        }
+        return seeds;
+    }
+
+    // Hosts windows as they appear, keeps the main one fitted, and stops when RunContainer
+    // closes the host window, asks it to stop (stop file), or the safety limit is reached.
+    public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath)
+    {
+        IntPtr parent = new IntPtr(parentHandle);
+        long mainWindow = 0;
+        int lastWidth = 0;
+        int lastHeight = 0;
+        HashSet<long> refused = new HashSet<long>();
+        Stopwatch clock = Stopwatch.StartNew();
+        string reason = "ended";
+        while (true)
+        {
+            if (!IsWindow(parent)) { reason = "host-window-gone"; break; }
+            if (!string.IsNullOrEmpty(stopFilePath) && File.Exists(stopFilePath)) { reason = "stop-requested"; break; }
+            if (clock.Elapsed.TotalHours > WatchMaxHours) { reason = "time-limit"; break; }
+
+            HashSet<uint> seeds = ReadSeeds(pidFilePath);
+            Dictionary<uint, uint> parents = ProcessParents();
+            RECT client;
+            if (!GetClientRect(parent, out client)) { reason = "host-window-unreadable"; break; }
+            int inset = topInset > 0 ? topInset : 0;
+            int width = client.Right - client.Left;
+            int height = (client.Bottom - client.Top) - inset;
+            if (width <= 0 || height <= 0)
+            {
+                Thread.Sleep(WatchTickMs);
+                continue;
+            }
+
+            List<IntPtr> found = new List<IntPtr>();
+            EnumWindows(delegate(IntPtr hwnd, IntPtr param)
+            {
+                if (refused.Contains(hwnd.ToInt64())) return true;
+                if (IsAppWindow(hwnd, seeds, parents, sandboxRoot)) found.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+
+            foreach (IntPtr hwnd in found)
+            {
+                uint processId;
+                GetWindowThreadProcessId(hwnd, out processId);
+                bool fills = mainWindow == 0;
+                bool embedded = fills
+                    ? Embed(hwnd.ToInt64(), parentHandle, topInset)
+                    : EmbedCentered(hwnd.ToInt64(), parentHandle, topInset);
+                if (embedded)
+                {
+                    if (fills) mainWindow = hwnd.ToInt64();
+                    Report("embedded", processId, hwnd.ToInt64());
+                }
+                else
+                {
+                    refused.Add(hwnd.ToInt64());
+                    Report("refused", processId, hwnd.ToInt64());
+                }
+            }
+
+            if (mainWindow != 0)
+            {
+                IntPtr main = new IntPtr(mainWindow);
+                if (!IsWindow(main) || GetParent(main) != parent)
+                {
+                    // The app closed its window; the next one it opens becomes the main one.
+                    mainWindow = 0;
+                }
+                else if (width != lastWidth || height != lastHeight)
+                {
+                    FitMainWindow(mainWindow, parentHandle, topInset);
+                }
+            }
+            lastWidth = width;
+            lastHeight = height;
+            Thread.Sleep(WatchTickMs);
+        }
+        ReportEnd(reason);
+        Console.Out.Flush();
     }
 }
 `;
@@ -221,14 +574,18 @@ public static class RunContainerWindowHost
 
 function buildWindowHostScript() {
   return [
-    'param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0)',
+    'param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0, [string]$PidFile = \'\', [string]$SandboxRoot = \'\', [string]$StopFile = \'\')',
     "$ErrorActionPreference = 'Stop'",
     "$source = @'",
     buildWindowHostCSharp(),
     "'@",
     'Add-Type -TypeDefinition $source -Language CSharp',
     'try {',
-    "  if ($Mode -eq 'release') {",
+    "  if ($Mode -eq 'embeddebug') {",
+    '    Write-Output ([RunContainerWindowHost]::EmbedSteps([int64]$ProcessId, [int64]$Parent))',
+    "  } elseif ($Mode -eq 'watch') {",
+    '    [RunContainerWindowHost]::Watch([int64]$Parent, $InsetTop, $PidFile, $SandboxRoot, $StopFile)',
+    "  } elseif ($Mode -eq 'release') {",
     '    $count = [RunContainerWindowHost]::ReleaseProcessWindows([uint32]$ProcessId, [int64]$Parent)',
     `    Write-Output ('${RESULT_PREFIX}' + (@{ released = $count } | ConvertTo-Json -Compress))`,
     "  } elseif ($Mode -eq 'resize') {",
@@ -240,25 +597,36 @@ function buildWindowHostScript() {
     `      Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $false; reason = 'the app did not open a window RunContainer could host' } | ConvertTo-Json -Compress))`,
     '    } else {',
     '      $embedded = [RunContainerWindowHost]::Embed($child, [int64]$Parent, $InsetTop)',
-    `      Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $embedded; child = $child; reason = $(if ($embedded) { 'hosted' } else { 'Windows refused to re-parent the app window (this is expected for windows at a lower integrity level)' }) } | ConvertTo-Json -Compress))`,
+    `      Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $embedded; child = $child; parentAfter = [RunContainerWindowHost]::ParentOf($child); win32Error = [RunContainerWindowHost]::LastError(); reason = $(if ($embedded) { 'hosted' } else { 'Windows refused to re-parent the app window (this is expected for windows at a lower integrity level)' }) } | ConvertTo-Json -Compress))`,
     '    }',
     '  }',
     '} catch {',
-    `  Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $false; released = 0; error = $_.Exception.Message } | ConvertTo-Json -Compress))`,
+    `  Write-Output ('${RESULT_PREFIX}' + (@{ embedded = $false; released = 0; event = 'error'; error = $_.Exception.Message } | ConvertTo-Json -Compress))`,
     '}',
   ].join('\n');
 }
 
-function buildWindowHostScriptArgs(scriptPath, { mode, processId, parentHandle, timeoutMs = 12000, insetTop = 0 }) {
-  return [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
-    '-Mode', mode,
-    '-ProcessId', String(processId),
-    '-Parent', String(parentHandle),
-    '-TimeoutMs', String(timeoutMs),
-    // Only sent when a caller asks for a header strip, so existing calls stay identical.
-    ...(insetTop > 0 ? ['-InsetTop', String(insetTop)] : []),
-  ];
+function buildWindowHostScriptArgs(scriptPath, {
+  mode,
+  processId,
+  parentHandle,
+  timeoutMs = 12000,
+  insetTop = 0,
+  pidFile,
+  sandboxRoot,
+  stopFile,
+} = {}) {
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Mode', mode];
+  if (Number.isSafeInteger(processId) && processId > 0) args.push('-ProcessId', String(processId));
+  args.push('-Parent', String(parentHandle));
+  // Watch mode has no timeout of its own: it lives as long as the host window.
+  if (mode !== 'watch') args.push('-TimeoutMs', String(timeoutMs));
+  // Only sent when a caller asks for a header strip, so existing calls stay identical.
+  if (insetTop > 0) args.push('-InsetTop', String(insetTop));
+  if (pidFile) args.push('-PidFile', pidFile);
+  if (sandboxRoot) args.push('-SandboxRoot', sandboxRoot);
+  if (stopFile) args.push('-StopFile', stopFile);
+  return args;
 }
 
 function parseWindowHostOutput(stdout) {
@@ -270,6 +638,21 @@ function parseWindowHostOutput(stdout) {
   } catch (error) {
     throw new Error('The window host returned an unreadable result.');
   }
+}
+
+// A watcher prints one result per event; this splits whatever arrived on stdout into them.
+function parseWindowHostEvents(chunk) {
+  return String(chunk || '')
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(RESULT_PREFIX))
+    .map((line) => {
+      try {
+        return JSON.parse(line.slice(RESULT_PREFIX.length));
+      } catch (error) {
+        return null;
+      }
+    })
+    .filter(Boolean);
 }
 
 // Electron hands back the native window handle as a little-endian buffer on Windows; the
@@ -292,5 +675,6 @@ module.exports = {
   buildWindowHostScript,
   buildWindowHostScriptArgs,
   parseWindowHostOutput,
+  parseWindowHostEvents,
   nativeHandleToInt,
 };

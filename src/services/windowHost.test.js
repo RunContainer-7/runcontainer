@@ -3,6 +3,7 @@ const {
   buildWindowHostScript,
   buildWindowHostScriptArgs,
   parseWindowHostOutput,
+  parseWindowHostEvents,
   nativeHandleToInt,
   RESULT_PREFIX,
 } = require("../../public/window-host");
@@ -42,7 +43,59 @@ describe("window host launcher", () => {
   it("never claims hosting adds isolation and only re-parents visible top-level windows", () => {
     const csharp = buildWindowHostCSharp();
     expect(csharp).toContain("GetParent(hwnd) != IntPtr.Zero");
-    expect(csharp).toContain("GetWindow(hwnd, GwOwner) != IntPtr.Zero");
+    expect(csharp).toContain("if (!IsWindowVisible(hwnd)) return false;");
+    expect(csharp).toContain("if (IsIconic(hwnd)) return false;");
+  });
+
+  it("only moves the hosted window itself when the host resizes", () => {
+    const csharp = buildWindowHostCSharp();
+    const resize = csharp.slice(csharp.indexOf("public static int ResizeProcessWindows"));
+    const body = resize.slice(0, resize.indexOf("public static int ReleaseProcessWindows"));
+    // EnumChildWindows returns every descendant, including the app's own buttons and
+    // panels. Moving those threw the app's inner layout apart.
+    expect(body).toContain("if (GetParent(hwnd) != parent) return true;");
+    expect(body.match(/if \(GetParent\(hwnd\) != parent\) return true;/g)).toHaveLength(1);
+  });
+
+  it("keeps watching for windows that appear after launch", () => {
+    const csharp = buildWindowHostCSharp();
+    // Installers re-launch themselves from %TEMP%, so a window's own PID is often not
+    // the PID that was started. Matching the process lineage is what finds those.
+    expect(csharp).toContain("ProcessParents()");
+    expect(csharp).toContain("InProcessLineage");
+    expect(csharp).toContain("CreateToolhelp32Snapshot");
+    expect(csharp).toContain("public static void Watch(long parentHandle, int topInset, string pidFilePath, string sandboxRoot, string stopFilePath)");
+    expect(csharp).toContain("File.Exists(stopFilePath)");
+    expect(csharp).toContain("IsAppWindow(hwnd, seeds, parents, sandboxRoot)");
+    // A second (dialog) window keeps its own size instead of filling the host.
+    expect(csharp).toContain("public static bool EmbedCentered(long childHandle, long parentHandle, int topInset)");
+    expect(csharp).toContain("ShowWindow(child, SwHide)");
+    expect(csharp).toContain("if (IsZoomed(child)) ShowWindow(child, SwRestore)");
+  });
+
+  it("compares sandbox folders by whole path segments", () => {
+    const csharp = buildWindowHostCSharp();
+    expect(csharp).toContain("static bool PathIsInside(string path, string root)");
+    expect(csharp).toContain("System.IO.Path.DirectorySeparatorChar");
+    expect(csharp).toContain("System.IO.Path.AltDirectorySeparatorChar");
+  });
+
+  it("starts a watcher without a one-shot timeout and with its state files", () => {
+    const args = buildWindowHostScriptArgs("C:\\w.ps1", {
+      mode: "watch",
+      parentHandle: 1234,
+      insetTop: 56,
+      pidFile: "C:\\state\\app.pids",
+      sandboxRoot: "C:\\apps\\a1",
+      stopFile: "C:\\state\\app.stop",
+    });
+    expect(args).toContain("watch");
+    expect(args).not.toContain("-TimeoutMs");
+    expect(args.join(" ")).toContain("-PidFile C:\\state\\app.pids");
+    expect(args.join(" ")).toContain("-StopFile C:\\state\\app.stop");
+    expect(args.join(" ")).toContain("-SandboxRoot C:\\apps\\a1");
+    expect(args.join(" ")).toContain("-InsetTop 56");
+    expect(buildWindowHostScript()).toContain("[RunContainerWindowHost]::Watch");
   });
 
   it("passes the process, the parent handle and a timeout", () => {
@@ -61,6 +114,15 @@ describe("window host launcher", () => {
     const csharp = buildWindowHostCSharp();
     expect(csharp).toContain("public static bool Embed(long childHandle, long parentHandle, int topInset)");
     expect(csharp).toContain("MoveWindow(child, 0, inset, width, height, true)");
+  });
+
+  it("splits watcher output into one event per line", () => {
+    const chunk = `${RESULT_PREFIX}{"event":"embedded","pid":42,"child":7}\r\n${RESULT_PREFIX}{"event":"refused","pid":43,"child":8}\r\nnot a result\n`;
+    expect(parseWindowHostEvents(chunk)).toEqual([
+      { event: "embedded", pid: 42, child: 7 },
+      { event: "refused", pid: 43, child: 8 },
+    ]);
+    expect(parseWindowHostEvents("nothing")).toEqual([]);
   });
 
   it("reads the result, including a refusal that must not be treated as success", () => {
