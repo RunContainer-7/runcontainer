@@ -862,8 +862,9 @@ let aiBrain = createBrain({
 const repairVerifier = repairVerification.createRepairVerifier({ minObservations: 3, timeoutMs: 45000 });
 const pendingRepairs = new Map();
 let aiMonitoringEnabled = true;
-// Local diagnostic history: temporary context for the safety gate and the AI
-// tab. It is not training data and nothing here changes the model's weights.
+// Local diagnostic history: temporary context for the safety gate and the
+// RC-Brain section in Settings. It is not training data and nothing here
+// changes the model's weights.
 // The separate experience store holds verified outcomes; neither one updates
 // weights without an explicit, offline, gated training run.
 const aiHistoryPath = path.join(app.getPath('userData'), 'runcontainer-ai-history.json');
@@ -882,7 +883,7 @@ try {
       : `RC-Brain is unavailable: ${aiBrain.error}`,
   );
 } catch (error) {
-  // Diagnostics are best-effort; the AI tab reports the same state.
+  // Diagnostics are best-effort; Settings reports the same state.
 }
 const anomalyTelemetry = createTelemetryLogger({
   userDataDir: app.getPath('userData'),
@@ -1106,7 +1107,7 @@ function aiStatus() {
     model: aiBrain.model,
     registry: aiRegistry(),
     monitoring: Boolean(aiMonitoringEnabled && behavioralSupervisor),
-    // Live proof that the supervisor is ticking, shown in the AI tab.
+    // Live proof that the supervisor is ticking, shown in Settings.
     monitor: behavioralSupervisor?.status?.() || {
       running: false, intervalMs: null, startedAt: null, lastTickAt: null, ticks: 0, watchedApps: 0,
     },

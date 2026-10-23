@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.6.10',
+    date: '2026-10-23',
+    title: 'RC-Brain moves into Settings, and the tab bar gets shorter',
+    changes: [
+      'The AI tab is gone. RC-Brain’s status, held-out results, monitoring switch, repair permissions, verified outcomes and recent diagnoses now live in Settings, below the cards about how apps are kept apart. The monitor’s “last check” line keeps refreshing while Settings is open.',
+      'Nothing changed about what RC-Brain may do: the same low-risk repairs still run automatically, clearing an app profile still needs your approval, and the previous model can still be rolled back.',
+      'The bottom bar now has seven tabs: Sources, Apps, Tweaks, Settings, Profiles, Info and Updates. The documentation points at Settings for everything RC-Brain.',
+    ],
+  },
+  {
     version: '0.6.9',
     date: '2026-10-22',
     title: 'Upgrades wait for RunContainer to finish closing',

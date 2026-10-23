@@ -185,11 +185,13 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("restores every app tab, including AI, Tweaks, Profiles and Updates", () => {
+  it("restores every app tab, including Tweaks, Profiles and Updates", () => {
     const container = render();
-    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"]) {
+    for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"]) {
       expect(container.textContent).toContain(tab);
     }
+    // RC-Brain lives inside Settings now, so the bottom bar has no AI entry.
+    expect(container.querySelector(".bottom-nav").textContent).not.toContain("AI");
     // Policies live on the documentation site, not inside the launcher.
     expect(container.textContent).not.toContain("Policies");
     openTab(container, "Tweaks");
@@ -434,7 +436,7 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows the model, evaluation and monitoring control in the AI tab", async () => {
+  it("shows the model, evaluation and monitoring control in Settings", async () => {
     getAiStatus.mockResolvedValue({
       available: true,
       enabled: true,
@@ -466,7 +468,7 @@ describe("ContainerManager", () => {
     });
     setAiMonitoring.mockResolvedValue({ enabled: false, monitoring: false, available: true });
     const container = render();
-    openTab(container, "AI");
+    openTab(container, "Settings");
     await act(async () => { await Promise.resolve(); });
     expect(container.textContent).toContain("RC-Brain");
     expect(container.textContent).toContain("8,334 parameters");

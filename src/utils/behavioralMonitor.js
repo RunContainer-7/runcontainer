@@ -202,7 +202,7 @@ function createBehavioralSupervisor({
   let timer = null;
   let ticking = false;
   let unavailableReported = false;
-  // Observability only: the AI tab reports that monitoring is actually alive
+  // Observability only: Settings reports that monitoring is actually alive
   // instead of trusting a switch. It never changes a diagnosis.
   let startedAt = null;
   let lastTickAt = null;

@@ -14,18 +14,17 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.6.9";
+const APP_VERSION_FALLBACK = "0.6.10";
 // The only two project links the app opens, both official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
-const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "AI", "Info", "Updates"];
+const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
   Apps: "▣",
   Tweaks: "✧",
   Settings: "⚙",
   Profiles: "◧",
-  AI: "◈",
   Info: "◌",
   Updates: "↓",
 };
@@ -179,10 +178,10 @@ export default function ContainerManager() {
   useEffect(() => onAiStatus((status) => { if (status) setAiStatus(status); }), []);
   useEffect(() => onAiHistory((history) => { if (Array.isArray(history)) setAiHistory(history); }), []);
 
-  // Keep the AI tab's heartbeat current: "last check" must reflect the real
-  // supervisor tick, not the snapshot taken when the tab opened.
+  // Keep RC-Brain's heartbeat current: "last check" must reflect the real
+  // supervisor tick, not the snapshot taken when Settings opened.
   useEffect(() => {
-    if (activeTab !== 'AI') return undefined;
+    if (activeTab !== 'Settings') return undefined;
     const timer = setInterval(() => {
       Promise.resolve(getAiStatus()).then((status) => { if (status) setAiStatus(status); }).catch(() => {});
     }, 5000);
@@ -1012,11 +1011,8 @@ export default function ContainerManager() {
               <span>Launch, stop and exit events are written to each app’s log, which you can open with the Logs button.</span>
             </div>
           </div>
-        </div>
-      )}
 
-      {activeTab === "AI" && (
-        <div className="placeholder-panel ai-panel">
+          <div className="ai-panel">
           <div className="panel-title-row">
             <div>
               <h3>RC-Brain</h3>
@@ -1176,6 +1172,7 @@ export default function ContainerManager() {
             </div>
           )}
           <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
+          </div>
         </div>
       )}
 
