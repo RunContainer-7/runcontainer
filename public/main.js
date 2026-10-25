@@ -1084,9 +1084,15 @@ async function probeAppBehavior(appRecord, state) {
   let probe = null;
   if (!isVm && process.platform === 'win32' && pids.length > 0) {
     try {
-      // A hosted window is a child of RunContainer's host window; the probe needs our
-      // own PID to recognise it instead of reporting the app as windowless.
-      const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids, process.pid), {
+      // A hosted window is a child of RunContainer's host window; the probe needs the
+      // PID of the process that owns that host to recognise it instead of reporting the
+      // app as windowless. A normal launch is hosted by this process; an elevated app is
+      // hosted by its elevated launcher, and its window would otherwise look missing and
+      // be "repaired" by restarting a working installer mid-setup.
+      const hostPid = appRecord.elevated && Number.isSafeInteger(appRecord.rcvmLauncherPid)
+        ? appRecord.rcvmLauncherPid
+        : process.pid;
+      const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids, hostPid), {
         timeout: 15000,
         maxBuffer: 1024 * 1024,
       });

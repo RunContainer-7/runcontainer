@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.5";
+const APP_VERSION_FALLBACK = "0.7.6";
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";

@@ -4,11 +4,12 @@
 
 export const UPDATES = [
   {
-    version: '0.7.5',
+    version: '0.7.6',
     date: '2026-10-25',
     title: 'Administrator apps and installer wizards open inside a RunContainer window',
     changes: [
       'Fixed the last case where an app still opened as a stand-alone desktop window. Apps and installer wizards that need administrator rights (VirtualBox’s setup, for example) could not be hosted by RunContainer’s normal window — Windows forbids one privilege level from re-parenting a window from a higher one — so after the approval prompt they opened wherever they liked. The elevated launcher now creates a RunContainer window itself, at the same privilege level as the app, and hosts the app or the installer wizard inside it. The title bar names the app and says “administrator approved”.',
+      'The behavioural monitor follows the administrator window too. Its window check looked for children of RunContainer’s own host window, so a window hosted by the elevated launcher could be read as “no window” and a working installer restarted mid-setup. It now checks the process that actually owns the host window.',
       'Closing that window ends the app. The window is tied to the contained job, so closing it stops the whole process tree instead of leaving an invisible installer running behind it. Stop and Reset work exactly as they do for every other app.',
       'A window that never appears no longer leaves an empty frame behind. A console tool, or an app that exits before drawing anything, closes the host window after 30 seconds and keeps running; it is never killed for having no window.',
       'The installer wizard is hosted wherever Windows allows it: a normal installer opens in the same RunContainer window style as an app, and an administrator installer opens in the administrator window with its setup dialogs inside it. Nothing is ever run outside containment to make a window appear.',

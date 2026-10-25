@@ -1,7 +1,7 @@
 {
   "name": "RunContainer",
   "productName": "RunContainer",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "A Windows-based container management application for running applications in a sandboxed environment.",
   "main": "public/main.js",
   "scripts": {
