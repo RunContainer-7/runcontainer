@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.7.7',
+    date: '2026-10-25',
+    title: 'Delete and update work on every app folder, and Store installers no longer escape',
+    changes: [
+      'Fixed “The path cannot be traversed because it contains an untrusted mount point” when deleting or updating an app. Windows silently puts a junction inside the app’s profile the first time anything is cached (INetCache\\Content.IE5 points at INetCache\\IE), and a folder containing one cannot be deleted recursively at all — twelve attempts, an ownership repair and every retry failed the same way, leaving a half-deleted app whose icon and executable were already gone. RunContainer now finds those links first and deletes the link itself, never what it points at, then removes the folder normally. Verified against the folder that failed on this PC: one junction found, folder removed.',
+      'A failed delete no longer leaves an app that is missing its files. The same folder is removed whole, so an app is either still complete or gone, and the record is not kept pointing at an executable that no longer exists.',
+      'Apps are no longer installed outside containment through the Microsoft Store. Some downloads are not applications at all: they are a few hundred kilobytes of “ms-windows-store:” bridge that asks Windows to install a Store package. Starting one installs the real app system-wide into WindowsApps and opens the Store window, which is a UWP frame that no RunContainer window can host. RunContainer now recognises such a bridge and refuses it before anything starts, with the reason and what to use in its place, rather than appearing to run it while the app lands outside its own boundary. A VM environment is still allowed, because there the Store install happens inside the guest.',
+      'An app whose icon file went missing gets its real icon back instead of a bare initial. The icon is extracted again from the executable the app runs the next time the list is read, not only once at startup.',
+    ],
+  },
+  {
     version: '0.7.6',
     date: '2026-10-25',
     title: 'Administrator apps and installer wizards open inside a RunContainer window',

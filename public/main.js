@@ -41,6 +41,10 @@ const {
   buildClearReadOnlyArgs,
   buildAclRepairPlan,
   CleanupCancelledError,
+  clearReparsePoints,
+  detectStoreHandoff,
+  describeStoreHandoff,
+  isUntrustedMountPointError,
   isWithinDirectory,
 } = require('./isolated-launch');
 const {
@@ -696,6 +700,20 @@ async function removeSandboxDirectory(sandboxRoot, { shouldAbort = () => false, 
         if (process.platform === 'win32') await executeFile('attrib.exe', buildClearReadOnlyArgs(sandboxRoot));
       },
       prepareForRemoval: async () => { await repairSandboxPermissions(sandboxRoot); },
+      // Windows' own IE cache creates a junction inside the profile (Content.IE5 -> IE) and
+      // installers create more. Deleting the tree while one exists fails with "untrusted
+      // mount point" on every attempt, so the links are removed first — the link only,
+      // never what it points at.
+      clearLinks: async () => {
+        const result = clearReparsePoints(sandboxRoot);
+        if (logPath && result.removed.length > 0) {
+          appendLog(logPath, `Removed ${result.removed.length} reparse point${result.removed.length === 1 ? '' : 's'} left inside ${sandboxRoot} before deleting the folder (the link only, not what it pointed at).`);
+        }
+        if (logPath && result.failed.length > 0) {
+          appendLog(logPath, `Windows refused to remove ${result.failed.length} reparse point${result.failed.length === 1 ? '' : 's'} inside ${sandboxRoot}: ${result.failed.slice(0, 3).join(', ')}`);
+        }
+        return result;
+      },
       shouldAbort,
       attempts: 12,
       retryDelayMs: 1000,
@@ -3302,9 +3320,20 @@ ipcMain.handle('list-apps', async () => {
       diskPresent: entry.hypervVhd ? fs.existsSync(entry.hypervVhd) : null,
     };
   });
-  if (updatesById.size === 0 && !runtimeFilled) return reconciled;
+  // An icon file can go missing (an interrupted delete, a repair, a copied record). Extracting
+  // it again from the executable the app actually runs keeps the real icon in the list instead
+  // of a bare initial for the rest of the record's life.
+  let iconRepaired = false;
+  const withIcons = await Promise.all(reconciled.map(async (entry) => {
+    if (entry.iconUrl || !entry.source || !entry.sandboxRoot || !fs.existsSync(entry.source)) return entry;
+    const extracted = await extractExeIcon(entry.source, path.join(entry.sandboxRoot, 'icon.png'));
+    if (!extracted) return entry;
+    iconRepaired = true;
+    return { ...entry, iconPath: extracted, iconUrl: iconDataUrl(extracted) };
+  }));
+  if (updatesById.size === 0 && !runtimeFilled && !iconRepaired) return withIcons;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
-  const current = updatesById.size ? mergeStatusUpdates(reconciled, updatesById) : reconciled;
+  const current = updatesById.size ? mergeStatusUpdates(withIcons, updatesById) : withIcons;
   saveApps(current.map(({ envDirPresent, sourcePresent, diskPresent, iconUrl, ...rest }) => rest));
   return current;
 });
@@ -3487,6 +3516,18 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   const logsRoot = appRecord.logsRoot || path.join(sandboxRoot, 'logs');
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   ensureSandboxLayout(sandboxRoot);
+
+  // A Microsoft Store bridge installs into WindowsApps, outside every boundary this app can
+  // enforce, and its window is a UWP frame no host window can adopt. Refusing before the
+  // launch is the only honest option on a host engine; inside a VM the install is contained.
+  const selectedEngine = selectEngine(getStoredApp(appRecord.id) || appRecord);
+  if (selectedEngine !== 'hyperv' && selectedEngine !== 'qemu') {
+    const storeHandoff = detectStoreHandoff(appRecord.source);
+    if (storeHandoff) {
+      appendLog(logPath, `Refusing to launch ${appRecord.source}: it is a ${storeHandoff.marker} Microsoft Store bridge (${storeHandoff.sizeBytes} bytes).`);
+      return failedLaunch(appRecord, describeStoreHandoff(storeHandoff.marker));
+    }
+  }
 
   const existingPids = appRecord.status === 'Running'
     ? await listProcessTable().then((table) => findAppProcessIds(table, sandboxRoot, trackedPids(appRecord))).catch(() => (appRecord.pid ? [appRecord.pid] : []))

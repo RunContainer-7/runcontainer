@@ -42,6 +42,121 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A sandbox can contain a Windows reparse point: a directory junction, a symbolic link or a
+// mounted folder. Windows creates one by itself the first time an app caches anything
+// (INetCache\Content.IE5 is a junction to INetCache\IE), and installers create more.
+// Recursive deletion must never follow such a link. Node's rmSync refuses the whole tree with
+// "The path cannot be traversed because it contains an untrusted mount point", and following
+// the link would delete data outside the app's own folder. So each link is deleted on its
+// own first: rmdir removes a junction or a mounted folder without touching its target.
+function collectReparsePoints(directory, { readdirSync = fs.readdirSync, lstatSync = fs.lstatSync } = {}) {
+  const found = [];
+  const walk = (current) => {
+    let entries = [];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch (error) {
+      // An unreadable folder is left to the normal removal, which reports the reason.
+      return;
+    }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      // A Dirent does not always flag a junction (application mount points are reported as
+      // directories), so every entry is confirmed with lstat, which never follows the link.
+      let isLink = false;
+      let isDirectory = false;
+      try {
+        const stats = lstatSync(child);
+        isLink = stats.isSymbolicLink();
+        isDirectory = stats.isDirectory();
+      } catch (error) {
+        continue;
+      }
+      if (isLink) {
+        found.push(child);
+        continue;
+      }
+      if (isDirectory) walk(child);
+    }
+  };
+  walk(directory);
+  return found;
+}
+
+// Removes the link itself. A junction or a mounted folder has to go through rmdir (unlink
+// refuses a directory link); a file symbolic link needs unlink. Only the reparse point is
+// deleted, so whatever it pointed at is untouched.
+function removeReparsePoint(linkPath, { rmdirSync = fs.rmdirSync, unlinkSync = fs.unlinkSync } = {}) {
+  const extended = toExtendedLengthPath(linkPath);
+  try {
+    rmdirSync(extended);
+    return true;
+  } catch (directoryError) {
+    try {
+      unlinkSync(extended);
+      return true;
+    } catch (fileError) {
+      return false;
+    }
+  }
+}
+
+function clearReparsePoints(directory, options = {}) {
+  // Walking starts from the extended-length form so a deep sandbox is still enumerable.
+  const links = collectReparsePoints(toExtendedLengthPath(directory), options);
+  const display = (entryPath) => (entryPath.startsWith('\\\\?\\') ? entryPath.slice(4) : entryPath);
+  const removed = [];
+  const failed = [];
+  for (const link of links) {
+    if (removeReparsePoint(link, options)) removed.push(display(link));
+    else failed.push(display(link));
+  }
+  return { found: links.length, removed, failed };
+}
+
+// STATUS_UNTRUSTED_MOUNT_POINT (0xC000036D) reaches JavaScript as an unnamed error whose
+// message is the only reliable signal; some Node versions also report the raw status.
+// Some downloads are not applications at all: they are thin bridges that ask Windows to
+// install a Microsoft Store package through the ms-windows-store: / ms-appinstaller: shell
+// protocol. Starting one installs the real app system-wide into WindowsApps, outside every
+// RunContainer boundary, and the Store window is a UWP frame that cannot be embedded. They
+// are recognised by the protocol URI they carry, and only while they are small enough to be
+// a bridge — a full application may embed a Store link without being one.
+const STORE_PROTOCOL_MARKERS = ['ms-windows-store:', 'ms-appinstaller:'];
+// Store bridges are a few hundred kilobytes; a real application is far larger. Keeping the
+// limit low means a small app that merely offers a "rate us" Store link is never refused.
+const STORE_BRIDGE_MAX_BYTES = 4 * 1024 * 1024;
+
+function containsProtocolMarker(buffer, marker) {
+  return buffer.indexOf(Buffer.from(marker, 'utf8')) !== -1
+    || buffer.indexOf(Buffer.from(marker, 'utf16le')) !== -1;
+}
+
+function detectStoreHandoff(exePath, { statSync = fs.statSync, readFileSync = fs.readFileSync } = {}) {
+  if (!exePath || typeof exePath !== 'string') return null;
+  try {
+    const stats = statSync(exePath);
+    if (!stats.isFile() || stats.size > STORE_BRIDGE_MAX_BYTES) return null;
+    const contents = readFileSync(exePath);
+    const marker = STORE_PROTOCOL_MARKERS.find((candidate) => containsProtocolMarker(contents, candidate));
+    if (!marker) return null;
+    return { storeHandoff: true, marker, sizeBytes: stats.size };
+  } catch (error) {
+    return null;
+  }
+}
+
+function describeStoreHandoff(marker) {
+  return `This program is not the application itself: it is a ${marker} bridge that asks Windows to install a Microsoft Store package. Windows installs Store packages system-wide into WindowsApps with a package identity and never lets another program redirect that into an app folder, so starting it would put the app outside RunContainer and open the Microsoft Store (whose UWP window cannot be hosted inside a RunContainer window). Nothing was launched. Install the desktop EXE or MSI build instead, or run this environment on a VM engine (Settings → Isolation engine) where the Store install happens inside the guest OS.`;
+}
+
+function isUntrustedMountPointError(error) {
+  const message = String(error?.message || '');
+  if (/untrusted mount point|reparse point|cannot be traversed/i.test(message)) return true;
+  const errno = Number(error?.errno);
+  return errno === -1073740947 || errno === 3221226349;
+}
+
 // Node's fs layer and the Windows API both stop at MAX_PATH (260) unless the path is
 // extended. Sandbox trees created by installers get deep, so removal uses the \\?\ form.
 function toExtendedLengthPath(directory, platform = process.platform) {
@@ -69,6 +184,7 @@ async function removeDirectoryWithRetries({
   removeSync = fs.rmSync,
   clearReadOnly = async () => {},
   prepareForRemoval = async () => {},
+  clearLinks = null,
   wait = delay,
   attempts = 60,
   retryDelayMs = 1000,
@@ -77,7 +193,21 @@ async function removeDirectoryWithRetries({
 }) {
   const extended = toExtendedLengthPath(directory);
   await clearReadOnly().catch(() => {});
+  // Links go first: while one is present every recursive delete of the tree fails.
+  const dropLinks = async () => {
+    if (!clearLinks) return;
+    try {
+      const result = await clearLinks({ directory, error: lastError });
+      if (result && result.removed && result.removed.length > 0) {
+        onAttempt({ phase: 'reparse-points-cleared', attempt: 0, result });
+      }
+    } catch (linkError) {
+      onAttempt({ phase: 'reparse-point-cleanup-failed', attempt: 0, error: linkError });
+    }
+  };
   let lastError = null;
+  await dropLinks();
+  if (!existsSync(directory)) return;
   let repaired = false;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (shouldAbort()) throw new CleanupCancelledError(directory);
@@ -88,6 +218,9 @@ async function removeDirectoryWithRetries({
       lastError = error;
     }
     if (!existsSync(directory)) return;
+    // A link created again while the tree was being deleted fails the same way; clear links
+    // before the ACL repair, because icacls cannot walk through an untrusted mount point either.
+    if (lastError && isUntrustedMountPointError(lastError)) await dropLinks();
     // A denial that survives the first attempts is usually an explicit ACL rather than a
     // transient lock, so take ownership and reset permissions once, then keep retrying.
     if (!repaired && lastError && attempt >= 1) {
@@ -268,6 +401,9 @@ function parseBlockingProcesses(output) {
 // still references it so the user can act instead of seeing a bare EPERM.
 function describeCleanupFailure({ directory, error, blockers = [], remainingPids = [] }) {
   const parts = [];
+  if (isUntrustedMountPointError(error)) {
+    parts.push(`Windows could not traverse ${directory} because it contains a reparse point (a junction, symbolic link or mounted folder). RunContainer deletes such a link itself and never what it points at, so the link itself was blocked: close any app that recreated it and try Delete again.`);
+  }
   if (remainingPids.length > 0) {
     parts.push(`RunContainer could not stop this app's processes (PIDs ${remainingPids.join(', ')}). They may be running elevated; close them in Task Manager or restart RunContainer as administrator and try Delete again.`);
   }
@@ -350,6 +486,12 @@ function resetLaunchState(record) {
 
 module.exports = {
   commandLineExecutable,
+  collectReparsePoints,
+  removeReparsePoint,
+  clearReparsePoints,
+  detectStoreHandoff,
+  describeStoreHandoff,
+  isUntrustedMountPointError,
   buildAclRepairPlan,
   buildClearReadOnlyArgs,
   buildTakeOwnershipArgs,

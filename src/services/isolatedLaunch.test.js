@@ -18,6 +18,11 @@ const {
   parseBlockingProcesses,
   describeCleanupFailure,
   stopAppProcesses,
+  collectReparsePoints,
+  clearReparsePoints,
+  isUntrustedMountPointError,
+  detectStoreHandoff,
+  describeStoreHandoff,
 } = require("../../public/isolated-launch");
 
 describe("per-app profile environment", () => {
@@ -77,6 +82,139 @@ describe("per-app directory cleanup", () => {
     })).resolves.toBeUndefined();
     expect(attempts).toBe(2);
     expect(clearReadOnly).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("reparse points inside a sandbox", () => {
+  // Windows' IE cache creates INetCache\Content.IE5 as a junction on first use, and an
+  // installer can create more. Deleting the tree while one exists fails with "The path
+  // cannot be traversed because it contains an untrusted mount point" on every attempt.
+  const root = "C:\\sb";
+  const entries = {
+    [root]: ["profile", "Temp"],
+    [`${root}\\profile`]: ["AppData"],
+    [`${root}\\profile\\AppData`]: ["INetCache"],
+    [`${root}\\profile\\AppData\\INetCache`]: ["Content.IE5", "IE"],
+    [`${root}\\profile\\AppData\\INetCache\\IE`]: ["cookie.txt"],
+    [`${root}\\Temp`]: [],
+  };
+  const links = new Set([`${root}\\profile\\AppData\\INetCache\\Content.IE5`]);
+  // The walk itself uses the extended-length form (\\?\) so a deep sandbox is enumerable.
+  const plain = (entryPath) => String(entryPath).replace(/^\\\\\?\\/, "");
+  const fakeFs = {
+    readdirSync: (directory) => (entries[plain(directory)] || []).map((name) => ({
+      name,
+      isSymbolicLink: () => false,
+      isDirectory: () => false,
+    })),
+    lstatSync: (entryPath) => ({
+      isSymbolicLink: () => links.has(plain(entryPath)),
+      isDirectory: () => Array.isArray(entries[plain(entryPath)]) && !links.has(plain(entryPath)),
+    }),
+  };
+
+  it("finds a junction without descending into it", () => {
+    expect(collectReparsePoints(root, fakeFs)).toEqual([`${root}\\profile\\AppData\\INetCache\\Content.IE5`]);
+  });
+
+  it("removes the link itself and never its target", () => {
+    const removed = [];
+    const result = clearReparsePoints(root, {
+      ...fakeFs,
+      rmdirSync: (entryPath) => {
+        if (!links.has(entryPath.replace(/^\\\\\?\\/, ""))) throw Object.assign(new Error("is a file"), { code: "ENOTDIR" });
+        removed.push(entryPath.replace(/^\\\\\?\\/, ""));
+      },
+      unlinkSync: () => { throw new Error("should not unlink a junction"); },
+    });
+    expect(removed).toEqual([`${root}\\profile\\AppData\\INetCache\\Content.IE5`]);
+    expect(result.found).toBe(1);
+    expect(result.failed).toEqual([]);
+  });
+
+  it("reports a link Windows refuses to remove instead of pretending the tree is clean", () => {
+    const result = clearReparsePoints(root, {
+      ...fakeFs,
+      rmdirSync: () => { throw new Error("access denied"); },
+      unlinkSync: () => { throw new Error("access denied"); },
+    });
+    expect(result.removed).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+  });
+
+  it("deletes the tree once the links are gone, and clears links again before the ACL repair", async () => {
+    let present = true;
+    const attempts = [];
+    const phases = [];
+    let linkFree = false;
+    await removeDirectoryWithRetries({
+      directory: root,
+      existsSync: () => present,
+      removeSync: () => {
+        attempts.push(1);
+        if (!linkFree) {
+          // Exactly what Windows reports while a junction is still in the tree.
+          const error = new Error("The path cannot be traversed because it contains an untrusted mount point. '\\\\?\\C:\\sb'");
+          error.code = "UNKNOWN";
+          throw error;
+        }
+        present = false;
+      },
+      clearLinks: async () => {
+        linkFree = true;
+        return { found: 1, removed: [`${root}\\profile\\AppData\\INetCache\\Content.IE5`], failed: [] };
+      },
+      wait: async () => {},
+      onAttempt: (event) => phases.push(event.phase),
+      attempts: 3,
+    });
+    expect(present).toBe(false);
+    expect(attempts).toHaveLength(1);
+    expect(phases).toContain("reparse-points-cleared");
+  });
+
+  it("recognises the Windows error and explains it in the failure message", () => {
+    const error = new Error("The path cannot be traversed because it contains an untrusted mount point.");
+    expect(isUntrustedMountPointError(error)).toBe(true);
+    expect(isUntrustedMountPointError(new Error("EPERM: operation not permitted"))).toBe(false);
+    expect(describeCleanupFailure({ directory: root, error })).toContain("reparse point");
+  });
+});
+
+describe("Microsoft Store bridges", () => {
+  const stub = (marker, encoding = "utf16le") => ({
+    statSync: () => ({ isFile: () => true, size: 900 * 1024 }),
+    readFileSync: () => Buffer.from(`\u0000${marker}\u0000`, encoding),
+  });
+
+  it("recognises a bridge that only asks the Store to install something", () => {
+    for (const marker of ["ms-windows-store:", "ms-appinstaller:"]) {
+      expect(detectStoreHandoff("C:\\x\\setup.exe", stub(marker))).toMatchObject({ storeHandoff: true, marker });
+      expect(detectStoreHandoff("C:\\x\\setup.exe", stub(marker, "utf8"))).toMatchObject({ storeHandoff: true, marker });
+    }
+  });
+
+  it("never refuses a full application that merely links to the Store", () => {
+    expect(detectStoreHandoff("C:\\x\\game.exe", {
+      statSync: () => ({ isFile: () => true, size: 300 * 1024 * 1024 }),
+      readFileSync: () => Buffer.from("ms-windows-store:", "utf8"),
+    })).toBeNull();
+    expect(detectStoreHandoff("C:\\x\\app.exe", {
+      statSync: () => ({ isFile: () => true, size: 1024 }),
+      readFileSync: () => Buffer.from("MZ"),
+    })).toBeNull();
+    expect(detectStoreHandoff("C:\\x\\tool.exe", {
+      statSync: () => ({ isFile: () => true, size: 6 * 1024 * 1024 }),
+      readFileSync: () => Buffer.from("ms-windows-store:", "utf8"),
+    })).toBeNull();
+    expect(detectStoreHandoff("C:\\x\\missing.exe", { statSync: () => { throw new Error("ENOENT"); } })).toBeNull();
+  });
+
+  it("explains what Store packages cannot do and what to use instead", () => {
+    const message = describeStoreHandoff("ms-windows-store:");
+    expect(message).toContain("WindowsApps");
+    expect(message).toContain("Nothing was launched");
+    expect(message).toContain("VM engine");
   });
 });
 
