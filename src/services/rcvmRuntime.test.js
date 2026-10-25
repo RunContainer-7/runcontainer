@@ -132,6 +132,35 @@ describe('RCVM user-mode container backend', () => {
     expect(plain).toContain("WaitForExit('RunContainer-RCVM-test', [int]$start.pid, '')");
   });
 
+  it('hosts an elevated app window from inside the elevated launcher', () => {
+    // Windows forbids raising an app's window into the medium-integrity RunContainer
+    // window, but the elevated launcher shares the app's integrity level, so it opens
+    // its own RunContainer-titled window and parents the app window there.
+    const script = buildRcvmLaunchScript({
+      ...SCRIPT_OPTS,
+      stopFile: 'C:\\data\\state\\app.stop',
+      hostWindowTitle: 'RunContainer — Demo (administrator approved)',
+    });
+    expect(script).toContain('public static class RcvmWindowHost');
+    expect(script).toContain("Begin('RunContainer — Demo (administrator approved)', [uint32]$start.pid, 'RunContainer-RCVM-test', 'C:\\data\\state\\app.stop', 30000)");
+    // The host starts only after containment is verified, and before the wait that holds
+    // the job open for the app's lifetime.
+    expect(script.indexOf('[RcvmLauncher]::Verify')).toBeLessThan(script.indexOf('[RcvmWindowHost]::Begin'));
+    expect(script.indexOf('[RcvmWindowHost]::Begin')).toBeLessThan(script.indexOf('[RcvmLauncher]::WaitForExit'));
+    // Closing the window must end the contained tree, not just the window.
+    expect(script).toContain('RcvmLauncher.TerminateJob(jobName)');
+    expect(script).toContain('SetParent(found, host)');
+    // A normal launch keeps using the Electron host window and gets no extra window.
+    expect(buildRcvmLaunchScript(SCRIPT_OPTS)).not.toContain('[RcvmWindowHost]::Begin');
+  });
+
+  it('quotes the host window title instead of interpolating it', () => {
+    const script = buildRcvmLaunchScript({ ...SCRIPT_OPTS, hostWindowTitle: "Bad'); Remove-Item C:\\x; ('" });
+    expect(script).toContain("Begin('Bad''); Remove-Item C:\\x; (''");
+    // The title stays a single PowerShell argument, so nothing after it executes.
+    expect(script).not.toContain("Begin('Bad'); Remove-Item");
+  });
+
   it('reads a result file that begins with a byte-order mark', () => {
     const parsed = parseRcvmLauncherOutput('\uFEFF{"pid":42,"job":"j"}\r\n\uFEFF{"error":"no","code":"elevation_required"}');
     expect(parsed.pid).toBe(42);

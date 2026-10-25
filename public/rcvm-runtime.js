@@ -76,7 +76,7 @@ function validateRcvmLimits({ memoryMB, cpuCount, maxProcesses, processorCount }
 // Identifies the C# source so a cached assembly can only be reused for the same
 // launcher. Change RCVM_CSHARP and the key changes with it.
 function rcvmLauncherCacheKey() {
-  return crypto.createHash('sha256').update(RCVM_CSHARP).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(RCVM_CSHARP + RCVM_HOST_CSHARP).digest('hex').slice(0, 16);
 }
 
 function rcvmJobName(appId) {
@@ -332,6 +332,16 @@ public class RcvmLauncher {
 
   static readonly Dictionary<string, IntPtr> JobProcessHandles = new Dictionary<string, IntPtr>();
 
+  // Ends the contained tree through its job. The elevated host window uses this when
+  // the user closes it, so the app cannot outlive the window they closed.
+  public static void TerminateJob(string jobName)
+  {
+    IntPtr job;
+    lock (jobs) { jobs.TryGetValue(jobName, out job); }
+    if (job == IntPtr.Zero) return;
+    TerminateJobObject(job, 0);
+  }
+
   // Post-launch verification of the ACTUAL process: job membership against OUR
   // job handle, the enforced limits, and the token integrity level (reported,
   // not forced — this launcher does not change tokens).
@@ -465,6 +475,290 @@ public class RcvmLauncher {
 }
 `.trim();
 
+// Hosting for apps that needed administrator approval.
+//
+// Windows refuses to let the medium-integrity RunContainer window re-parent an
+// elevated app's window (UIPI: a lower-integrity process cannot manipulate a higher
+// one), which is why elevated apps used to open as bare windows on the desktop. The
+// elevated launcher runs at the SAME integrity level as the app, so it can host the
+// window itself. The result is a RunContainer-titled window that contains the app or
+// its installer wizard; closing it ends the contained tree through the job.
+// The host class is compiled into the same assembly as the launcher, so it relies on
+// RCVM_CSHARP's using directives instead of repeating them (a second using block after
+// a class declaration would not compile).
+const RCVM_HOST_CSHARP = `
+public static class RcvmWindowHost
+{
+  delegate bool EnumProc(IntPtr hwnd, IntPtr param);
+  delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct HostRect { public int Left; public int Top; public int Right; public int Bottom; }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct WndClassEx
+  {
+    public uint cbSize;
+    public uint style;
+    public WndProc lpfnWndProc;
+    public int cbClsExtra;
+    public int cbWndExtra;
+    public IntPtr hInstance;
+    public IntPtr hIcon;
+    public IntPtr hCursor;
+    public IntPtr hbrBackground;
+    public string lpszMenuName;
+    public string lpszClassName;
+    public IntPtr hIconSm;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct Msg
+  {
+    public IntPtr hwnd;
+    public uint message;
+    public IntPtr wParam;
+    public IntPtr lParam;
+    public uint time;
+    public int x;
+    public int y;
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct ProcEntry
+  {
+    public uint dwSize;
+    public uint cntUsage;
+    public uint th32ProcessID;
+    public IntPtr th32DefaultHeapID;
+    public uint th32ModuleID;
+    public uint cntThreads;
+    public uint th32ParentProcessID;
+    public int pcPriClassBase;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string szExeFile;
+  }
+
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr param);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern IntPtr SetParent(IntPtr child, IntPtr parent);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool MoveWindow(IntPtr hwnd, int x, int y, int width, int height, bool repaint);
+  [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out HostRect rect);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out HostRect rect);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLong")] static extern int GetWindowLong32(IntPtr hwnd, int index);
+  [DllImport("user32.dll", EntryPoint = "SetWindowLong")] static extern int SetWindowLong32(IntPtr hwnd, int index, int value);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+  [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern IntPtr DefWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern ushort RegisterClassExW(ref WndClassEx cls);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateWindowExW(uint exStyle, string className, string windowName, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+  [DllImport("user32.dll")] static extern sbyte GetMessage(out Msg msg, IntPtr hwnd, uint filterMin, uint filterMax);
+  [DllImport("user32.dll")] static extern bool TranslateMessage(ref Msg msg);
+  [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref Msg msg);
+  [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
+  [DllImport("user32.dll")] static extern UIntPtr SetTimer(IntPtr hwnd, UIntPtr id, uint elapse, IntPtr proc);
+  [DllImport("user32.dll")] static extern IntPtr SetForegroundWindow(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern IntPtr LoadCursorW(IntPtr instance, IntPtr name);
+  [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(int color);
+  [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandleW(string name);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool Process32First(IntPtr snapshot, ref ProcEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool Process32Next(IntPtr snapshot, ref ProcEntry entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+
+  const int WsChild = 0x40000000;
+  const int WsPopup = unchecked((int)0x80000000);
+  const int WsExAppWindow = 0x00040000;
+  const int GwlStyle = -16;
+  const int GwlExStyle = -20;
+  const int SwHide = 0;
+  const int SwShow = 5;
+  const uint Th32csSnapProcess = 0x00000002;
+  const uint WmSize = 0x0005;
+  const uint WmClose = 0x0010;
+  const uint WmDestroy = 0x0002;
+  const uint WmTimer = 0x0113;
+  const int WsOverlappedWindow = 0x00CF0000;
+
+  static IntPtr host = IntPtr.Zero;
+  static IntPtr hosted = IntPtr.Zero;
+  static uint appPid;
+  static string jobName = "";
+  static string stopFile = "";
+  static int giveUpAtMs;
+  static int startedAtMs;
+
+  // Starts the host window on its own STA thread and returns immediately, so the
+  // launcher can keep holding the job (and its caps) while the app runs.
+  public static void Begin(string title, uint processId, string job, string stopPath, int timeoutMs)
+  {
+    appPid = processId;
+    jobName = job == null ? "" : job;
+    stopFile = stopPath == null ? "" : stopPath;
+    giveUpAtMs = timeoutMs > 0 ? timeoutMs : 0;
+    startedAtMs = Environment.TickCount;
+    System.Threading.Thread thread = new System.Threading.Thread(delegate() { Run(title); });
+    thread.IsBackground = true;
+    thread.SetApartmentState(System.Threading.ApartmentState.STA);
+    thread.Start();
+  }
+
+  static void Run(string title)
+  {
+    IntPtr instance = GetModuleHandleW(null);
+    WndClassEx cls = new WndClassEx();
+    cls.cbSize = (uint)Marshal.SizeOf(typeof(WndClassEx));
+    cls.style = 0x0002;
+    cls.lpfnWndProc = WindowProc;
+    cls.hInstance = instance;
+    cls.hCursor = LoadCursorW(IntPtr.Zero, new IntPtr(32512));
+    // Dark background, so the first seconds (before the app draws its window) look like
+    // a RunContainer surface rather than an empty white rectangle.
+    cls.hbrBackground = CreateSolidBrush(0x00110F0D);
+    cls.lpszClassName = "RunContainerAdminHost";
+    ushort atom = RegisterClassExW(ref cls);
+    if (atom == 0 && Marshal.GetLastWin32Error() != 1410) return;
+    host = CreateWindowExW(0, "RunContainerAdminHost", title, WsOverlappedWindow, 140, 90, 1100, 780, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+    if (host == IntPtr.Zero) return;
+    ShowWindow(host, SwShow);
+    SetForegroundWindow(host);
+    SetTimer(host, (UIntPtr)1, 250, IntPtr.Zero);
+    Msg msg;
+    while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+    {
+      TranslateMessage(ref msg);
+      DispatchMessage(ref msg);
+    }
+  }
+
+  static IntPtr WindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+  {
+    if (msg == WmTimer) { Tick(); return IntPtr.Zero; }
+    if (msg == WmSize) { Fit(); return IntPtr.Zero; }
+    if (msg == WmClose)
+    {
+      // Closing the window closes the app: a window the user dismissed must not
+      // leave a contained tree running invisibly behind it.
+      RcvmLauncher.TerminateJob(jobName);
+      DestroyWindow(hwnd);
+      return IntPtr.Zero;
+    }
+    if (msg == WmDestroy) { PostQuitMessage(0); return IntPtr.Zero; }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+  }
+
+  static void Fit()
+  {
+    if (hosted == IntPtr.Zero || host == IntPtr.Zero) return;
+    HostRect client;
+    if (!GetClientRect(host, out client)) return;
+    int width = client.Right - client.Left;
+    int height = client.Bottom - client.Top;
+    if (width <= 0 || height <= 0) return;
+    MoveWindow(hosted, 0, 0, width, height, true);
+  }
+
+  static Dictionary<uint, uint> Parents()
+  {
+    Dictionary<uint, uint> map = new Dictionary<uint, uint>();
+    IntPtr snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
+    if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) return map;
+    try
+    {
+      ProcEntry entry = new ProcEntry();
+      entry.dwSize = (uint)Marshal.SizeOf(typeof(ProcEntry));
+      if (!Process32First(snapshot, ref entry)) return map;
+      do { map[entry.th32ProcessID] = entry.th32ParentProcessID; }
+      while (Process32Next(snapshot, ref entry));
+    }
+    finally { CloseHandle(snapshot); }
+    return map;
+  }
+
+  // Installers and launchers routinely show their wizard from a second process, so the
+  // started PID and everything below it count as the app.
+  static bool InLineage(uint processId, Dictionary<uint, uint> parents)
+  {
+    uint current = processId;
+    for (int depth = 0; depth < 32; depth += 1)
+    {
+      if (current == appPid) return true;
+      uint parent;
+      if (!parents.TryGetValue(current, out parent)) return false;
+      if (parent == 0 || parent == current) return false;
+      current = parent;
+    }
+    return false;
+  }
+
+  static void Tick()
+  {
+    if (host == IntPtr.Zero) return;
+    if (!string.IsNullOrEmpty(stopFile) && File.Exists(stopFile))
+    {
+      RcvmLauncher.TerminateJob(jobName);
+      DestroyWindow(host);
+      return;
+    }
+    if (hosted != IntPtr.Zero)
+    {
+      if (!IsWindow(hosted) || GetParent(hosted) != host) hosted = IntPtr.Zero;
+      else { Fit(); return; }
+    }
+    Dictionary<uint, uint> parents = Parents();
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr hwnd, IntPtr param)
+    {
+      if (GetParent(hwnd) != IntPtr.Zero) return true;
+      if (!IsWindowVisible(hwnd)) return true;
+      if (GetWindowTextLength(hwnd) == 0) return true;
+      HostRect rect;
+      if (!GetWindowRect(hwnd, out rect)) return true;
+      if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 150) return true;
+      uint owner;
+      GetWindowThreadProcessId(hwnd, out owner);
+      if (owner == 0 || !InLineage(owner, parents)) return true;
+      found = hwnd;
+      return false;
+    }, IntPtr.Zero);
+    if (found == IntPtr.Zero)
+    {
+      // A console tool legitimately never opens a window; do not leave an empty host
+      // window behind forever, and do not kill the app for it either.
+      if (giveUpAtMs > 0 && unchecked(Environment.TickCount - startedAtMs) > giveUpAtMs)
+      {
+        DestroyWindow(host);
+      }
+      return;
+    }
+    ShowWindow(found, SwHide);
+    int style = GetWindowLong32(found, GwlStyle);
+    SetParent(found, host);
+    // SetParent deliberately keeps WS_POPUP, and a popup still reports its OWNER from
+    // GetParent, so the style change has to happen before the result is checked.
+    SetWindowLong32(found, GwlStyle, (style | WsChild) & ~WsPopup);
+    SetWindowLong32(found, GwlExStyle, GetWindowLong32(found, GwlExStyle) & ~WsExAppWindow);
+    if (GetParent(found) != host)
+    {
+      // Never leave an app invisible: if hosting is refused, put the window back on
+      // the desktop exactly as it was.
+      SetParent(found, IntPtr.Zero);
+      SetWindowLong32(found, GwlStyle, style);
+      ShowWindow(found, SwShow);
+      return;
+    }
+    hosted = found;
+    Fit();
+    ShowWindow(found, SwShow);
+  }
+}
+`;
+
 // Builds the .ps1 launcher. Profile dirs must already exist (Node creates them).
 // $env: overrides are set AFTER Add-Type so compiler temp files use the real
 // profile; the app inherits the redirected profile from the launcher.
@@ -493,6 +787,8 @@ function buildRcvmLaunchScript({
   launcherCacheKey,
   resultFile = '',
   stopFile = '',
+  hostWindowTitle = '',
+  hostWindowTimeoutMs = 30000,
 } = {}) {
   if (!jobName || !executablePath || !workingDirectory || !appDataDir || !localAppDataDir || !tempDir || !userProfileDir) {
     throw new Error('RCVM launcher needs a job name, executable, working directory, and profile folders.');
@@ -521,6 +817,7 @@ function buildRcvmLaunchScript({
   const driveMatch = normalized.match(/^([A-Za-z]:)(\\.*)?$/);
   const homeDrive = driveMatch ? driveMatch[1] : 'C:';
   const homePath = driveMatch && driveMatch[2] ? driveMatch[2] : '\\';
+  const csharpSource = `${RCVM_CSHARP}\n${RCVM_HOST_CSHARP}`;
   const loader = launcherCacheDir
     ? [
       `$cacheDll = ${psQuote(`${launcherCacheDir.replace(/[\\/]+$/, '')}\\RcvmLauncher-${launcherCacheKey}.dll`)}`,
@@ -529,7 +826,7 @@ function buildRcvmLaunchScript({
       '  try { Add-Type -Path $cacheDll; $cacheReady = $true } catch { $cacheReady = $false }',
       '}',
       'if (-not $cacheReady) {',
-      `  $csharp = @'\n${RCVM_CSHARP}\n'@`,
+      `  $csharp = @'\n${csharpSource}\n'@`,
       '  try {',
       '    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cacheDll)',
       '    Add-Type -TypeDefinition $csharp -Language CSharp -OutputAssembly $cacheDll -OutputType Library',
@@ -540,7 +837,7 @@ function buildRcvmLaunchScript({
       '}',
     ]
     : [
-      `$csharp = @'\n${RCVM_CSHARP}\n'@`,
+      `$csharp = @'\n${csharpSource}\n'@`,
       'Add-Type -TypeDefinition $csharp -Language CSharp',
     ];
   // An elevated launcher's stdout cannot be read by the medium-integrity app that
@@ -553,6 +850,12 @@ function buildRcvmLaunchScript({
   const waitCall = stopFile
     ? `[RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid, ${psQuote(stopFile)})`
     : `[RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid, '')`;
+  // Apps that needed administrator approval cannot be hosted by the medium-integrity
+  // RunContainer window, so this elevated launcher hosts the window itself. The title
+  // is the only thing the caller controls; it is quoted, never interpolated.
+  const hostLines = hostWindowTitle
+    ? [`  [RcvmWindowHost]::Begin(${psQuote(hostWindowTitle)}, [uint32]$start.pid, ${psQuote(jobName)}, ${psQuote(stopFile || '')}, ${Number.isSafeInteger(hostWindowTimeoutMs) && hostWindowTimeoutMs > 0 ? hostWindowTimeoutMs : 30000})`]
+    : [];
   return [
     '$ErrorActionPreference = \'Stop\'',
     ...loader,
@@ -574,6 +877,7 @@ function buildRcvmLaunchScript({
     '  Write-Output $verifyJson',
     '  [Console]::Out.Flush()',
     ...resultLines('$verifyJson').map((line) => `  ${line}`),
+    ...hostLines,
     `  $exitJson = ${waitCall}`,
     '  Write-Output $exitJson',
     ...resultLines('$exitJson').map((line) => `  ${line}`),

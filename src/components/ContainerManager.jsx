@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.4";
+const APP_VERSION_FALLBACK = "0.7.5";
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -832,7 +832,7 @@ export default function ContainerManager() {
                     ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
                       ? activeSession.elevated
-                        ? 'Running with administrator approval. Windows will not let RunContainer host an elevated window, so it stays on your desktop; the Job Object caps and its own data folder still apply.'
+                        ? 'Running with administrator approval. Windows does not let the normal RunContainer window host an elevated window, so the app (or its installer wizard) opens inside a RunContainer administrator window. The Job Object caps and its own data folder still apply.'
                         : `${activeSession.windowHosted ? 'Shown in its own RunContainer window (visual only).' : 'Running. Its window opens in a RunContainer window.'}`
                       : 'All processes for this app have exited.'}
                 </div>

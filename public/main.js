@@ -2158,6 +2158,14 @@ function rcvmStatePaths(appId) {
   };
 }
 
+// The caption of the window the elevated launcher creates. It is the only thing the
+// user has to identify the window by, so it names the app and says why it needed
+// approval.
+function rcvmAdminHostTitle(appRecord) {
+  const name = String(appRecord?.name || 'App').slice(0, 80);
+  return `RunContainer — ${name} (administrator approved)`;
+}
+
 function powerShellLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
@@ -2259,11 +2267,13 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
       userProfileDir: profile.userProfile,
       launchArgs: argCheck.args || '',
       runtimeEnv,
-      // An elevated window cannot be re-parented by this medium-integrity process,
-      // so it must not start hidden: the user has to be able to see it.
+      // An elevated window cannot be re-parented by this medium-integrity process, so
+      // the elevated launcher hosts it instead (same integrity level). It must not start
+      // hidden: the window has to exist before the host can adopt it.
       startHidden: elevated ? false : startsHidden(appRecord.source),
       resultFile: elevated ? statePaths.resultFile : '',
       stopFile: elevated ? statePaths.stopFile : '',
+      hostWindowTitle: elevated ? rcvmAdminHostTitle(appRecord) : '',
       memoryCapBytes: limitCheck.limits.memoryCapBytes,
       cpuRate: limitCheck.limits.cpuRate,
       maxProcesses: limitCheck.limits.maxProcesses,
@@ -2393,15 +2403,15 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
       isolated: true,
       isolationLevel: 'container',
       elevated: elevated || undefined,
-      statusNote: elevated ? 'administrator-approved, shown on your desktop' : undefined,
+      statusNote: elevated ? 'administrator-approved, shown in a RunContainer administrator window' : undefined,
       rcvmStopFile: elevated ? statePaths.stopFile : undefined,
       rcvmJob: rcvm.rcvmJobName(appRecord.id),
       rcvmLauncherPid: launcherPid,
       pid,
       sandboxPids: pids,
-      windowHosted: false,
-      hostedWindowPid: null,
-      windowHostTarget: null,
+      windowHosted: Boolean(elevated),
+      hostedWindowPid: elevated ? pid : null,
+      windowHostTarget: elevated ? 'admin-window' : null,
       lastLaunchedAt: new Date().toISOString(),
       launchCleanupPending: false,
     };
@@ -2413,8 +2423,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
     monitorAppProcesses(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
     // Hosting is presentation only and must never hold up the launch or fail it, so it runs
-    // after the launch result is already decided. Windows will not let this process own an
-    // elevated window, so an elevated app keeps its own desktop window.
+    // after the launch result is already decided. An elevated app's window is hosted by the
+    // elevated launcher itself (Windows blocks this process from re-parenting it), so only
+    // a normal launch needs the Electron host window here.
     if (!elevated) {
       hostAppWindowEverywhere(updatedApp, pid, logPath, {
         note: 'This app runs in its own environment. Its window is hosted here.',
@@ -2435,7 +2446,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
       embedded: false,
       elevated,
       reason: elevated
-        ? `Running contained (RCVM) with Windows administrator approval: the Job Object caps and per-app profile folders still apply, and the app window stays on your desktop because Windows does not allow RunContainer to host an elevated window.`
+        ? `Running contained (RCVM) with Windows administrator approval: the Job Object caps and per-app profile folders still apply. Windows does not let RunContainer's normal window host an elevated window, so the elevated launcher opens a RunContainer administrator window and hosts the app (or its installer wizard) inside it.`
         : `Running contained (RCVM): Job Object caps hold its lifetime and resources, and its profile folders stay inside its environment. Works on all Windows editions. This is process containment, not a hardware VM, and it does not cut network access.`,
     };
   } catch (error) {

@@ -4,11 +4,24 @@
 
 export const UPDATES = [
   {
+    version: '0.7.5',
+    date: '2026-10-25',
+    title: 'Administrator apps and installer wizards open inside a RunContainer window',
+    changes: [
+      'Fixed the last case where an app still opened as a stand-alone desktop window. Apps and installer wizards that need administrator rights (VirtualBox’s setup, for example) could not be hosted by RunContainer’s normal window — Windows forbids one privilege level from re-parenting a window from a higher one — so after the approval prompt they opened wherever they liked. The elevated launcher now creates a RunContainer window itself, at the same privilege level as the app, and hosts the app or the installer wizard inside it. The title bar names the app and says “administrator approved”.',
+      'Closing that window ends the app. The window is tied to the contained job, so closing it stops the whole process tree instead of leaving an invisible installer running behind it. Stop and Reset work exactly as they do for every other app.',
+      'A window that never appears no longer leaves an empty frame behind. A console tool, or an app that exits before drawing anything, closes the host window after 30 seconds and keeps running; it is never killed for having no window.',
+      'The installer wizard is hosted wherever Windows allows it: a normal installer opens in the same RunContainer window style as an app, and an administrator installer opens in the administrator window with its setup dialogs inside it. Nothing is ever run outside containment to make a window appear.',
+      'The docs now say plainly that the animated walkthrough is an illustration, not a screen recording. The badge is visible on the animation itself, and the simulation page explains that the sample apps are placeholders and that the real window follows your Windows theme and shows your apps with their extracted icons.',
+      'Known limitations and Installation and launch errors describe the administrator window honestly: the app is still contained (Job Object caps and its own data folder), but that window is a plain Windows window with a RunContainer title rather than the normal in-app surface.',
+    ],
+  },
+  {
     version: '0.7.4',
     date: '2026-10-25',
     title: 'Apps that need administrator rights, the real app icon, and a simulation in the docs',
     changes: [
-      'Fixed “The app could not be started suspended: 740”. That number is Windows saying the executable’s manifest requires administrator rights, which a normal process is not allowed to grant — so installers such as VirtualBox’s setup refused to start at all. RunContainer now recognises that refusal, asks Windows for approval once, and starts the same contained launcher elevated. The Job Object caps and the app’s own data folder still apply; because Windows will not let a normal process host an elevated window, that app is shown on your desktop and labelled “administrator-approved” instead of pretending it is hosted.',
+      'Fixed “The app could not be started suspended: 740”. That number is Windows saying the executable’s manifest requires administrator rights, which a normal process is not allowed to grant — so installers such as VirtualBox’s setup refused to start at all. RunContainer now recognises that refusal, asks Windows for approval once, and starts the same contained launcher elevated. The Job Object caps and the app’s own data folder still apply; because Windows does not let a normal process host an elevated window, that app was shown on your desktop and labelled “administrator-approved” rather than pretending it was hosted. (0.7.5 replaced this with a RunContainer administrator window.)',
       'Stopping or resetting such an app now works. An elevated launcher cannot be killed from a normal process (Windows denies it), so Stop is delivered through a file the launcher polls, and it ends the whole job rather than only the first process.',
       'The app list shows the application’s real icon and its name. The icon is extracted from the executable as a PNG and passed to the interface inline; older records are converted on the next start. Apps whose executable carries no icon get a clean lettered tile instead of the phone placeholder.',
       'RC-Brain knows this failure. The model was retrained with elevation scenarios (knowledge 2026-10-25.1): an elevation refusal is recognised as an environment/administrator condition that must not trigger a restart loop, and a verified elevated launch is recognised as healthy. Familiar-holdout accuracy is 99.6% (action 98.5%), unseen families 96.8%, final split 96.3% (action 95.0%), with zero unsafe actions and zero over-interventions.',
