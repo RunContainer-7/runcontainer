@@ -111,5 +111,6 @@ The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.e
 ## Support
 
 If you have an issue with the app, report any bugs, need assistance or just want to ask any questions/feature request, you can either head over to the official documentation website: https://runcontainer-7.github.io/9-runcontainer/, or you can join our support discord server, which included priority support over GitHub Issue: https://discord.gg/UKTGRMMmC4.
+Prefer to watch step by step instead? Head over to the official RunContainer YouTube channel and watch some tutorials and showcase of it: https://m.youtube.com/@RunContainer?ra=m
 
 MIT License.
