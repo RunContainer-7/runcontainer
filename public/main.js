@@ -355,6 +355,10 @@ function getExeMetadata(exePath) {
   });
 }
 
+// A failed icon extraction is retried only occasionally: an executable can carry no icon at
+// all, and the extraction runs a helper process.
+const ICON_RETRY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 function extractExeIcon(exePath, outputPath) {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') {
@@ -3326,10 +3330,15 @@ ipcMain.handle('list-apps', async () => {
   let iconRepaired = false;
   const withIcons = await Promise.all(reconciled.map(async (entry) => {
     if (entry.iconUrl || !entry.source || !entry.sandboxRoot || !fs.existsSync(entry.source)) return entry;
-    const extracted = await extractExeIcon(entry.source, path.join(entry.sandboxRoot, 'icon.png'));
-    if (!extracted) return entry;
+    // An executable can genuinely carry no icon. Extracting it again on every list read would
+    // spawn a helper process each time, so a failed attempt is remembered and retried rarely.
+    const lastAttempt = Date.parse(entry.iconAttemptedAt || '');
+    if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < ICON_RETRY_INTERVAL_MS) return entry;
     iconRepaired = true;
-    return { ...entry, iconPath: extracted, iconUrl: iconDataUrl(extracted) };
+    const attemptedAt = new Date().toISOString();
+    const extracted = await extractExeIcon(entry.source, path.join(entry.sandboxRoot, 'icon.png'));
+    if (!extracted) return { ...entry, iconAttemptedAt: attemptedAt };
+    return { ...entry, iconPath: extracted, iconUrl: iconDataUrl(extracted), iconAttemptedAt: attemptedAt };
   }));
   if (updatesById.size === 0 && !runtimeFilled && !iconRepaired) return withIcons;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
