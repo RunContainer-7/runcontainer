@@ -92,12 +92,14 @@ function psQuote(value) {
 const RCVM_CSHARP = `
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public class RcvmLauncher {
   const uint CREATE_SUSPENDED = 0x00000004;
   const uint INFINITE = 0xFFFFFFFF;
+  const int ERROR_ELEVATION_REQUIRED = 740;
   const uint LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
   const uint LIMIT_JOB_MEMORY = 0x00000200;
   const uint LIMIT_ACTIVE_PROCESS = 0x00000008;
@@ -199,6 +201,9 @@ public class RcvmLauncher {
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern bool CreateProcessW(string appName, StringBuilder cmdLine, IntPtr procAttr,
     IntPtr threadAttr, bool inheritHandles, uint creationFlags, IntPtr env,
@@ -238,7 +243,15 @@ public class RcvmLauncher {
   static extern bool CloseHandle(IntPtr handle);
 
   static string JsonError(string message) {
-    return "{\\"error\\":\\"" + message.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"") + "\\"}";
+    return "{\\\"error\\\":\\\"" + message.Replace("\\\\", "\\\\\\\\").Replace("\\\"", "\\\\\\\"") + "\\\"}";
+  }
+
+  // Win32 failures carry a code so the caller can act on the reason instead of
+  // matching an English message. 740 means the executable asks for administrator
+  // rights, which a medium-integrity CreateProcess is not allowed to grant.
+  static string JsonError(string message, string code) {
+    return "{\\\"error\\\":\\\"" + message.Replace("\\\\", "\\\\\\\\").Replace("\\\"", "\\\\\\\"")
+      + "\\\",\\\"code\\\":\\\"" + code + "\\\"}";
   }
 
   public static string Start(string jobName, string exe, string cmdArgs, string workDir,
@@ -282,7 +295,13 @@ public class RcvmLauncher {
       PROCESS_INFORMATION pi;
       bool created = CreateProcessW(null, cmd, IntPtr.Zero, IntPtr.Zero, false,
         CREATE_SUSPENDED, IntPtr.Zero, workDir, ref si, out pi);
-      if (!created) return JsonError("The app could not be started suspended: " + Marshal.GetLastWin32Error());
+      if (!created) {
+        int createError = Marshal.GetLastWin32Error();
+        if (createError == ERROR_ELEVATION_REQUIRED) {
+          return JsonError("The app could not be started suspended: " + createError, "elevation_required");
+        }
+        return JsonError("The app could not be started suspended: " + createError, "launch_failed");
+      }
       try {
         if (!AssignProcessToJobObject(job, pi.hProcess)) {
           TerminateProcess(pi.hProcess, 1);
@@ -391,7 +410,7 @@ public class RcvmLauncher {
     } finally { Marshal.FreeHGlobal(buf); }
   }
 
-  public static string WaitForExit(string jobName, int pid) {
+  public static string WaitForExit(string jobName, int pid, string stopFile) {
     try {
       IntPtr proc;
       IntPtr job;
@@ -400,7 +419,22 @@ public class RcvmLauncher {
         jobs.TryGetValue(jobName, out job);
       }
       if (proc == IntPtr.Zero) return "{\\"pid\\":" + pid + ",\\"exitCode\\":null,\\"note\\":\\"launcher lost the process handle\\"}";
-      WaitForSingleObject(proc, INFINITE);
+      // An elevated launcher cannot be killed by the medium-integrity app, so Stop
+      // asks it to finish through a file instead of a taskkill that would fail.
+      if (string.IsNullOrEmpty(stopFile)) {
+        WaitForSingleObject(proc, INFINITE);
+      } else {
+        while (WaitForSingleObject(proc, 500) == 0x00000102) {
+          // End the whole job, not just the root process: a launcher can have children
+          // (installers, bootstrappers) and leaving them behind would make Stop look
+          // like it worked while the app kept running.
+          if (File.Exists(stopFile)) {
+            if (job != IntPtr.Zero) TerminateJobObject(job, 0);
+            else TerminateProcess(proc, 0);
+            break;
+          }
+        }
+      }
       uint code;
       GetExitCodeProcess(proc, out code);
       CloseHandle(proc);
@@ -457,6 +491,8 @@ function buildRcvmLaunchScript({
   startHidden = false,
   launcherCacheDir,
   launcherCacheKey,
+  resultFile = '',
+  stopFile = '',
 } = {}) {
   if (!jobName || !executablePath || !workingDirectory || !appDataDir || !localAppDataDir || !tempDir || !userProfileDir) {
     throw new Error('RCVM launcher needs a job name, executable, working directory, and profile folders.');
@@ -507,6 +543,16 @@ function buildRcvmLaunchScript({
       `$csharp = @'\n${RCVM_CSHARP}\n'@`,
       'Add-Type -TypeDefinition $csharp -Language CSharp',
     ];
+  // An elevated launcher's stdout cannot be read by the medium-integrity app that
+  // started it, so its result lines are also appended to a file the app polls.
+  const resultLines = (jsonVar) => (resultFile
+    ? [`Add-Content -LiteralPath ${psQuote(resultFile)} -Value ${jsonVar} -Encoding UTF8`]
+    : []);
+  // WaitForExit ends the app when the stop file appears; that is how Stop reaches
+  // an elevated app that taskkill from a medium process cannot open.
+  const waitCall = stopFile
+    ? `[RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid, ${psQuote(stopFile)})`
+    : `[RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid, '')`;
   return [
     '$ErrorActionPreference = \'Stop\'',
     ...loader,
@@ -521,13 +567,16 @@ function buildRcvmLaunchScript({
     `$startJson = [RcvmLauncher]::Start(${psQuote(jobName)}, ${psQuote(executablePath)}, ${psQuote(launchArgs)}, ${psQuote(workingDirectory)}, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses}, ${startHidden ? 0 : -1})`,
     'Write-Output $startJson',
     '[Console]::Out.Flush()',
+    ...resultLines('$startJson'),
     '$start = $startJson | ConvertFrom-Json',
     'if ($start.pid) {',
     `  $verifyJson = [RcvmLauncher]::Verify(${psQuote(jobName)}, [int]$start.pid, ${memoryCapBytes}, ${cpuRate}, ${maxProcesses})`,
     '  Write-Output $verifyJson',
     '  [Console]::Out.Flush()',
-    `  $exitJson = [RcvmLauncher]::WaitForExit(${psQuote(jobName)}, [int]$start.pid)`,
+    ...resultLines('$verifyJson').map((line) => `  ${line}`),
+    `  $exitJson = ${waitCall}`,
     '  Write-Output $exitJson',
+    ...resultLines('$exitJson').map((line) => `  ${line}`),
     '}',
   ].join('\r\n');
 }
@@ -537,7 +586,9 @@ function buildRcvmLaunchScript({
 function parseRcvmLauncherOutput(stdout) {
   const result = {};
   for (const line of String(stdout || '').split(/\r?\n/)) {
-    const trimmed = line.trim();
+    // The elevated launcher appends with -Encoding UTF8, whose first write carries a
+    // byte-order mark; PowerShell also emits CRLF. Neither may hide a result line.
+    const trimmed = line.trim().replace(/^\uFEFF/, '');
     if (!trimmed.startsWith('{')) continue;
     let parsed = null;
     try {
@@ -553,6 +604,7 @@ function parseRcvmLauncherOutput(stdout) {
     }
     if (typeof parsed?.error === 'string' && !result.error) {
       result.error = parsed.error;
+      if (typeof parsed.code === 'string') result.code = parsed.code;
     }
     if (typeof parsed?.job === 'string' && !result.job) {
       result.job = parsed.job;

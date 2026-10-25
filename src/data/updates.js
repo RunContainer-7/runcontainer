@@ -4,6 +4,20 @@
 
 export const UPDATES = [
   {
+    version: '0.7.4',
+    date: '2026-10-25',
+    title: 'Apps that need administrator rights, the real app icon, and a simulation in the docs',
+    changes: [
+      'Fixed “The app could not be started suspended: 740”. That number is Windows saying the executable’s manifest requires administrator rights, which a normal process is not allowed to grant — so installers such as VirtualBox’s setup refused to start at all. RunContainer now recognises that refusal, asks Windows for approval once, and starts the same contained launcher elevated. The Job Object caps and the app’s own data folder still apply; because Windows will not let a normal process host an elevated window, that app is shown on your desktop and labelled “administrator-approved” instead of pretending it is hosted.',
+      'Stopping or resetting such an app now works. An elevated launcher cannot be killed from a normal process (Windows denies it), so Stop is delivered through a file the launcher polls, and it ends the whole job rather than only the first process.',
+      'The app list shows the application’s real icon and its name. The icon is extracted from the executable as a PNG and passed to the interface inline; older records are converted on the next start. Apps whose executable carries no icon get a clean lettered tile instead of the phone placeholder.',
+      'RC-Brain knows this failure. The model was retrained with elevation scenarios (knowledge 2026-10-25.1): an elevation refusal is recognised as an environment/administrator condition that must not trigger a restart loop, and a verified elevated launch is recognised as healthy. Familiar-holdout accuracy is 99.6% (action 98.5%), unseen families 96.8%, final split 96.3% (action 95.0%), with zero unsafe actions and zero over-interventions.',
+      'The documentation explains the product in one sentence — “an app that opens other apps inside itself” — and has a new animated Simulation page, also embedded in the introduction. It plays the whole flow (pick an app, press Run, the window opens inside RunContainer), loops, and can be paused or replayed.',
+      'Fixed the contradiction in Reset & remove: Reset keeps the environment, the installed app and its files; only Delete removes them. The limitations page and the delete warning now say the same thing.',
+      'Administrator apps, the Windows 740 case and the fact that an elevated window stays on the desktop are documented in Installation and launch errors and in Known limitations.',
+    ],
+  },
+  {
     version: '0.7.3',
     date: '2026-10-23',
     title: 'Run opens inside RunContainer, with no stray window and no restart loop',

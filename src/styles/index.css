@@ -211,6 +211,7 @@ body {
 .app-icon {
     width: 42px;
     height: 42px;
+    flex: 0 0 42px;
     border-radius: 12px;
     display: flex;
     align-items: center;
@@ -223,7 +224,28 @@ body {
 .app-icon img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
+    padding: 4px;
+    box-sizing: border-box;
+}
+
+/* Apps whose executable exposes no icon still get a stable, readable tile. */
+.app-icon-letter {
+    font-size: 18px;
+    font-weight: 700;
+    color: #dbeafe;
+    background: linear-gradient(135deg, #1e3a8a, #2563eb);
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.detail-heading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
 }
 
 .container-name {

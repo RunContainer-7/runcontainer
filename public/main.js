@@ -311,17 +311,17 @@ function getExeMetadata(exePath) {
       return;
     }
 
-    const escapedPath = String(exePath).replace(/'/g, "''");
+    const escapedPath = path.win32.normalize(String(exePath)).replace(/'/g, "''");
     const command = [
       "$ErrorActionPreference = 'Stop'",
       "Add-Type -AssemblyName System.Diagnostics",
       "Add-Type -AssemblyName System.Drawing",
-      "$info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo('$escapedPath')",
+      `$info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo('${escapedPath}')`,
       "$obj = [pscustomobject]@{",
       "title = if ($info.FileDescription) { $info.FileDescription } elseif ($info.ProductName) { $info.ProductName } else { $null }",
       "version = if ($info.FileVersion) { $info.FileVersion } else { $null }",
       "company = if ($info.CompanyName) { $info.CompanyName } else { $null }",
-      "originalName = if ($info.OriginalFilename) { $info.OriginalFilename } else { [System.IO.Path]::GetFileName('$escapedPath') }",
+      `originalName = if ($info.OriginalFilename) { $info.OriginalFilename } else { [System.IO.Path]::GetFileName('${escapedPath}') }`,
       "}",
       "$obj | ConvertTo-Json -Compress",
     ].join('; ');
@@ -359,17 +359,27 @@ function extractExeIcon(exePath, outputPath) {
     }
 
     ensureDirectory(path.dirname(outputPath));
-    const escapedPath = String(exePath).replace(/'/g, "''");
+    // .NET's icon extractor rejects forward slashes, and an imported path can carry
+    // them. Normalising first means the icon exists for every way an app was added.
+    const escapedPath = path.win32.normalize(String(exePath)).replace(/'/g, "''");
     const escapedOutput = String(outputPath).replace(/'/g, "''");
+    // Save a real PNG: the renderer shows the icon from a data URL, and PNG is the
+    // one format every Electron build decodes the same way.
     const command = [
       "$ErrorActionPreference = 'Stop'",
       "Add-Type -AssemblyName System.Drawing",
-      "$icon = [System.Drawing.Icon]::ExtractAssociatedIcon('$escapedPath')",
-      "if ($icon) { $icon.Save('$escapedOutput'); 'ok' } else { 'missing' }",
+      `$icon = [System.Drawing.Icon]::ExtractAssociatedIcon('${escapedPath}')`,
+      `if ($icon) { $bitmap = $icon.ToBitmap(); $bitmap.Save('${escapedOutput}', [System.Drawing.Imaging.ImageFormat]::Png); $bitmap.Dispose(); $icon.Dispose(); 'ok' } else { 'missing' }`,
     ].join('; ');
 
     execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true }, (error, stdout) => {
       if (error || stdout?.trim() !== 'ok') {
+        try {
+          fs.appendFileSync(
+            path.join(app.getPath('userData'), 'runcontainer-error.log'),
+            `[${new Date().toISOString()}] icon extraction failed for ${exePath}: ${error?.message || 'no icon reported'} ${String(stdout || '').trim()}\n`,
+          );
+        } catch (logError) { /* best-effort */ }
         resolve(null);
         return;
       }
@@ -377,6 +387,41 @@ function extractExeIcon(exePath, outputPath) {
       resolve(outputPath);
     });
   });
+}
+
+// The renderer's Content-Security-Policy allows data: images but not file:, so an
+// icon extracted next to the app is handed over inline instead of as a file path.
+function iconDataUrl(iconPath) {
+  try {
+    if (!iconPath || !fs.existsSync(iconPath)) return null;
+    const extension = path.extname(iconPath).toLowerCase();
+    const mime = extension === '.ico' ? 'image/x-icon' : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : 'image/png';
+    const data = fs.readFileSync(iconPath).toString('base64');
+    if (!data) return null;
+    return `data:${mime};base64,${data}`;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function backfillAppIcons() {
+  // Records created before icon extraction existed (or whose icon file was lost)
+  // get one extracted from the installed copy the next time RunContainer starts.
+  const apps = loadApps();
+  let changed = false;
+  for (const entry of apps) {
+    if (!entry?.sandboxRoot || !entry?.source || !fs.existsSync(entry.source)) continue;
+    const iconPath = path.join(entry.sandboxRoot, 'icon.png');
+    // Older builds saved a raw .ico next to the app; re-extract it as PNG so every
+    // record uses the same format the list renders.
+    if (entry.iconPath && entry.iconPath.toLowerCase().endsWith('.png') && fs.existsSync(entry.iconPath)) continue;
+    const extracted = await extractExeIcon(entry.source, iconPath);
+    if (extracted) {
+      entry.iconPath = extracted;
+      changed = true;
+    }
+  }
+  if (changed) saveApps(apps);
 }
 
 function downloadUrl(url, outputPath, redirectsLeft = 5) {
@@ -2069,6 +2114,24 @@ async function stopRcvmLauncher(appRecord, logPath) {
     }
     rcvmLaunchers.delete(appRecord.id);
   }
+  // An elevated launcher cannot be killed from here (access denied), so Stop is
+  // delivered through the file it polls. Its job object then ends the app tree.
+  if (appRecord.rcvmStopFile) {
+    try {
+      fs.writeFileSync(appRecord.rcvmStopFile, 'stop', 'utf8');
+      if (logPath) appendLog(logPath, 'Asked the elevated launcher to stop through its stop file.');
+      // Give the elevated launcher a moment to honour it before the caller's own
+      // taskkill pass runs; killing an elevated PID from here is not permitted.
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        const still = await listRunningPids(appRecord).catch(() => []);
+        if (still.length === 0) break;
+        await delay(300);
+      }
+    } catch (error) {
+      if (logPath) appendLog(logPath, `Stop file could not be written: ${error.message}`);
+    }
+  }
   const launcherPid = appRecord.rcvmLauncherPid;
   if (Number.isSafeInteger(launcherPid) && launcherPid > 0) {
     try {
@@ -2080,10 +2143,87 @@ async function stopRcvmLauncher(appRecord, logPath) {
   }
 }
 
+// An app whose manifest requests administrator rights cannot be created by a
+// medium-integrity process at all (Win32 740). Windows' answer is a UAC prompt, so
+// the same contained launcher is started elevated: the Job Object, its caps and the
+// per-app profile folders then apply to the elevated app exactly as they do below.
+// The only difference the user sees is a UAC prompt and a window that Windows will
+// not let a medium-integrity process re-parent, so it stays on the desktop.
+function rcvmStatePaths(appId) {
+  const root = path.join(app.getPath('userData'), 'rcvm-state');
+  ensureDirectory(root);
+  return {
+    resultFile: path.join(root, `${appId}.result.jsonl`),
+    stopFile: path.join(root, `${appId}.stop`),
+  };
+}
+
+function powerShellLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function rcvmLauncherError(parsed) {
+  const error = new Error(parsed.error);
+  if (parsed.code) error.launcherCode = parsed.code;
+  return error;
+}
+
+async function startElevatedRcvmLauncher(scriptPath, resultFile, logPath) {
+  const rcvm = require('./rcvm-runtime');
+  const command = [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', ${powerShellLiteral(scriptPath)}) -Verb RunAs -WindowStyle Hidden -PassThru`,
+    "if ($p) { 'pid=' + $p.Id }",
+  ].join('; ');
+  const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+  child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+  // Start-Process returns as soon as the UAC prompt is answered; the elevated
+  // launcher's output is unreadable from here, so its result file is the channel.
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    let raw = '';
+    try {
+      raw = fs.readFileSync(resultFile, 'utf8');
+    } catch (error) {
+      raw = '';
+    }
+    const parsed = rcvm.parseRcvmLauncherOutput(raw);
+    if (parsed.error) {
+      const error = new Error(parsed.error);
+      error.launcherCode = parsed.code;
+      throw error;
+    }
+    if (parsed.pid && parsed.verified !== undefined) {
+      const launcherPid = /pid=(\d+)/.exec(stdout);
+      return { pid: parsed.pid, verified: parsed.verified, launcherPid: launcherPid ? Number(launcherPid[1]) : null, output: raw };
+    }
+    // A declined UAC prompt ends the wrapper immediately. Waiting the full timeout
+    // would leave the Run button spinning for three minutes with nothing happening.
+    if (child.exitCode !== null) {
+      await delay(400);
+      try { raw = fs.readFileSync(resultFile, 'utf8'); } catch (error) { raw = ''; }
+      const late = rcvm.parseRcvmLauncherOutput(raw);
+      if (late.pid && late.verified !== undefined) {
+        return { pid: late.pid, verified: late.verified, launcherPid: null, output: raw };
+      }
+      break;
+    }
+    await delay(250);
+  }
+  const code = child.exitCode;
+  const reason = stderr.trim() || (code ? `Start-Process exited with code ${code}.` : 'The elevated launcher did not report a result in time.');
+  throw new Error(/cancel|denied|1223/i.test(reason)
+    ? 'Administrator approval was declined, so the app was not started. Press Run and approve the Windows prompt to run it contained.'
+    : reason);
+}
+
 // Launches the app inside RCVM containment: suspended start, Job Object assignment
 // (kill-on-close, memory/CPU/process caps), resume, per-app profile folders.
 // Anything that cannot be contained fails closed; nothing runs uncontained.
-async function runWithRcvm(appRecord, sandboxRoot, logPath) {
+async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false } = {}) {
   const rcvm = require('./rcvm-runtime');
   const launchStartedAt = Date.now();
   let launcherChild = null;
@@ -2098,6 +2238,12 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     const argCheck = require('./hyperv-runtime').validateLaunchArgs(appRecord.launchArgs);
     if (!argCheck.ok) throw new Error(`Saved launch arguments are invalid: ${argCheck.reason} Nothing was launched.`);
     const profile = ensureRcvmProfile(sandboxRoot);
+    const statePaths = elevated ? rcvmStatePaths(appRecord.id) : null;
+    if (elevated) {
+      for (const filePath of [statePaths.resultFile, statePaths.stopFile]) {
+        try { fs.unlinkSync(filePath); } catch (error) { /* absent is fine */ }
+      }
+    }
     // The only runtime knobs RunContainer sets are documented .NET ones, and
     // only for a managed app. Native code gets no environment changes.
     const runtimeEnv = runtimeProfile.sanitizeEnvironment(
@@ -2113,7 +2259,11 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       userProfileDir: profile.userProfile,
       launchArgs: argCheck.args || '',
       runtimeEnv,
-      startHidden: startsHidden(appRecord.source),
+      // An elevated window cannot be re-parented by this medium-integrity process,
+      // so it must not start hidden: the user has to be able to see it.
+      startHidden: elevated ? false : startsHidden(appRecord.source),
+      resultFile: elevated ? statePaths.resultFile : '',
+      stopFile: elevated ? statePaths.stopFile : '',
       memoryCapBytes: limitCheck.limits.memoryCapBytes,
       cpuRate: limitCheck.limits.cpuRate,
       maxProcesses: limitCheck.limits.maxProcesses,
@@ -2125,6 +2275,18 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     const scriptPath = path.join(app.getPath('userData'), `runcontainer-rcvm-${appRecord.id}.ps1`);
     fs.writeFileSync(scriptPath, scriptText, 'utf8');
 
+    let pid;
+    let verified;
+    let launcherPid = null;
+    let launcherOutput = '';
+    if (elevated) {
+      const started = await startElevatedRcvmLauncher(scriptPath, statePaths.resultFile, logPath);
+      pid = started.pid;
+      verified = started.verified;
+      launcherPid = started.launcherPid;
+      launcherOutput = started.output;
+      appendLog(logPath, 'Windows approved an elevated launch; the contained app runs with administrator rights.');
+    } else {
     launcherChild = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], { windowsHide: true });
     // The launcher's pipes are the only live stdout/stderr a detached GUI app has;
     // the monitor reads them alongside the app's log file.
@@ -2132,9 +2294,8 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     if (Object.keys(runtimeEnv).length > 0) {
       appendLog(logPath, `Runtime strategy “${runtimeProfile.strategyLabel(appRecord.runtimeJit)}” applied to this managed .NET app: ${Object.entries(runtimeEnv).map(([key, value]) => `${key}=${value}`).join(', ')}.`);
     }
-    const launcherPid = launcherChild.pid;
+    launcherPid = launcherChild.pid;
     rcvmLaunchers.set(appRecord.id, launcherChild);
-    let launcherOutput = '';
     const verifyPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('The RCVM launcher did not report verification in time.')),
         90000);
@@ -2143,7 +2304,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
         if (parsed.error) {
           clearTimeout(timer);
           clearInterval(poll);
-          reject(new Error(parsed.error));
+          reject(rcvmLauncherError(parsed));
         } else if (parsed.verified !== undefined) {
           clearTimeout(timer);
           clearInterval(poll);
@@ -2155,7 +2316,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
         clearInterval(poll);
         const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
         if (parsed.verified !== undefined) resolve(parsed.verified);
-        else reject(new Error(parsed.error || 'The RCVM launcher exited before verification.'));
+        else reject(parsed.error ? rcvmLauncherError(parsed) : new Error('The RCVM launcher exited before verification.'));
       });
     });
     // Never an unhandled rejection when Run fails earlier on pidPromise.
@@ -2167,7 +2328,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
         const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
         if (parsed.error) {
           clearTimeout(timer);
-          reject(new Error(parsed.error));
+          reject(rcvmLauncherError(parsed));
         } else if (parsed.pid) {
           clearTimeout(timer);
           resolve(parsed.pid);
@@ -2180,7 +2341,7 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       launcherChild.once('exit', (code) => {
         clearTimeout(timer);
         const parsed = rcvm.parseRcvmLauncherOutput(launcherOutput);
-        reject(new Error(parsed.error || `The RCVM launcher exited before the app started (code ${code}).`));
+        reject(parsed.error ? rcvmLauncherError(parsed) : new Error(`The RCVM launcher exited before the app started (code ${code}).`));
       });
     });
     launcherChild.stderr.on('data', (chunk) => {
@@ -2192,11 +2353,12 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       appendLog(logPath, `RCVM launcher exited (code ${code}); its job object ends the app tree with it.`);
     });
 
-    const pid = await pidPromise;
+    pid = await pidPromise;
 
     // Post-launch verification of the ACTUAL process (IsProcessInJob against
     // our job + enforced limits). Anything unverified is killed, never reported.
-    const verified = await verifyPromise;
+    verified = await verifyPromise;
+    }
     if (!verified || verified.inJob !== true || verified.limits !== true) {
       const why = !verified
         ? 'the launcher never reported verification'
@@ -2230,6 +2392,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       activeEngine: 'rcvm',
       isolated: true,
       isolationLevel: 'container',
+      elevated: elevated || undefined,
+      statusNote: elevated ? 'administrator-approved, shown on your desktop' : undefined,
+      rcvmStopFile: elevated ? statePaths.stopFile : undefined,
       rcvmJob: rcvm.rcvmJobName(appRecord.id),
       rcvmLauncherPid: launcherPid,
       pid,
@@ -2248,13 +2413,16 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
     monitorAppProcesses(appRecord.id, logPath);
     broadcastContainerStatus(updatedApp);
     // Hosting is presentation only and must never hold up the launch or fail it, so it runs
-    // after the launch result is already decided.
-    hostAppWindowEverywhere(updatedApp, pid, logPath, {
-      note: 'This app runs in its own environment. Its window is hosted here.',
-    }).then(() => {
-      const latest = getStoredApp(appRecord.id);
-      if (latest) broadcastContainerStatus(latest);
-    }).catch(() => {});
+    // after the launch result is already decided. Windows will not let this process own an
+    // elevated window, so an elevated app keeps its own desktop window.
+    if (!elevated) {
+      hostAppWindowEverywhere(updatedApp, pid, logPath, {
+        note: 'This app runs in its own environment. Its window is hosted here.',
+      }).then(() => {
+        const latest = getStoredApp(appRecord.id);
+        if (latest) broadcastContainerStatus(latest);
+      }).catch(() => {});
+    }
     return {
       id: appRecord.id,
       status: 'Running',
@@ -2265,7 +2433,10 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       isolated: true,
       isolationLevel: 'container',
       embedded: false,
-      reason: `Running contained (RCVM): Job Object caps hold its lifetime and resources, and its profile folders stay inside its environment. Works on all Windows editions. This is process containment, not a hardware VM, and it does not cut network access.`,
+      elevated,
+      reason: elevated
+        ? `Running contained (RCVM) with Windows administrator approval: the Job Object caps and per-app profile folders still apply, and the app window stays on your desktop because Windows does not allow RunContainer to host an elevated window.`
+        : `Running contained (RCVM): Job Object caps hold its lifetime and resources, and its profile folders stay inside its environment. Works on all Windows editions. This is process containment, not a hardware VM, and it does not cut network access.`,
     };
   } catch (error) {
     appendLog(logPath, `RCVM launch failed: ${error.message}`);
@@ -2277,7 +2448,18 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath) {
       }
       rcvmLaunchers.delete(appRecord.id);
     }
-    const remaining = await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath }).catch(() => []);
+    // A refused CreateProcess started nothing, so the expensive process sweep is
+    // skipped for the elevation retry; every other failure still sweeps.
+    const remaining = error.launcherCode === 'elevation_required'
+      ? []
+      : await stopProcessesUnder(sandboxRoot, trackedPids(appRecord), { logPath }).catch(() => []);
+    if (!elevated && error.launcherCode === 'elevation_required' && remaining.length === 0) {
+      appendLog(logPath, 'The app asks for administrator rights (Win32 740). Relaunching the contained launcher elevated once Windows approves it.');
+      return runWithRcvm(appRecord, sandboxRoot, logPath, { elevated: true });
+    }
+    if (error.launcherCode === 'elevation_required') {
+      return failedLaunch(appRecord, 'Windows refused to start this app because it requires administrator rights, and the elevated attempt did not complete. Approve the Windows prompt when it appears, or run this app in a virtual machine environment.');
+    }
     return failedLaunch(appRecord, remaining.length > 0
       ? `${error.message} A process may still be running; Delete this app or close it before retrying. Nothing was launched without containment.`
       : `${error.message} Nothing was launched without containment.`);
@@ -3044,6 +3226,8 @@ app.whenReady().then(() => {
   }
   createWindow();
   startBehavioralSupervisor();
+  // Icon extraction is one short PowerShell call per app and keeps startup fast.
+  backfillAppIcons().catch(() => {});
   // Warm the window host in the background after the UI is up, so the first Run does
   // not pay for compiling it.
   const warm = setTimeout(prewarmWindowHost, 1500);
@@ -3094,6 +3278,8 @@ ipcMain.handle('list-apps', async () => {
     return {
       ...entry,
       runtime,
+      // Served inline because the page's CSP allows data: images, not file: ones.
+      iconUrl: iconDataUrl(entry.iconPath),
       envDirPresent: root ? fs.existsSync(root) : false,
       sourcePresent: entry.source ? fs.existsSync(entry.source) : false,
       diskPresent: entry.hypervVhd ? fs.existsSync(entry.hypervVhd) : null,
@@ -3102,7 +3288,7 @@ ipcMain.handle('list-apps', async () => {
   if (updatesById.size === 0 && !runtimeFilled) return reconciled;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
   const current = updatesById.size ? mergeStatusUpdates(reconciled, updatesById) : reconciled;
-  saveApps(current.map(({ envDirPresent, sourcePresent, diskPresent, ...rest }) => rest));
+  saveApps(current.map(({ envDirPresent, sourcePresent, diskPresent, iconUrl, ...rest }) => rest));
   return current;
 });
 
@@ -3118,7 +3304,7 @@ async function installExe(exePath) {
   fs.copyFileSync(exePath, destination);
 
   const metadata = await getExeMetadata(exePath);
-  const iconPath = path.join(sandboxRoot, 'icon.ico');
+  const iconPath = path.join(sandboxRoot, 'icon.png');
   const extractedIcon = await extractExeIcon(exePath, iconPath);
   const profile = getSandboxProfile('default');
   const record = {

@@ -635,6 +635,45 @@ const FAMILIES = [
     },
   },
   {
+    id: 'installer_needs_admin',
+    diagnosis: 'isolation_unsupported',
+    action: 'advise_configuration',
+    basis: 'public/rcvm-runtime.js reports Win32 740 as elevation_required; main.js relaunches the contained launcher elevated after Windows approval',
+    build(rand) {
+      return observation({
+        status: 'Failed',
+        alive: false,
+        windowExpected: true,
+        windowVisible: false,
+        exitCode: 740,
+        logs: pick(rand, [
+          ['The app could not be started suspended: 740', 'Windows: the requested operation requires elevation'],
+          ['RunContainer: the app asks for administrator rights; relaunching the contained launcher elevated', 'Waiting for Windows approval'],
+          ['CreateProcess failed with 740', 'The executable manifest requests requireAdministrator'],
+        ]),
+      });
+    },
+  },
+  {
+    id: 'elevated_launch_verified',
+    diagnosis: 'healthy',
+    action: 'none',
+    basis: 'main.js elevated RCVM launch: the Job Object caps and per-app profile still apply; the window stays on the desktop',
+    build(rand) {
+      const age = int(rand, 1500, 9000);
+      return observation({
+        engine: 'rcvm',
+        windowVisible: true,
+        windowAgeMs: age,
+        ageMs: age + int(rand, 500, 5000),
+        logs: pick(rand, [
+          ['Windows approved an elevated launch; the contained app runs with administrator rights.', 'Verified: PID 4212 is inside its Job Object with enforced limits (token integrity RID 12288).'],
+          ['The app asks for administrator rights (Win32 740). Relaunching the contained launcher elevated once Windows approves it.', 'Verified: PID 9001 is inside its Job Object with enforced limits.'],
+        ]),
+      });
+    },
+  },
+  {
     id: 'installer_reboot_pending',
     diagnosis: 'installer_failed',
     action: 'advise_configuration',

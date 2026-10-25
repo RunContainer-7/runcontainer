@@ -7,11 +7,11 @@
       "file": "rc-brain-2.json",
       "id": "rc-brain-2",
       "version": "2.0.0",
-      "createdAt": "2026-10-22T16:53:43.738Z",
+      "createdAt": "2026-10-25T17:02:13.440Z",
       "parameters": 8334,
       "status": "active",
       "source": "train-ai-brain"
     }
   ],
-  "updatedAt": "2026-10-22T16:53:43.745Z"
+  "updatedAt": "2026-10-25T17:02:13.448Z"
 }

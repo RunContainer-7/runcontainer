@@ -14,7 +14,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.3";
+const APP_VERSION_FALLBACK = "0.7.4";
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -810,9 +810,16 @@ export default function ContainerManager() {
       {activeSession ? (
         <div className="apps-panel session-shell">
           <div className="panel-title-row">
-            <div>
-              <h2>{activeSession.status === 'Launching' ? 'Starting app' : activeSession.status === 'Running' ? 'App running' : activeSession.status === 'Unknown' ? 'App state unknown' : 'App stopped'}</h2>
-              <span className="muted">{activeSession.name}{isolationLabel(activeSession) ? ` • ${isolationLabel(activeSession)}` : ''}</span>
+            <div className="detail-heading">
+              <div className="app-icon">
+                {activeSession.iconUrl
+                  ? <img src={activeSession.iconUrl} alt="" />
+                  : <span className="app-icon-letter" aria-hidden="true">{(activeSession.name || '?').trim().charAt(0).toUpperCase()}</span>}
+              </div>
+              <div>
+                <h2>{activeSession.status === 'Launching' ? 'Starting app' : activeSession.status === 'Running' ? 'App running' : activeSession.status === 'Unknown' ? 'App state unknown' : 'App stopped'}</h2>
+                <span className="muted">{activeSession.name}{isolationLabel(activeSession) ? ` • ${isolationLabel(activeSession)}` : ''}</span>
+              </div>
             </div>
             <div className="pill">{activeSession.status || 'Launching'}</div>
           </div>
@@ -824,7 +831,9 @@ export default function ContainerManager() {
                   {activeSession.status === 'Launching'
                     ? 'Waiting for RunContainer to confirm the process.'
                     : activeSession.status === 'Running'
-                      ? `${activeSession.windowHosted ? 'Shown in its own RunContainer window (visual only).' : 'Running. Its window opens in a RunContainer window.'}`
+                      ? activeSession.elevated
+                        ? 'Running with administrator approval. Windows will not let RunContainer host an elevated window, so it stays on your desktop; the Job Object caps and its own data folder still apply.'
+                        : `${activeSession.windowHosted ? 'Shown in its own RunContainer window (visual only).' : 'Running. Its window opens in a RunContainer window.'}`
                       : 'All processes for this app have exited.'}
                 </div>
                 {(activeSession.status === 'Running' || activeSession.status === 'Unknown') && (
@@ -868,7 +877,9 @@ export default function ContainerManager() {
                 <div key={container.id} className="container-item">
                   <div className="container-info">
                     <div className="app-icon">
-                      {container.iconPath ? <img src={container.iconPath.startsWith('http') ? container.iconPath : `file://${container.iconPath}`} alt={container.name} /> : '📱'}
+                      {container.iconUrl
+                        ? <img src={container.iconUrl} alt="" />
+                        : <span className="app-icon-letter" aria-hidden="true">{(container.name || '?').trim().charAt(0).toUpperCase()}</span>}
                     </div>
                     <div>
                       <div className="container-name">{container.name || container.metadata?.title || container.metadata?.originalName || 'Installed app'}</div>

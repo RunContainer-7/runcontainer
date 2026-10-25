@@ -104,6 +104,40 @@ describe('RCVM user-mode container backend', () => {
     expect(() => buildRcvmLaunchScript({ ...SCRIPT_OPTS, memoryCapBytes: undefined })).toThrow();
   });
 
+  it('reports elevation as an actionable code instead of a bare message', () => {
+    // Windows refuses CreateProcess for an exe whose manifest asks for administrator
+    // rights. The launcher names that reason so the app can relaunch elevated once,
+    // instead of showing "could not be started suspended: 740" with no way forward.
+    const script = buildRcvmLaunchScript(SCRIPT_OPTS);
+    expect(script).toContain('ERROR_ELEVATION_REQUIRED');
+    expect(script).toContain('\\"code\\":');
+    expect(script).toContain('elevation_required');
+  });
+
+  it('writes results to a file and honours a stop file for an elevated launcher', () => {
+    // An elevated launcher's stdout cannot be read from RunContainer, and taskkill
+    // cannot open it either, so the launcher reports through files.
+    const script = buildRcvmLaunchScript({
+      ...SCRIPT_OPTS,
+      resultFile: 'C:\\data\\state\\app.result.jsonl',
+      stopFile: 'C:\\data\\state\\app.stop',
+    });
+    expect(script).toContain("Add-Content -LiteralPath 'C:\\data\\state\\app.result.jsonl' -Value $startJson");
+    expect(script).toContain("Add-Content -LiteralPath 'C:\\data\\state\\app.result.jsonl' -Value $verifyJson");
+    expect(script).toContain("WaitForExit('RunContainer-RCVM-test', [int]$start.pid, 'C:\\data\\state\\app.stop')");
+    expect(script).toContain('File.Exists(stopFile)');
+    // Without those options the launcher neither writes files nor polls one.
+    const plain = buildRcvmLaunchScript(SCRIPT_OPTS);
+    expect(plain).not.toContain('Add-Content');
+    expect(plain).toContain("WaitForExit('RunContainer-RCVM-test', [int]$start.pid, '')");
+  });
+
+  it('reads a result file that begins with a byte-order mark', () => {
+    const parsed = parseRcvmLauncherOutput('\uFEFF{"pid":42,"job":"j"}\r\n\uFEFF{"error":"no","code":"elevation_required"}');
+    expect(parsed.pid).toBe(42);
+    expect(parsed.code).toBe('elevation_required');
+  });
+
   it('parses the launcher pid/verify/exit/error lines without throwing', () => {
     expect(parseRcvmLauncherOutput('{"pid":1234,"job":"j"}\r\n{"pid":1234,"verified":{"inJob":true,"limits":true,"cpu":true,"integrityRid":8192}}\r\n{"pid":1234,"exitCode":0}'))
       .toEqual({ pid: 1234, job: 'j', verified: { inJob: true, limits: true, cpu: true, integrityRid: 8192 }, exitCode: 0 });
