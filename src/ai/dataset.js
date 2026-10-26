@@ -64,6 +64,7 @@ function observation({
   logs = [],
   environment = {},
   history = {},
+  agents = null,
 }) {
   return {
     app: { name: 'Scenario app', engine, status },
@@ -71,7 +72,27 @@ function observation({
     launch: { ageMs, exitCode, previousLaunchFailed },
     logLines: logs,
     environment: { qemuProvisioned: engine === 'qemu', hypervReady: engine === 'hyperv', appContainerSupported: true, runtimePresent: true, ...environment },
-    history: { repairs: 0, lastRepairFailed: false, sameDiagnosisRepeats: 0, symptomTicks: 0, symptomAgeMs: 0, recurrences: 0, recoveredRecently: false, approvalDenied: false, ...history },
+    // Specialist-agent evidence. `agents` is the declared source; the policy
+    // reads the same facts from history, so both stay in step here rather than
+    // in two places.
+    ...(agents ? {
+      agents,
+      history: {
+        repairs: 0,
+        lastRepairFailed: false,
+        sameDiagnosisRepeats: 0,
+        symptomTicks: 0,
+        symptomAgeMs: 0,
+        recurrences: 0,
+        recoveredRecently: false,
+        approvalDenied: false,
+        ...history,
+        agentsAvailable: agents.available !== false,
+        agentsDispatched: Boolean(agents.dispatched),
+      },
+    } : {
+      history: { repairs: 0, lastRepairFailed: false, sameDiagnosisRepeats: 0, symptomTicks: 0, symptomAgeMs: 0, recurrences: 0, recoveredRecently: false, approvalDenied: false, ...history },
+    }),
   };
 }
 
@@ -247,13 +268,17 @@ const FAMILIES = [
     build(rand) {
       const age = int(rand, 2500, 9500);
       return observation({
-        status: 'Launching',
+        // A launch is reported as Running once the contained process is verified, so
+        // "still inside the 10 s window budget" arrives with either status. Training
+        // only the Launching form made the model restart apps that had simply not
+        // drawn their window yet.
+        status: pick(rand, ['Launching', 'Running']),
         windowExpected: true,
         windowVisible: false,
         windowAgeMs: age,
         ageMs: age,
         cpuPercent: int(rand, 5, 60),
-        history: { symptomTicks: int(rand, 1, 3), symptomAgeMs: age },
+        history: { symptomTicks: int(rand, 0, 3), symptomAgeMs: age },
         logs: pick(rand, [
           ['Initializing runtime', 'Loading settings'],
           ['Preparing first run', 'Extracting resources'],
@@ -333,8 +358,8 @@ const FAMILIES = [
   {
     id: 'missing_runtime',
     diagnosis: 'missing_runtime',
-    action: 'advise_runtime_install',
-    basis: 'knowledge.backends.rcvm + scripts/windows-verify runtime checks',
+    action: 'consult_runbook',
+    basis: 'knowledge.backends.rcvm + scripts/windows-verify runtime checks; the signature is exact (0xC0000135 or a named DLL), so the Runbook is asked (src/ai/runbook.js missing_runtime) instead of inferring it',
     build(rand) {
       return observation({
         status: 'Failed',
@@ -357,8 +382,8 @@ const FAMILIES = [
   {
     id: 'side_by_side_missing',
     diagnosis: 'missing_runtime',
-    action: 'advise_runtime_install',
-    basis: 'Windows side-by-side activation failure has the same fix as a missing runtime',
+    action: 'consult_runbook',
+    basis: 'Windows side-by-side activation failure has the same fix as a missing runtime, and it is a documented signature: src/ai/runbook.js side_by_side_broken',
     build(rand) {
       return observation({
         status: 'Failed',
@@ -577,8 +602,8 @@ const FAMILIES = [
   {
     id: 'disk_exhausted',
     diagnosis: 'disk_exhausted',
-    action: 'advise_configuration',
-    basis: 'knowledge.backends.qemu overlay disk + install lifecycle',
+    action: 'consult_runbook',
+    basis: 'knowledge.backends.qemu overlay disk + install lifecycle; "no space left on device" is a documented signature, so the Runbook is asked (src/ai/runbook.js disk_full)',
     build(rand) {
       return observation({
         status: 'Failed',
@@ -637,8 +662,8 @@ const FAMILIES = [
   {
     id: 'installer_needs_admin',
     diagnosis: 'isolation_unsupported',
-    action: 'advise_configuration',
-    basis: 'public/rcvm-runtime.js reports Win32 740 as elevation_required; main.js relaunches the contained launcher elevated after Windows approval',
+    action: 'consult_runbook',
+    basis: 'public/rcvm-runtime.js reports Win32 740 as elevation_required; main.js relaunches the contained launcher elevated after Windows approval. Win32 740 is a documented signature: src/ai/runbook.js elevation_required',
     build(rand) {
       return observation({
         status: 'Failed',
@@ -676,8 +701,8 @@ const FAMILIES = [
   {
     id: 'installer_reboot_pending',
     diagnosis: 'installer_failed',
-    action: 'advise_configuration',
-    basis: 'Windows Installer 3010 is success pending reboot, so restarting the app is the wrong repair',
+    action: 'consult_runbook',
+    basis: 'Windows Installer 3010 is success pending reboot, so restarting the app is the wrong repair. Documented signature: src/ai/runbook.js installer_reboot_pending',
     build(rand) {
       return observation({
         status: 'Failed',
@@ -962,6 +987,167 @@ const FAMILIES = [
       });
     },
   },
+  // --- v3: incomplete evidence and the specialist agents ----------------------
+  // These families describe the state RC-Brain cannot diagnose yet: something is
+  // wrong, but the vector is missing the measurement that would name it. The
+  // correct action is not a repair and not a shrug; it is a dispatch.
+  {
+    id: 'agents_dispatch_window_and_log_unknown',
+    diagnosis: 'unknown_failure',
+    action: 'spawn_agents',
+    basis: 'src/ai/agents.js routeAgents: a window is expected, none is visible and the log is empty',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 11000, 45000),
+        ageMs: 45000,
+        cpuPercent: int(rand, 0, 25),
+        agents: { available: true },
+        history: { symptomTicks: int(rand, 2, 5) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_dispatch_engine_silent',
+    diagnosis: 'engine_unresponsive',
+    action: 'spawn_agents',
+    basis: 'src/ai/agents.js routeAgents: engine not answering, with no log evidence either',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 12000, 40000),
+        ageMs: 40000,
+        engineResponsive: false,
+        cpuPercent: 0,
+        agents: { available: true },
+        history: { symptomTicks: int(rand, 2, 5) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_dispatch_setup_pending',
+    diagnosis: 'installer_failed',
+    action: 'spawn_agents',
+    basis: 'public/main.js install-in-environment: a setup program is the app until it finishes',
+    build(rand) {
+      return observation({
+        status: pick(rand, ['Launching', 'Installed']),
+        alive: true,
+        windowExpected: true,
+        windowVisible: chance(rand, 0.4),
+        windowAgeMs: int(rand, 4000, 30000),
+        ageMs: 30000,
+        cpuPercent: int(rand, 1, 20),
+        agents: { available: true },
+        history: { installerPending: true, symptomTicks: int(rand, 2, 4) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_already_dispatched_observe',
+    diagnosis: 'unknown_failure',
+    action: 'observe',
+    basis: 'src/ai/agents.js: dispatch is bounded to one round per incident',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 15000, 50000),
+        ageMs: 50000,
+        cpuPercent: int(rand, 0, 20),
+        agents: { available: true, dispatched: true, foundNew: false },
+        history: { symptomTicks: int(rand, 3, 6) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_found_engine_dead',
+    diagnosis: 'engine_unresponsive',
+    action: 'restart_engine',
+    basis: 'src/ai/agents.js engine agent: the containment launcher has exited, which is exactly what public/main.js behavioralEngineResponsive reports as unresponsive',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 15000, 60000),
+        ageMs: int(rand, 40000, 90000),
+        // public/main.js reports the engine unresponsive as soon as the launcher has
+        // exited, so that is the common shape; the agent's own finding must still be
+        // enough when the liveness flag has not caught up yet.
+        engineResponsive: chance(rand, 0.7),
+        cpuPercent: int(rand, 0, 15),
+        agents: { available: true, dispatched: true, foundNew: true, engineDead: true },
+        history: { symptomTicks: int(rand, 2, 5) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_found_folder_denied',
+    diagnosis: 'permission_denied',
+    action: 'repair_permissions',
+    basis: 'public/main.js ACL repair plan; src/ai/agents.js filesystem agent',
+    build(rand) {
+      return observation({
+        engine: pick(rand, ['rcvm', 'appcontainer']),
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 8000, 30000),
+        ageMs: 30000,
+        agents: { available: true, dispatched: true, foundNew: true, aclDenied: true },
+        history: { symptomTicks: int(rand, 2, 5) },
+        logs: [],
+      });
+    },
+  },
+  {
+    id: 'agents_window_owned_outside',
+    diagnosis: 'healthy',
+    action: 'none',
+    basis: 'public/behavioral-probe.js window walk: the probe can miss a window whose owner chain it cannot see (a hosted or elevated-owner window) while an agent finds it, and the app is working',
+    build(rand) {
+      // The windowless age and symptom count deliberately span the whole range a
+      // real miss can produce: without that variation the model drifts towards a
+      // permission repair on a windowless-but-working app the moment the symptom
+      // has persisted for a while, which is exactly the over-intervention the
+      // agent finding is supposed to prevent.
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 6000, 120000),
+        ageMs: int(rand, 20000, 140000),
+        cpuPercent: int(rand, 0, 20),
+        agents: { available: true, dispatched: true, foundNew: true, windowElsewhere: true },
+        history: { symptomTicks: int(rand, 1, 8), symptomAgeMs: int(rand, 10000, 120000) },
+        logs: withOptional(rand, ['Window created'], ['Setup finished', 'Ready', 'Extension host connected'], 0.6),
+      });
+    },
+  },
+  {
+    id: 'agents_streaming_setup_healthy',
+    diagnosis: 'healthy',
+    action: 'none',
+    basis: 'knowledge.lifecycle.install: an installer still running is not a failure while it makes progress',
+    build(rand) {
+      return observation({
+        status: 'Running',
+        windowExpected: true,
+        windowVisible: chance(rand, 0.5),
+        windowAgeMs: int(rand, 4000, 25000),
+        ageMs: 25000,
+        cpuPercent: int(rand, 5, 45),
+        agents: { available: true, dispatched: true, foundNew: true, installerRunning: true },
+        history: { installerPending: true },
+        logs: ['Extracting files', 'Writing registry entries', 'Progress 68%'],
+      });
+    },
+  },
 ];
 
 // Whole families the model never sees during training or calibration. This is
@@ -993,13 +1179,20 @@ const UNSEEN_FAMILIES = [
     action: 'restart_engine',
     basis: 'Job Object assignment lost while the process keeps running',
     build(rand) {
+      const age = int(rand, 15000, 60000);
       return observation({
         windowExpected: true,
         windowVisible: false,
-        windowAgeMs: int(rand, 2000, 6000),
-        ageMs: 25000,
+        // windowAgeMs and ageMs are the same quantity in the live probe (both are
+        // measured from the latest launch), so a family that contradicts itself
+        // teaches the model that the correct answer is unknowable. This one used
+        // to report a 2-6 s windowless age inside a 25 s old incident, which is
+        // why "still starting" began to win over "the engine is gone".
+        windowAgeMs: age,
+        ageMs: age,
         engineResponsive: false,
         cpuPercent: int(rand, 5, 40),
+        history: { symptomTicks: int(rand, 2, 5) },
         logs: ['Process is no longer inside its job', 'Containment handle closed by policy'],
       });
     },
@@ -1100,6 +1293,65 @@ const UNSEEN_FAMILIES = [
         ageMs: 20000,
         history: { symptomTicks: int(rand, 2, 4) },
         logs: ['Access is denied writing to its container profile', '0x80070005'],
+      });
+    },
+  },
+  {
+    id: 'unseen_agents_setup_finished_new_exe',
+    diagnosis: 'healthy',
+    action: 'none',
+    basis: 'public/main.js install flow: a completed setup that produced an executable is not a failure',
+    build(rand) {
+      return observation({
+        status: 'Running',
+        windowExpected: true,
+        windowVisible: int(rand, 0, 1) === 1,
+        windowAgeMs: int(rand, 3000, 60000),
+        ageMs: int(rand, 20000, 90000),
+        cpuPercent: int(rand, 0, 25),
+        agents: { available: true, dispatched: true, foundNew: true, newExePresent: true },
+        history: { installerPending: false, symptomTicks: int(rand, 1, 6) },
+        logs: withOptional(rand, ['Setup completed successfully'], ['Ready', 'Update check skipped: offline'], 0.5),
+      });
+    },
+  },
+  {
+    id: 'unseen_agents_unexplained_output',
+    diagnosis: 'unknown_failure',
+    action: 'spawn_agents',
+    basis: 'src/ai/agents.js: output that matches no known pattern is a gap in the evidence, not a diagnosis',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: false,
+        windowAgeMs: int(rand, 10000, 40000),
+        ageMs: 40000,
+        cpuPercent: int(rand, 0, 15),
+        agents: { available: true },
+        history: { symptomTicks: int(rand, 2, 4) },
+        logs: pick(rand, [
+          ['Lane 3 quiesced', 'Driver heartbeat absent'],
+          ['Transport closed unexpectedly'],
+          ['Session token stale'],
+        ]),
+      });
+    },
+  },
+  {
+    id: 'unseen_agents_reparse_link_present',
+    diagnosis: 'healthy',
+    action: 'none',
+    basis: 'public/main.js: a junction inside the app folder is real evidence, and it is not by itself a failure to repair',
+    build(rand) {
+      return observation({
+        windowExpected: true,
+        windowVisible: true,
+        windowAgeMs: int(rand, 3000, 12000),
+        ageMs: 20000,
+        cpuPercent: int(rand, 0, 12),
+        agents: { available: true, dispatched: true, foundNew: true, reparseLink: true },
+        history: { symptomTicks: int(rand, 2, 4) },
+        logs: [],
       });
     },
   },

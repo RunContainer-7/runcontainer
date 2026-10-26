@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, setUpInBackground } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import { UPDATES } from "../data/updates";
 
 function useBootAnimation() {
   const [booting, setBooting] = useState(true);
+  // Ticks only while something is being set up, so a long setup is visibly still
+  // working instead of looking like an app that never appears.
+  const [setupClock, setSetupClock] = useState(Date.now());
 
   useEffect(() => {
     const timer = window.setTimeout(() => setBooting(false), 900);
@@ -14,7 +17,18 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.7";
+const APP_VERSION_FALLBACK = "0.7.8";
+// "4m 07s" - how long a setup has been running, for the one place a long wait
+// needs to be explained rather than look frozen.
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
@@ -40,6 +54,10 @@ export default function ContainerManager() {
   const [selectedExe, setSelectedExe] = useState(null);
   const [installMessage, setInstallMessage] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
+  // Icons are data URLs extracted from the app's own executable. If one cannot be
+  // decoded the tile falls back to a letter instead of showing a broken image.
+  const [failedIcons, setFailedIcons] = useState({});
+  const markIconFailed = (id) => setFailedIcons((current) => (current[id] ? current : { ...current, [id]: true }));
   const [logs, setLogs] = useState([]);
   const [sourceUrl, setSourceUrl] = useState("");
   const [showInstallWizard, setShowInstallWizard] = useState(false);
@@ -187,6 +205,35 @@ export default function ContainerManager() {
   }), []);
 
   useEffect(() => onAiStatus((status) => { if (status) setAiStatus(status); }), []);
+
+  // An app that is really its own setup program: either its wizard is waiting in a
+  // RunContainer window, or its unattended setup is running in the background. The
+  // message names which one it is, so a slow setup never looks like a frozen app.
+  useEffect(() => onSetupProgress((payload) => {
+    if (!payload?.id) return;
+    if (payload.phase === 'failed') {
+      setInstallMessage(payload.detail || payload.summary || 'Setup could not be started in the background.');
+      return;
+    }
+    setInstallMessage(payload.summary || 'This app is its own setup program.');
+    refreshContainers();
+  }), [refreshContainers]);
+
+  useEffect(() => onSetupComplete((payload) => {
+    if (!payload?.id) return;
+    setInstallMessage(payload.detail || 'Setup finished.');
+    refreshContainers();
+  }), [refreshContainers]);
+
+  // The clock only runs while an unattended setup is in progress.
+  const setupRunning = (containers || []).some((container) => container?.setupProgram
+    && container.setupPlanMode === 'silent'
+    && !container.installedExePath);
+  useEffect(() => {
+    if (!setupRunning) return undefined;
+    const timer = setInterval(() => setSetupClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [setupRunning]);
   useEffect(() => onAiHistory((history) => { if (Array.isArray(history)) setAiHistory(history); }), []);
 
   // Keep RC-Brain's heartbeat current: "last check" must reflect the real
@@ -339,6 +386,17 @@ export default function ContainerManager() {
         setShowInstallWizard(false);
         setInstallMessage(error?.message || "Unable to import from that URL.");
       });
+  }
+
+  function handleSetupInBackground(container) {
+    if (!container) return;
+    setInstallMessage(`Running ${container.name}'s unattended setup inside its environment…`);
+    setUpInBackground(container)
+      .then((result) => {
+        setInstallMessage(result?.detail || result?.error || 'The unattended setup returned no result.');
+        refreshContainers();
+      })
+      .catch((error) => setInstallMessage(`Setup could not be completed in the background: ${error?.message || 'unknown error'}`));
   }
 
   function handleDuplicate(container) {
@@ -756,6 +814,26 @@ export default function ContainerManager() {
                   {aiDecision.action?.label ? ` · chosen action: ${aiDecision.action.label}` : ''}
                 </span>
                 <span>{aiDecision.explanation}</span>
+                {aiDecision.agents && (
+                  <span className="muted">
+                    ◈ {aiDecision.agents.tool === 'consult_runbook' ? 'Runbook consulted' : 'Specialist agents dispatched'}
+                    {aiDecision.agents.tool === 'consult_runbook'
+                      ? aiDecision.agents.runbook?.matched
+                        ? `: ${aiDecision.agents.runbook.rule.label}`
+                        : ': no exact signature matched, so the components were measured'
+                      : `: ${(aiDecision.agents.spawned || []).map((agent) => agent.label).join(', ') || 'none answered'}`}
+                  </span>
+                )}
+                {aiDecision.agents?.arbitration && (
+                  <span className="muted">
+                    ◈ Harmony: {aiDecision.agents.arbitration.summary || aiDecision.agents.arbitration.reason}
+                  </span>
+                )}
+                {aiDecision.agents && Array.isArray(aiDecision.agents.facts) && aiDecision.agents.facts.length > 0 && (
+                  <ul className="ai-evidence ai-agent-facts">
+                    {aiDecision.agents.facts.slice(0, 5).map((fact, index) => <li key={`agent-${fact}-${index}`}>{fact}</li>)}
+                  </ul>
+                )}
                 {Array.isArray(aiDecision.evidence) && aiDecision.evidence.length > 0 && (
                   <ul className="ai-evidence">
                     {aiDecision.evidence.slice(0, 4).map((fact, index) => <li key={`${fact}-${index}`}>{fact}</li>)}
@@ -812,8 +890,8 @@ export default function ContainerManager() {
           <div className="panel-title-row">
             <div className="detail-heading">
               <div className="app-icon">
-                {activeSession.iconUrl
-                  ? <img src={activeSession.iconUrl} alt="" />
+                {activeSession.iconUrl && !failedIcons[activeSession.id]
+                  ? <img src={activeSession.iconUrl} alt="" onError={() => markIconFailed(activeSession.id)} />
                   : <span className="app-icon-letter" aria-hidden="true">{(activeSession.name || '?').trim().charAt(0).toUpperCase()}</span>}
               </div>
               <div>
@@ -877,8 +955,8 @@ export default function ContainerManager() {
                 <div key={container.id} className="container-item">
                   <div className="container-info">
                     <div className="app-icon">
-                      {container.iconUrl
-                        ? <img src={container.iconUrl} alt="" />
+                      {container.iconUrl && !failedIcons[container.id]
+                        ? <img src={container.iconUrl} alt="" onError={() => markIconFailed(container.id)} />
                         : <span className="app-icon-letter" aria-hidden="true">{(container.name || '?').trim().charAt(0).toUpperCase()}</span>}
                     </div>
                     <div>
@@ -889,6 +967,28 @@ export default function ContainerManager() {
                         {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • missing its files' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
                       </div>
+                      {container.setupSummary && (
+                        <div className="container-setup" role="note">
+                          <span className="muted">
+                            {container.setupProgram
+                              ? `Setup program${container.setupFamilyName ? ` (${container.setupFamilyName})` : ''}: `
+                              : 'Setup: '}
+                            {container.setupSummary}
+                          </span>
+                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && (
+                            <button className="settings-button ghost" onClick={() => handleSetupInBackground(container)}>Set up in the background</button>
+                          )}
+                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && container.setupStartedAt && (
+                            <span className="muted">
+                              Setup has been running for {formatElapsed(setupClock - new Date(container.setupStartedAt).getTime())} · it is still
+                              working inside this environment, and Run starts the app it produces.
+                            </span>
+                          )}
+                          {container.installedExePath && (
+                            <span className="muted">Run starts {container.installedAppName || 'the installed app'}.</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1263,9 +1363,73 @@ export default function ContainerManager() {
                     <span className="muted"> {entry.name || 'App'} · {entry.diagnosis?.confidenceText || ''} · {entry.action?.label || ''} · {entry.outcome}</span>
                   </div>
                   <div className="muted">{entry.explanation}</div>
+                  {entry.agents && (
+                    <div className="muted ai-agent-row">
+                      Agents: {(entry.agents.spawned || []).map((agent) => agent.label).join(', ') || 'none'}
+                      {Array.isArray(entry.agents.facts) && entry.agents.facts.length > 0 ? ` · ${entry.agents.facts.slice(0, 2).join(' · ')}` : ''}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
+          )}
+          {(aiStatus?.capabilities?.specialistAgents || []).length > 0 && (
+            <>
+              <h4>Specialist evidence agents</h4>
+              <p className="muted">
+                When the evidence is incomplete, the model can dispatch these fixed agents. Each one measures a single
+                component and reports; none of them can start, stop, repair or delete anything, and the model cannot
+                author one or give it arguments. Dispatch happens at most once per incident, and the model decides again
+                with the completed evidence.
+              </p>
+              <div className="ai-history">
+                {(aiStatus.agents?.catalogue || []).map((agent) => (
+                  <div className="ai-history-row" key={agent.id}>
+                    <div>
+                      <strong>{agent.label}</strong>
+                      <span className="muted"> registered: {agent.available ? 'yes' : 'no probe in this build'}</span>
+                    </div>
+                    <div className="muted">{agent.purpose}</div>
+                  </div>
+                ))}
+              </div>
+              {(aiStatus?.agents?.specialists || []).length > 0 && (
+                <>
+                  <h4>Reasoning agents</h4>
+                  <p className="muted">
+                    Dispatched by the same action, after the measurements. They are not neural networks: each one works
+                    from RunContainer’s own documentation and from what the probes just measured, and the harmony
+                    agent reports rather than forces a decision when the model and the expert disagree.
+                  </p>
+                  <div className="ai-history">
+                    {(aiStatus.agents.specialists || []).map((agent) => (
+                      <div className="ai-history-row" key={agent.id}>
+                        <div>
+                          <strong>{agent.label}</strong>
+                        </div>
+                        <div className="muted">{agent.purpose}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              {(aiStatus?.agents?.tools || []).length > 0 && (
+                <>
+                  <h4>The model’s two tools</h4>
+                  <div className="ai-history">
+                    {(aiStatus.agents.tools || []).map((tool) => (
+                      <div className="ai-history-row" key={tool.id}>
+                        <div>
+                          <strong>{tool.label}</strong>
+                          <span className="muted"> {tool.id}</span>
+                        </div>
+                        <div className="muted">{tool.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
           )}
           <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
           </div>

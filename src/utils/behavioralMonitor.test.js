@@ -216,6 +216,128 @@ describe('behavioural supervisor (AI-led)', () => {
     expect(decisions[1].autoExecute).toBe(false);
   });
 
+  it('dispatches the specialist agents when the model says the evidence is incomplete', async () => {
+    const dispatched = [];
+    const decisions = [];
+    const observations = [];
+    const agents = {
+      catalogue: [{ id: 'engine', label: 'Engine agent', purpose: 'check the engine' }],
+      dispatch: async (args) => {
+        dispatched.push(args);
+        return {
+          dispatchedAt: 'now',
+          durationMs: 12,
+          agents: [{ id: 'engine', label: 'Engine agent', ok: true, facts: ['the launcher has exited'], durationMs: 12 }],
+          report: { facts: ['Engine agent: the launcher has exited'] },
+          facts: ['Engine agent: the launcher has exited'],
+          features: {},
+          signals: { engineDead: true, foundNew: true },
+          observationPatch: {},
+        };
+      },
+    };
+    let call = 0;
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain((observation) => {
+        observations.push(observation);
+        call += 1;
+        return call === 1
+          ? decision({
+            diagnosis: { id: 'unknown_failure', summary: 'Not recognised', confidence: 0.4, confidenceText: '40%' },
+            action: { id: 'spawn_agents', label: 'Dispatch specialist agents', requiresApproval: false, autonomous: true, risk: 'none' },
+            decision: 'investigate',
+          })
+          : decision({
+            diagnosis: { id: 'engine_unresponsive', summary: 'Engine gone', confidence: 0.93, confidenceText: '93%' },
+            action: { id: 'restart_engine', label: 'Restart the isolation engine', requiresApproval: false, autonomous: true, risk: 'low' },
+            decision: 'execute',
+          });
+      }),
+      listApps: async () => [{ id: 'app-1', name: 'Editor', status: 'Running', engine: 'rcvm' }],
+      probe: async () => sample({ windowVisible: false, windowAgeMs: 30000 }),
+      agents,
+      onDecision: (notice) => decisions.push(notice),
+    });
+
+    await supervisor.tick();
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].diagnosisId).toBe('unknown_failure');
+    // The second analysis receives the agent measurements, and the first does not.
+    expect(observations[0].agents.dispatched).toBeUndefined();
+    expect(observations[1].agents.dispatched).toBe(true);
+    expect(observations[1].agents.engineDead).toBe(true);
+    expect(observations[1].environment.agentFindings).toEqual(['Engine agent: the launcher has exited']);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].action.id).toBe('restart_engine');
+    expect(decisions[0].agents.spawned).toEqual([{ id: 'engine', label: 'Engine agent', ok: true, reason: null, durationMs: 12, facts: ['the launcher has exited'] }]);
+    expect(decisions[0].agents.facts).toEqual(['Engine agent: the launcher has exited']);
+    expect(supervisor.agentReport('app-1').spawned).toEqual(['engine']);
+
+    // A second tick never dispatches again for the same incident.
+    await supervisor.tick();
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it('measures once, even when the model abstains on an unfamiliar failure', async () => {
+    let dispatches = 0;
+    const agents = {
+      catalogue: [],
+      dispatch: async () => {
+        dispatches += 1;
+        return { dispatchedAt: 'now', durationMs: 1, agents: [], report: { facts: [] }, facts: [], features: {}, signals: {}, observationPatch: {} };
+      },
+    };
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({
+        diagnosis: { id: 'unknown_failure', summary: 'Not recognised', confidence: 0.33, confidenceText: '33%' },
+        action: { id: 'observe', label: 'Gather more evidence', requiresApproval: false, autonomous: true, risk: 'none' },
+        decision: 'abstain',
+      })),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      agents,
+    });
+    await supervisor.tick();
+    await supervisor.tick();
+    await supervisor.tick();
+    expect(dispatches).toBe(1);
+  });
+
+  it('never dispatches agents for an app the model called normal', async () => {
+    let dispatches = 0;
+    const agents = { catalogue: [], dispatch: async () => { dispatches += 1; return null; } };
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({
+        diagnosis: { id: 'healthy', summary: 'Normal', confidence: 0.99, confidenceText: '99%' },
+        action: { id: 'none', label: 'No action', requiresApproval: false, autonomous: true },
+        decision: 'monitor',
+      })),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      agents,
+    });
+    await supervisor.tick();
+    await supervisor.tick();
+    expect(dispatches).toBe(0);
+  });
+
+  it('keeps the plain observation path when no agents are registered', async () => {
+    const decisions = [];
+    const supervisor = monitor.createBehavioralSupervisor({
+      brain: fakeBrain(() => decision({
+        diagnosis: { id: 'unknown_failure', summary: 'Not recognised', confidence: 0.4, confidenceText: '40%' },
+        action: { id: 'spawn_agents', label: 'Dispatch specialist agents', requiresApproval: false, autonomous: true },
+        decision: 'investigate',
+      })),
+      listApps: async () => [{ id: 'app-1', status: 'Running' }],
+      probe: async () => sample(),
+      onDecision: (notice) => decisions.push(notice),
+    });
+    await supervisor.tick();
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0].agents).toBeNull();
+  });
+
   it('stops tracking an app once it is no longer running', async () => {
     let running = true;
     const supervisor = monitor.createBehavioralSupervisor({

@@ -15,6 +15,12 @@
 const NON_FAILURE = new Set(['healthy', 'console_headless', 'exited_normally', 'starting_slow']);
 const DESTRUCTIVE = new Set(['restart_clean_profile', 'reset_requires_approval']);
 const REPAIR_ACTIONS = new Set(['restart_same_profile', 'restart_engine', 'repair_permissions', 'restart_clean_profile', 'reset_requires_approval']);
+// The model's two tools. Neither is a repair: dispatching agents measures and
+// reports, and consulting the Runbook looks a signature up in a fixed table, so
+// neither ever touches the app. They are still bounded, because an unbounded
+// investigation loop would be a failure mode of its own.
+const INVESTIGATE_ACTIONS = new Set(['spawn_agents', 'consult_runbook']);
+const TOOL_ACTIONS = INVESTIGATE_ACTIONS;
 const OBSERVE_ACTION = {
   id: 'observe',
   label: 'Gather more evidence',
@@ -43,6 +49,7 @@ function gateDecision({
 }) {
   const repairs = Number(history.repairs || 0);
   const actionable = action && REPAIR_ACTIONS.has(action.id);
+  const investigating = action && INVESTIGATE_ACTIONS.has(action.id);
 
   if (!action) {
     return { action: OBSERVE_ACTION, decision: 'abstain', reason: 'The model proposed no valid action, so it is gathering evidence.' };
@@ -58,13 +65,46 @@ function gateDecision({
     };
   }
 
-  // An unrecognised failure must never lead to a repair. Observing (or asking
-  // for help) is safe and keeps the evidence available for review.
-  if (diagnosisId === 'unknown_failure' && action.id !== 'observe' && action.id !== 'escalate') {
+  // An unrecognised failure must never lead to a repair. Dispatching agents (to
+  // complete the evidence) or observing (to keep it) is safe; a restorative
+  // action on a diagnosis the model cannot name is not.
+  if (diagnosisId === 'unknown_failure' && !investigating && action.id !== 'observe' && action.id !== 'escalate') {
     return {
       action: OBSERVE_ACTION,
       decision: 'abstain',
       reason: 'The diagnosis is unrecognised, so the model is gathering more evidence instead of acting on a guess.',
+    };
+  }
+
+  if (investigating) {
+    if (history.agentsAvailable === false) {
+      return {
+        action: OBSERVE_ACTION,
+        decision: 'abstain',
+        reason: 'No specialist agents are registered in this build, so the model observes instead of dispatching.',
+      };
+    }
+    if (history.agentsDispatched) {
+      return {
+        action: OBSERVE_ACTION,
+        decision: 'abstain',
+        reason: 'Specialist agents have already reported for this incident, so the model does not dispatch them again.',
+      };
+    }
+    // Never spend an investigation on an app the model itself called normal.
+    if (NON_FAILURE.has(diagnosisId)) {
+      return {
+        action: OBSERVE_ACTION,
+        decision: 'abstain',
+        reason: 'The diagnosis is normal behaviour, so no agents are dispatched; monitoring continues.',
+      };
+    }
+    return {
+      action,
+      decision: 'investigate',
+      reason: uncertain
+        ? 'The evidence is weak and incomplete, so the model dispatches specialist agents to measure it instead of guessing.'
+        : action.description,
     };
   }
 
@@ -141,6 +181,8 @@ module.exports = {
   NON_FAILURE,
   DESTRUCTIVE,
   REPAIR_ACTIONS,
+  INVESTIGATE_ACTIONS,
+  TOOL_ACTIONS,
   OBSERVE_ACTION,
   ESCALATE_ACTION,
   gateDecision,

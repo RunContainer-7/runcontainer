@@ -82,6 +82,20 @@ const FEATURE_NAMES = [
   'host_memory_low',
   'approval_denied',
   'multi_component',
+  // --- v3: specialist evidence agents ---------------------------------------
+  // What the dispatched agents measured, plus the two bookkeeping flags that
+  // keep dispatch bounded (available once, dispatched at most once per
+  // incident). These are measurements, not verdicts: agent_acl_denied means an
+  // agent observed a denied write, not that the model should repair anything.
+  'agents_available',
+  'agents_dispatched',
+  'agents_found_new',
+  'agent_engine_dead',
+  'agent_window_elsewhere',
+  'agent_acl_denied',
+  'agent_new_exe_present',
+  'agent_reparse_link',
+  'agent_installer_running',
 ];
 
 // Log patterns only classify what the text LOOKS like. They are observations,
@@ -177,6 +191,9 @@ function encodeObservation(observation = {}) {
   const launch = observation.launch || {};
   const environment = observation.environment || {};
   const history = observation.history || {};
+  // Specialist-agent state. Absent means this build/config dispatched no agents,
+  // which is itself evidence the model was trained to recognise.
+  const agents = observation.agents || {};
   const logs = Array.isArray(observation.logLines) ? observation.logLines : [];
   const signals = detectLogSignals(logs);
   const engine = String(app.engine || observation.engine || 'auto');
@@ -261,19 +278,28 @@ function encodeObservation(observation = {}) {
     host_memory_low: environment.memoryAvailableBytes !== undefined && Number(environment.memoryAvailableBytes) < 512 * 1024 ** 2 ? 1 : 0,
     approval_denied: history.approvalDenied ? 1 : 0,
     multi_component: multiComponent ? 1 : 0,
+    agents_available: agents.available ? 1 : 0,
+    agents_dispatched: agents.dispatched ? 1 : 0,
+    agents_found_new: agents.foundNew ? 1 : 0,
+    agent_engine_dead: agents.engineDead ? 1 : 0,
+    agent_window_elsewhere: agents.windowElsewhere ? 1 : 0,
+    agent_acl_denied: agents.aclDenied ? 1 : 0,
+    agent_new_exe_present: agents.newExePresent ? 1 : 0,
+    agent_reparse_link: agents.reparseLink ? 1 : 0,
+    agent_installer_running: agents.installerRunning ? 1 : 0,
   };
 
   return {
     names: FEATURE_NAMES,
     values: FEATURE_NAMES.map((name) => values[name] || 0),
     signals,
-    evidence: describeEvidence({ observation, processInfo, launch, environment, history, signals, logs, engine, status, errorLines }),
+    evidence: describeEvidence({ observation, processInfo, launch, environment, history, signals, logs, engine, status, errorLines, agents }),
   };
 }
 
 // Short, checkable statements. These are shown to the user next to the model's
 // diagnosis; they are not a second diagnosis engine.
-function describeEvidence({ processInfo, launch, environment, history, signals, logs, engine, status, errorLines }) {
+function describeEvidence({ processInfo, launch, environment, history, signals, logs, engine, status, errorLines, agents = {} }) {
   const facts = [];
   if (status) facts.push(`state: ${status}`);
   if (engine) facts.push(`engine: ${engine}`);
@@ -324,6 +350,21 @@ function describeEvidence({ processInfo, launch, environment, history, signals, 
   if (environment.hypervReady === false && engine === 'hyperv') facts.push('Hyper-V is not ready');
   if (environment.diskFreeBytes !== undefined && Number(environment.diskFreeBytes) < 2 * 1024 ** 3) {
     facts.push(`the drive holding app data has ${(Number(environment.diskFreeBytes) / 1024 ** 3).toFixed(1)} GB free`);
+  }
+  const agentLabels = {
+    engineDead: 'an agent found the containment engine no longer alive for this app',
+    windowElsewhere: 'an agent found the app has a visible window owned outside RunContainer',
+    aclDenied: 'an agent measured a denied write inside the app\u2019s own folder',
+    newExePresent: 'an agent found an executable that setup produced in the app folder',
+    reparseLink: 'an agent found a link (reparse point) inside the app folder',
+    installerRunning: 'an agent found the app\u2019s setup program still running',
+  };
+  for (const [key, label] of Object.entries(agentLabels)) {
+    if (agents[key]) facts.push(label);
+  }
+  if (agents.dispatched) facts.push('specialist agents have already reported for this incident');
+  if (Array.isArray(environment.agentFindings)) {
+    for (const finding of environment.agentFindings.slice(0, 6)) facts.push(`agent: ${finding}`);
   }
   if (logs.length > 0) facts.push(`last log line: ${String(logs[logs.length - 1]).slice(0, 160)}`);
   return facts;

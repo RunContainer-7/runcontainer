@@ -26,7 +26,10 @@ function main(argv) {
     process.exit(result.rolledBack ? 0 : 1);
   }
   const registry = readRegistry();
-  const current = inspect(registry.current);
+  // The shipped model must be trained on this build's whole feature schema; a
+  // rollback target is only required to be loadable, so an older artefact with a
+  // shorter schema passes here (and the engine feeds it its own feature prefix).
+  const current = inspect(registry.current, undefined, { requireFullSchema: true });
   const previous = registry.previous ? inspect(registry.previous) : null;
   console.log(JSON.stringify({ registry, current, previous }, null, 2));
   if (argv.includes('--verify') && !current.ok) process.exit(1);

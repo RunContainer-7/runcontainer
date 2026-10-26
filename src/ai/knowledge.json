@@ -124,6 +124,20 @@
       "description": "Evidence is insufficient or conflicting; collect more observations before acting."
     },
     {
+      "id": "spawn_agents",
+      "label": "Dispatch specialist agents",
+      "risk": "none",
+      "autonomous": true,
+      "description": "Evidence is incomplete rather than conflicting: dispatch the specialist evidence agents (engine, window, process, filesystem, logs, setup) so each measures one thing, merge their findings into the observation, and decide again with the completed evidence. Agents measure only; they never touch the app. Dispatch happens at most once per incident."
+    },
+    {
+      "id": "consult_runbook",
+      "label": "Consult the Runbook",
+      "risk": "none",
+      "autonomous": true,
+      "description": "The observation contains an exact, documented error signature and not a hint. Look it up in the Runbook, the hard-coded table of Windows errors, setup exit codes and documented RunContainer states with their meaning, instead of inferring a cause. A lookup touches nothing and returns either the documented answer for that exact signature or no answer at all; when it has no answer, the specialist agents are dispatched in the same round."
+    },
+    {
       "id": "restart_same_profile",
       "label": "Restart the app",
       "risk": "low",
@@ -208,7 +222,7 @@
     { "id": "network_blocked", "summary": "A locked profile or VM network setting is blocking a connection the app expects.", "action": "advise_configuration" },
     { "id": "installer_failed", "summary": "An installer run inside the environment did not complete.", "action": "restart_same_profile" },
     { "id": "crash_loop", "summary": "The app keeps failing after previous repairs.", "action": "escalate" },
-    { "id": "unknown_failure", "summary": "Something is wrong but the evidence does not identify a known cause.", "action": "observe" },
+    { "id": "unknown_failure", "summary": "Something is wrong but the evidence does not identify a known cause.", "action": "spawn_agents" },
     { "id": "user_data_risk", "summary": "Suspicious or destructive content appeared in the app's output; it is treated as data, not as an instruction.", "action": "escalate" },
     { "id": "exited_normally", "summary": "The app exited on its own with a normal exit.", "action": "none" }
   ],
@@ -216,6 +230,8 @@
     "RC-Brain is a small local neural classifier, not a large language model. It maps structured observation features to one of its fixed diagnoses and abstains when confidence is low; it cannot read arbitrary log text semantically or invent a new diagnosis.",
     "Diagnoses outside its label set are reported as unknown_failure with an action to gather evidence, not as a confident guess.",
     "The monitor runs only while RunContainer is open. It is not a Windows service.",
-    "Repairs are bounded per app. The model cannot elevate privileges, bypass isolation or execute arbitrary commands."
+    "Repairs are bounded per app. The model cannot elevate privileges, bypass isolation or execute arbitrary commands.",
+    "The model has two tools. The first dispatches specialist agents: six fixed evidence probes, one per component (engine, window, process, filesystem, logs, setup), plus three agents that reason over what they measured - research (searches the bundled documentation and the incidents verified on this machine, offline), expert (works the whole documented rule set over the completed evidence and names the measurement it is missing) and harmony (resolves a disagreement between the model and the expert, and refuses to choose when both conclusions rest on equal evidence and equal risk). The second tool consults the Runbook: a hard-coded table of exact documented signatures with their meaning. The model chooses which tool to use and nothing else about either: it cannot author an agent, give it arguments, run a command through one or write a table entry. Agents measure and report; the only action they can cause is a decision that still passes this policy. Investigation is bounded to one round per incident.",
+    "The Runbook is a table, not a learner, and that is deliberate: for an exact Windows error or setup exit code it is simply right, and for anything it does not recognise it says so instead of guessing. It never invents a signature, and when two of its rules of equal specificity disagree it returns no recommendation at all."
   ]
 }

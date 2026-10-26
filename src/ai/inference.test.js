@@ -2,10 +2,12 @@ const brain = require('brain.js');
 const { runNetwork, validateNetwork, outputLabels } = require('./inference');
 const { generateDataset } = require('./dataset');
 const { FEATURE_NAMES } = require('./features');
-const artifact = require('./model/rc-brain-2.json');
+// The test reads whichever artefact the registry makes active, so a retrain never
+// leaves it verifying a model the app no longer loads.
+const artifact = require(`./model/${require('./model/registry.json').current}`);
 
 describe('RC-Brain inference', () => {
-  it('reproduces brain.js outputs for the shipped v2 weights', () => {
+  it('reproduces brain.js outputs for the shipped weights', () => {
     const brainNet = new brain.NeuralNetwork({ hiddenLayers: artifact.hiddenLayers.diagnosis });
     brainNet.fromJSON(artifact.nets.diagnosis);
     const { familiar } = generateDataset();
@@ -45,6 +47,6 @@ describe('RC-Brain inference', () => {
       sizes: [2, 2],
       layers: [{}, { weights: [[1, 2]], biases: [0] }],
     })).toThrow(/wrong number of neurons/);
-    expect(() => runNetwork(artifact.nets.diagnosis, [0, 1], 'diagnosis')).toThrow(/expected 66 inputs/);
+    expect(() => runNetwork(artifact.nets.diagnosis, [0, 1], 'diagnosis')).toThrow(/expected 75 inputs/);
   });
 });

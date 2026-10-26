@@ -1,7 +1,7 @@
 {
   "schema": "runcontainer.brain.registry.v1",
-  "current": "rc-brain-2.json",
-  "previous": null,
+  "current": "rc-brain-4.json",
+  "previous": "rc-brain-3.json",
   "history": [
     {
       "file": "rc-brain-2.json",
@@ -9,9 +9,27 @@
       "version": "2.0.0",
       "createdAt": "2026-10-25T17:02:13.440Z",
       "parameters": 8334,
+      "status": "previous",
+      "source": "train-ai-brain"
+    },
+    {
+      "file": "rc-brain-3.json",
+      "id": "rc-brain-3",
+      "version": "3.0.0",
+      "createdAt": "2026-10-26T16:24:07.365Z",
+      "parameters": 9071,
+      "status": "replaced",
+      "source": "train-ai-brain"
+    },
+    {
+      "file": "rc-brain-4.json",
+      "id": "rc-brain-4",
+      "version": "4.0.0",
+      "createdAt": "2026-10-26T18:10:55.272Z",
+      "parameters": 9088,
       "status": "active",
       "source": "train-ai-brain"
     }
   ],
-  "updatedAt": "2026-10-25T17:02:13.448Z"
+  "updatedAt": "2026-10-26T18:28:35.311Z"
 }

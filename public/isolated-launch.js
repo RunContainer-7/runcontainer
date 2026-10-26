@@ -101,6 +101,15 @@ function removeReparsePoint(linkPath, { rmdirSync = fs.rmdirSync, unlinkSync = f
   }
 }
 
+// Read-only companion to clearReparsePoints: reports the links inside a folder
+// without removing anything. Used by the filesystem agent, which must never change
+// the folder it measures.
+function listReparsePoints(directory, options = {}) {
+  if (!directory) return [];
+  return collectReparsePoints(toExtendedLengthPath(directory), options)
+    .map((entryPath) => (entryPath.startsWith('\\\\?\\') ? entryPath.slice(4) : entryPath));
+}
+
 function clearReparsePoints(directory, options = {}) {
   // Walking starts from the extended-length form so a deep sandbox is still enumerable.
   const links = collectReparsePoints(toExtendedLengthPath(directory), options);
@@ -489,6 +498,7 @@ module.exports = {
   collectReparsePoints,
   removeReparsePoint,
   clearReparsePoints,
+  listReparsePoints,
   detectStoreHandoff,
   describeStoreHandoff,
   isUntrustedMountPointError,

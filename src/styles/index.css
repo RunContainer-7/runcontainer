@@ -459,6 +459,15 @@ body {
     margin: 1px 0;
 }
 
+/* What the specialist agents measured, shown above the model's own evidence list. */
+.ai-evidence.ai-agent-facts li {
+    color: #a7f3d0;
+}
+
+.ai-agent-row {
+    font-size: 12px;
+}
+
 .ai-panel .profile-card span + span {
     margin-top: 4px;
 }

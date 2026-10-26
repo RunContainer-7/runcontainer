@@ -42,6 +42,7 @@ const {
   buildAclRepairPlan,
   CleanupCancelledError,
   clearReparsePoints,
+  listReparsePoints,
   detectStoreHandoff,
   describeStoreHandoff,
   isUntrustedMountPointError,
@@ -62,8 +63,11 @@ const {
   summarizeProbe,
 } = require('./behavioral-probe');
 const behavioralMonitor = require('../src/utils/behavioralMonitor');
-const { createBrain, REGISTRY_PATH: AI_REGISTRY_PATH } = require('../src/ai/engine');
+const { createBrain, REGISTRY_PATH: AI_REGISTRY_PATH, createAgentCoordinator } = require('../src/ai/engine');
+const { detectLogSignals } = require('../src/ai/features');
 const { createExperienceStore } = require('../src/ai/experiences');
+const { extractIconToFile } = require('../src/services/exeIcon');
+const { planSetupRun, findInstalledCandidates } = require('../src/services/setupInstall');
 const repairVerification = require('../src/utils/repairVerifier');
 const runtimeProfile = require('../src/services/runtimeProfile');
 const aiKnowledge = require('../src/ai/knowledge.json');
@@ -359,7 +363,35 @@ function getExeMetadata(exePath) {
 // all, and the extraction runs a helper process.
 const ICON_RETRY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-function extractExeIcon(exePath, outputPath) {
+// Which icon extractor wrote a record's icon. Bumping this is how a record from
+// an older build is upgraded: deciding by file extension was wrong, because the
+// old extractor also wrote .ico files, so those records kept a single stale image
+// forever and the list kept showing letters for apps whose executable carries six
+// frames. 2 = the executable's own resources, with the shell as a fallback.
+const ICON_EXTRACTOR_VERSION = 2;
+
+// The executable's own icon resources, read from the file. This is what Windows
+// Explorer shows, and it is the only source that carries every size the app
+// declares (including a 256x256 frame). It needs no helper process.
+function extractResourceIcon(exePath, sandboxRoot) {
+  const extracted = extractIconToFile(exePath, path.join(sandboxRoot, 'icon.ico'));
+  if (!extracted) return null;
+  return { path: extracted.path, sizes: extracted.sizes, source: 'resources', version: ICON_EXTRACTOR_VERSION };
+}
+
+// Fallback for an executable whose image carries no icon resources at all: ask the
+// shell for the associated icon. It only ever returns one 32x32 image, which is why
+// it is the second choice rather than the first.
+async function extractExeIcon(exePath, sandboxRoot) {
+  ensureDirectory(sandboxRoot);
+  const fromResources = extractResourceIcon(exePath, sandboxRoot);
+  if (fromResources) return { ...fromResources, from: exePath };
+  const fromShell = await extractShellIcon(exePath, path.join(sandboxRoot, 'icon.png'));
+  if (fromShell) return { path: fromShell, sizes: ['32x32'], source: 'shell', version: ICON_EXTRACTOR_VERSION, from: exePath };
+  return null;
+}
+
+function extractShellIcon(exePath, outputPath) {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') {
       resolve(null);
@@ -419,13 +451,18 @@ async function backfillAppIcons() {
   let changed = false;
   for (const entry of apps) {
     if (!entry?.sandboxRoot || !entry?.source || !fs.existsSync(entry.source)) continue;
-    const iconPath = path.join(entry.sandboxRoot, 'icon.png');
-    // Older builds saved a raw .ico next to the app; re-extract it as PNG so every
-    // record uses the same format the list renders.
-    if (entry.iconPath && entry.iconPath.toLowerCase().endsWith('.png') && fs.existsSync(entry.iconPath)) continue;
-    const extracted = await extractExeIcon(entry.source, iconPath);
+    // An icon from an older extractor is upgraded once, whatever it is called: the
+    // executable's own resources are what Explorer shows, and they carry every size.
+    if (Number(entry.iconVersion) === ICON_EXTRACTOR_VERSION && entry.iconFrom === entry.source
+      && entry.iconPath && fs.existsSync(entry.iconPath)) continue;
+    if (entry.iconPath && fs.existsSync(entry.iconPath) && Number.isFinite(Date.parse(entry.iconAttemptedAt || ''))
+      && Date.now() - Date.parse(entry.iconAttemptedAt) < ICON_RETRY_INTERVAL_MS) continue;
+    const extracted = await extractExeIcon(entry.source, entry.sandboxRoot);
     if (extracted) {
-      entry.iconPath = extracted;
+      entry.iconPath = extracted.path;
+      entry.iconSource = extracted.source;
+      entry.iconVersion = extracted.version;
+      entry.iconFrom = extracted.from || entry.source;
       changed = true;
     }
   }
@@ -1163,6 +1200,228 @@ async function probeAppBehavior(appRecord, state) {
   };
 }
 
+// Bounded, read-only scan for executables that appeared in a folder after a given
+// time. Used by the setup agent to answer "has setup produced a real app yet?"
+// without assuming where an installer decided to put it.
+function findExecutablesIn(root, { since = 0, exclude = [], maxDepth = 6, maxEntries = 4000 } = {}) {
+  const found = [];
+  const skip = new Set(exclude.filter(Boolean).map((entry) => String(entry).toLowerCase()));
+  let visited = 0;
+  const walk = (directory, depth) => {
+    if (depth > maxDepth || visited >= maxEntries) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    for (const entry of entries) {
+      if (visited >= maxEntries) return;
+      visited += 1;
+      const child = path.join(directory, entry.name);
+      if (skip.has(child.toLowerCase())) continue;
+      if (entry.isDirectory()) {
+        walk(child, depth + 1);
+        continue;
+      }
+      if (!entry.name.toLowerCase().endsWith('.exe')) continue;
+      try {
+        const stats = fs.statSync(child);
+        if (!since || stats.mtimeMs >= since) found.push(child);
+      } catch (error) {
+        // A file that vanished mid-scan is simply not evidence.
+      }
+    }
+  };
+  walk(root, 0);
+  return found.sort((a, b) => a.length - b.length);
+}
+
+// --- Specialist evidence agents -------------------------------------------
+// RC-Brain's `spawn_agents` action runs these. Every probe below is READ-ONLY: it
+// measures and reports. None of them starts, stops, restarts, repairs, deletes or
+// writes inside the app's folder, and none of them can be given an argument by the
+// model — the model only chooses which of the fixed agents to dispatch.
+
+function agentApp(observation) {
+  const id = observation?.app?.id;
+  return (id && getStoredApp(id)) || null;
+}
+
+function appAgentPids(appRecord) {
+  return [...new Set([...(appRecord?.sandboxPids || []), appRecord?.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
+}
+
+// Engine agent: is the containment engine still alive for this app?
+async function agentProbeEngine({ observation }) {
+  const appRecord = agentApp(observation);
+  if (!appRecord?.id) return { signals: {}, facts: ['no stored record for this app, so the engine could not be identified'] };
+  const engine = appRecord.activeEngine || appRecord.launchMode || 'rcvm';
+  const facts = [`the app runs on the ${engine} engine`];
+  let dead = false;
+  if (engine === 'rcvm') {
+    const launcher = rcvmLaunchers.get(appRecord.id);
+    if (launcher && launcher.exitCode !== null) {
+      dead = true;
+      facts.push(`the contained launcher has exited (code ${launcher.exitCode})`);
+    } else if (launcher) {
+      facts.push('the contained launcher process is still running');
+    } else {
+      facts.push('no launcher process is tracked for this app in this session');
+    }
+  } else if (engine === 'qemu') {
+    const child = qemuProcs.get(appRecord.id);
+    if (child && child.exitCode !== null) {
+      dead = true;
+      facts.push(`the QEMU process has exited (code ${child.exitCode})`);
+    } else {
+      facts.push('the QEMU process is present');
+    }
+  } else if (engine === 'hyperv') {
+    const ready = await checkHyperVReady().catch(() => ({ ready: false }));
+    dead = !ready.ready;
+    facts.push(ready.ready ? 'Hyper-V is ready' : `Hyper-V is not ready: ${ready.detail || 'no detail'}`);
+  } else {
+    facts.push('the AppContainer engine has no separate process to check; containment is a token on the app itself');
+  }
+  if (dead) facts.push('the engine that owns this app is no longer alive, so it cannot be answering for it');
+  return { signals: { engine_dead: dead }, facts };
+}
+
+// Window agent: does the app actually have a visible window, and is one of them
+// owned through a host we cannot see?
+async function agentProbeWindow({ observation }) {
+  const appRecord = agentApp(observation);
+  if (process.platform !== 'win32') return { signals: {}, facts: ['window measurement requires Windows'] };
+  const pids = appAgentPids(appRecord);
+  if (pids.length === 0) return { signals: {}, facts: ['no process ids are recorded for this app, so there is nothing to enumerate windows for'] };
+  const hostPid = appRecord?.elevated && Number.isSafeInteger(appRecord.rcvmLauncherPid) ? appRecord.rcvmLauncherPid : process.pid;
+  try {
+    const { stdout } = await executeFile('powershell.exe', buildBehaviorProbeArgs(ensureBehaviorProbeScript(), pids, hostPid), { timeout: 15000, maxBuffer: 1024 * 1024 });
+    const probe = summarizeProbe(parseBehaviorProbeOutput(stdout));
+    const facts = [
+      `${pids.length} process(es) were enumerated`,
+      probe.windowVisible ? `${probe.windowCount} visible window(s) are attributable to the app or its host` : 'no visible window is attributable to the app or its host',
+    ];
+    if (probe.windowForeign > 0) {
+      facts.push(`${probe.windowForeign} visible window(s) belong to neither the app nor the expected host, which is what an app hosted by another RunContainer window looks like`);
+    }
+    if (probe.windowHung) facts.push('Windows reports one of those windows as not responding');
+    return { signals: { window_elsewhere: probe.windowForeign > 0 }, facts };
+  } catch (error) {
+    throw new Error(`the window enumeration did not answer: ${error.message}`);
+  }
+}
+
+// Process agent: what is actually running out of the app's folder?
+async function agentProbeProcess({ observation }) {
+  const appRecord = agentApp(observation);
+  if (!appRecord?.sandboxRoot) return { signals: {}, facts: ['no managed folder is recorded for this app'] };
+  const table = await listProcessTable();
+  const pids = findAppProcessIds(table, appRecord.sandboxRoot, appAgentPids(appRecord));
+  const facts = pids.length > 0
+    ? [`${pids.length} process(es) are running from the app's own folder: ${pids.slice(0, 6).join(', ')}`]
+    : ['no running process executes from the app\u2019s folder'];
+  if (pids.length === 0 && appRecord.status === 'Running') {
+    facts.push('the app is still recorded as running while nothing of it is executing, so the record is stale');
+  }
+  return { signals: {}, facts };
+}
+
+// Filesystem agent: the app's own folder, measured. Read-only: the write test
+// creates and removes one file inside the folder, which is the only way to learn
+// whether writes are actually denied.
+async function agentProbeFilesystem({ observation }) {
+  const appRecord = agentApp(observation);
+  const root = appRecord?.sandboxRoot;
+  if (!root) return { signals: {}, facts: ['no managed folder is recorded for this app'] };
+  const facts = [];
+  if (!fs.existsSync(root)) {
+    return { signals: {}, facts: [`the app's folder does not exist any more (${root})`], detail: 'folder-missing' };
+  }
+  let aclDenied = false;
+  const probeFile = path.join(root, `.rc-write-test-${process.pid}`);
+  try {
+    fs.writeFileSync(probeFile, 'probe', 'utf8');
+    fs.unlinkSync(probeFile);
+    facts.push('the app\u2019s own folder accepted a write');
+  } catch (error) {
+    aclDenied = true;
+    facts.push(`writing inside the app\u2019s own folder was denied: ${error.code || error.message}`);
+  }
+  const links = listReparsePoints(root);
+  if (links.length > 0) facts.push(`${links.length} reparse point(s) (junctions or links) are inside the folder, for example ${path.basename(links[0])}`);
+  try {
+    const stats = fs.statfsSync(root);
+    const freeGb = (Number(stats.bavail) * Number(stats.bsize)) / 1024 ** 3;
+    facts.push(`${freeGb.toFixed(1)} GB free on the drive holding the app`);
+    if (freeGb < 2) facts.push('that is below the 2 GB the installer and VM paths need');
+  } catch (error) {
+    // Older runtimes may not report filesystem statistics; that is not a failure.
+  }
+  return { signals: { acl_denied: aclDenied, reparse_link: links.length > 0 }, facts };
+}
+
+// Log agent: the signal classes in the live log tail, including log text that
+// tries to give the monitor orders (reported as evidence, never followed).
+async function agentProbeLogs({ observation }) {
+  const appRecord = agentApp(observation);
+  const lines = Array.isArray(observation?.logLines) ? observation.logLines : [];
+  const signals = detectLogSignals(lines);
+  const matched = Object.entries(signals)
+    .filter(([key, value]) => value === true && !['present'].includes(key))
+    .map(([key]) => key);
+  const facts = [];
+  if (!appRecord?.id) facts.push('no stored record for this app, so only the observation log tail could be read');
+  if (lines.length === 0) facts.push('the log is empty: the app has produced no output at all');
+  else facts.push(`${lines.length} log line(s), matching signal classes: ${matched.join(', ') || 'none of the known classes'}`);
+  if (signals.injection) facts.push('the log contains instructions aimed at the monitor; they were treated as data and never followed');
+  return { signals: {}, facts, detail: matched.join(',') || 'none' };
+}
+
+// Setup agent: is an installer staged or running for this app, and has setup
+// produced a real executable yet?
+async function agentProbeSetup({ observation }) {
+  const appRecord = agentApp(observation);
+  const root = appRecord?.sandboxRoot;
+  if (!root) return { signals: {}, facts: ['no managed folder is recorded for this app'] };
+  const facts = [];
+  const installerDir = path.join(root, 'installers');
+  const staged = fs.existsSync(installerDir) ? fs.readdirSync(installerDir).filter((name) => name.toLowerCase().endsWith('.exe')) : [];
+  if (staged.length > 0) facts.push(`${staged.length} setup program(s) are staged in the app's folder: ${staged.slice(0, 3).join(', ')}`);
+  const pids = appAgentPids(appRecord);
+  const installerRunning = Boolean(appRecord?.lastInstallerPid) && pids.includes(appRecord.lastInstallerPid);
+  if (installerRunning) facts.push(`the setup program (PID ${appRecord.lastInstallerPid}) is still running`);
+  const since = Date.parse(appRecord?.lastInstallerAt || '') || 0;
+  const produced = findExecutablesIn(root, { since, exclude: [appRecord?.source, ...staged.map((name) => path.join(installerDir, name))] });
+  if (produced.length > 0) facts.push(`setup produced ${produced.length} executable(s) in the app's folder, for example ${path.basename(produced[0])}`);
+  if (staged.length > 0 && produced.length === 0 && !installerRunning) facts.push('the staged setup program is neither running nor finished');
+  return { signals: { new_exe_present: produced.length > 0, installer_running: installerRunning }, facts };
+}
+
+let agentCoordinator = null;
+function ensureAgentCoordinator() {
+  if (agentCoordinator) return agentCoordinator;
+  agentCoordinator = createAgentCoordinator({
+    probes: {
+      engine: agentProbeEngine,
+      window: agentProbeWindow,
+      process: agentProbeProcess,
+      filesystem: agentProbeFilesystem,
+      logs: agentProbeLogs,
+      setup: agentProbeSetup,
+    },
+    logger: (message) => {
+      try {
+        appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `RC-Brain agent: ${message}`);
+      } catch (error) {
+        // The error log is best-effort.
+      }
+    },
+  });
+  return agentCoordinator;
+}
+
 function emitToRenderer(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
@@ -1218,6 +1477,16 @@ function startBehavioralSupervisor() {
     onRecovered: ({ id }) => emitToRenderer('ai:recovered', { id }),
     onUnavailable: ({ error }) => emitToRenderer('ai:unavailable', { error }),
     onSample: handleRepairSample,
+    agents: ensureAgentCoordinator(),
+    // The research agent's second source. These are incidents verified on this
+    // machine, already scrubbed when they were stored, and they never leave it.
+    experiencesFor: () => {
+      try {
+        return experienceStore.list({ limit: 6, verifiedOnly: true });
+      } catch (error) {
+        return [];
+      }
+    },
     logger: (message) => {
       try {
         appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), message);
@@ -1249,7 +1518,11 @@ function aiCandidateInfo() {
   const examples = Array.isArray(curated.examples) ? curated.examples.length : 0;
   let candidateModel = null;
   try {
-    const file = path.join(__dirname, '..', 'src', 'ai', 'model', 'rc-brain-2-candidate.json');
+    // The candidate belongs to whichever model is active, so its name is derived
+    // from the registry rather than hard-coded: after a retrain a fixed name would
+    // silently stop finding candidates at all.
+    const current = aiRegistry().current || 'rc-brain-4.json';
+    const file = path.join(__dirname, '..', 'src', 'ai', 'model', current.replace(/\.json$/, '-candidate.json'));
     if (fs.existsSync(file)) {
       const artefact = JSON.parse(fs.readFileSync(file, 'utf8'));
       candidateModel = { id: artefact.id, version: artefact.version, createdAt: artefact.createdAt, parameters: artefact.parameterCount };
@@ -1283,6 +1556,30 @@ function aiStatus() {
     limits: aiKnowledge.limits,
     permissions: aiKnowledge.actions.map(({ id, label, risk, autonomous, requiresApproval }) => ({ id, label, risk, autonomous, requiresApproval: Boolean(requiresApproval) })),
     capabilities: aiBrain.model?.capabilities || null,
+    // The fixed agents the model may dispatch, and which of them this build can
+    // actually run. Listed for the interface; no agent can be added at runtime.
+    agents: {
+      catalogue: ensureAgentCoordinator().catalogue.map(({ id, label, purpose, available, basis }) => ({ id, label, purpose, available, basis })),
+      // The second tier: the agents that reason over the completed evidence (no
+      // probe to run, so no availability flag), and the two tools themselves.
+      specialists: ensureAgentCoordinator().specialistCatalogue.map(({ id, label, purpose, basis }) => ({ id, label, purpose, basis })),
+      tools: [
+        {
+          id: 'spawn_agents',
+          label: 'Dispatch specialist agents',
+          description: 'Measure the components that were not measured, then ask the research, expert and harmony agents what the completed evidence means.',
+        },
+        {
+          id: 'consult_runbook',
+          label: 'Consult the Runbook',
+          description: 'Look an exact documented signature up in a fixed table (Windows errors, setup exit codes, documented RunContainer states). A table is either right or silent, never a guess.',
+        },
+      ],
+      dispatched: (() => {
+        const recent = aiHistory.find((entry) => entry.agents);
+        return recent ? { name: recent.name, spawned: recent.agents.spawned || [], facts: recent.agents.facts || [] } : null;
+      })(),
+    },
     experiences: stats,
     recentExperiences: experienceStore.list({ limit: 5 }),
     candidate: aiCandidateInfo(),
@@ -3329,16 +3626,32 @@ ipcMain.handle('list-apps', async () => {
   // of a bare initial for the rest of the record's life.
   let iconRepaired = false;
   const withIcons = await Promise.all(reconciled.map(async (entry) => {
-    if (entry.iconUrl || !entry.source || !entry.sandboxRoot || !fs.existsSync(entry.source)) return entry;
+    // A record keeps its icon only when the current extractor wrote it. Anything
+    // older - a shell PNG, or an .ico from an earlier version of the resource
+    // reader - is replaced by the executable's own multi-size icon the next time
+    // the list is read, which is what makes the icon actually appear.
+    const iconIsCurrent = Number(entry.iconVersion) === ICON_EXTRACTOR_VERSION
+      && entry.iconFrom === entry.source
+      && Boolean(entry.iconPath)
+      && fs.existsSync(entry.iconPath);
+    if (iconIsCurrent || !entry.source || !entry.sandboxRoot || !fs.existsSync(entry.source)) return entry;
     // An executable can genuinely carry no icon. Extracting it again on every list read would
     // spawn a helper process each time, so a failed attempt is remembered and retried rarely.
     const lastAttempt = Date.parse(entry.iconAttemptedAt || '');
     if (Number.isFinite(lastAttempt) && Date.now() - lastAttempt < ICON_RETRY_INTERVAL_MS) return entry;
     iconRepaired = true;
     const attemptedAt = new Date().toISOString();
-    const extracted = await extractExeIcon(entry.source, path.join(entry.sandboxRoot, 'icon.png'));
+    const extracted = await extractExeIcon(entry.source, entry.sandboxRoot);
     if (!extracted) return { ...entry, iconAttemptedAt: attemptedAt };
-    return { ...entry, iconPath: extracted, iconUrl: iconDataUrl(extracted), iconAttemptedAt: attemptedAt };
+    return {
+      ...entry,
+      iconPath: extracted.path,
+      iconUrl: iconDataUrl(extracted.path),
+      iconSource: extracted.source,
+      iconVersion: extracted.version,
+      iconFrom: extracted.from || entry.source,
+      iconAttemptedAt: attemptedAt,
+    };
   }));
   if (updatesById.size === 0 && !runtimeFilled && !iconRepaired) return withIcons;
   // Re-read the store after the async checks so apps deleted or added in the meantime are not resurrected.
@@ -3359,8 +3672,7 @@ async function installExe(exePath) {
   fs.copyFileSync(exePath, destination);
 
   const metadata = await getExeMetadata(exePath);
-  const iconPath = path.join(sandboxRoot, 'icon.png');
-  const extractedIcon = await extractExeIcon(exePath, iconPath);
+  const extractedIcon = await extractExeIcon(exePath, sandboxRoot);
   const profile = getSandboxProfile('default');
   const record = {
     id: appId,
@@ -3379,7 +3691,12 @@ async function installExe(exePath) {
     programDataRoot: sandboxLayout.programData,
     metadata,
     runtime: detectAppRuntime(destination),
-    iconPath: extractedIcon || null,
+    iconPath: extractedIcon?.path || null,
+    iconSource: extractedIcon?.source || null,
+    iconVersion: extractedIcon?.version || null,
+    iconFrom: extractedIcon?.from || null,
+    iconSource: extractedIcon?.source || null,
+    iconSizes: extractedIcon?.sizes || null,
     permissions: { network: profile.network, filesystem: profile.filesystem, registry: profile.registry },
     profile: 'default',
     sandboxConfig: profile,
@@ -3482,7 +3799,7 @@ ipcMain.handle('get-app-logs', async (_event, appRecord) => {
 // lockHeld is used by the repair path, which already holds the app's operation
 // lock while it stops the app and clears its profile.
 async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
-  const appRecord = getStoredApp(requestedAppRecord?.id);
+  let appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id || !appRecord?.source) {
     return { id: requestedAppRecord?.id, status: 'Failed', embedded: false, error: 'Installed app record is missing its id or executable path.' };
   }
@@ -3536,6 +3853,41 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
       appendLog(logPath, `Refusing to launch ${appRecord.source}: it is a ${storeHandoff.marker} Microsoft Store bridge (${storeHandoff.sizeBytes} bytes).`);
       return failedLaunch(appRecord, describeStoreHandoff(storeHandoff.marker));
     }
+  }
+
+  // An app that is really its own setup program must not look like a frozen app.
+  // The plan says which of the two honest answers applies: set up unattended in
+  // the background, or show the wizard in a RunContainer window and say so.
+  const setupPlan = planSetupRun({
+    source: appRecord.source,
+    name: appRecord.name,
+    metadata: appRecord.metadata,
+    installedExePath: appRecord.installedExePath,
+    setupMode: appRecord.setupMode,
+  });
+  if (setupPlan.isSetup) {
+    appendLog(logPath, `Setup program: ${setupPlan.summary}`);
+    emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'planned', ...setupPlan });
+    const stored = getStoredApp(appRecord.id) || appRecord;
+    const withSetup = {
+      ...stored,
+      setupProgram: setupPlan.mode !== 'installed',
+      setupFamily: setupPlan.family?.id || null,
+      setupFamilyName: setupPlan.family?.name || null,
+      setupPlanMode: setupPlan.mode,
+      // When this setup started, so a long one can be reported as still working
+      // rather than as an app that is stuck. It is a timestamp, not a promise:
+      // RunContainer never claims progress it has not observed.
+      setupStartedAt: stored.setupStartedAt || new Date().toISOString(),
+      setupSummary: setupPlan.summary,
+      setupSilentArgs: setupPlan.mode === 'silent' ? setupPlan.args.join(' ') : null,
+      installedExePath: setupPlan.installedExePath || stored.installedExePath || null,
+      // Setup already produced the app: from now on Run starts that executable, and
+      // the setup program stays in the environment for repair or reinstall.
+      ...(setupPlan.mode === 'installed' ? { source: setupPlan.installedExePath, setupState: 'complete' } : {}),
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? withSetup : entry)));
+    appRecord = withSetup;
   }
 
   const existingPids = appRecord.status === 'Running'
@@ -3616,10 +3968,153 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     await stopAppWindowWatcher(appRecord.id);
     closeGuestWindow(appRecord.id);
   }
+  // Setup is not finished when its process has started: follow it to the end, then
+  // look for the app it produced. This is what turns "Run did nothing for ages"
+  // into a named result.
+  if (result?.status === 'Running' && appRecord.setupProgram) {
+    watchSetupCompletion(appRecord.id, logPath).catch(() => {});
+  }
   return result;
 }
 
+// Waits (bounded) for a setup program to exit, then records whatever executable it
+// produced inside the environment. It never guesses: an empty result is reported as
+// an empty result.
+async function waitForSetupExit(appId, { timeoutMs = 20 * 60 * 1000, pollMs = 3000, logPath = null } = {}) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const record = getStoredApp(appId);
+    if (!record) return { exited: true, reason: 'the app was removed while setup was running', waitedMs: Date.now() - startedAt };
+    const pids = record.status === 'Running' ? await listRunningPids(record).catch(() => []) : [];
+    if (pids.length === 0) {
+      if (logPath) appendLog(logPath, `Setup finished after ${Math.round((Date.now() - startedAt) / 1000)}s (its process tree has exited).`);
+      return { exited: true, waitedMs: Date.now() - startedAt };
+    }
+    if (record.status !== 'Running') {
+      return { exited: true, reason: `setup ended with status ${record.status}`, waitedMs: Date.now() - startedAt };
+    }
+  }
+  if (logPath) appendLog(logPath, `Setup is still running after ${Math.round(timeoutMs / 60000)} minutes; RunContainer stopped waiting for it but keeps the environment as it is.`);
+  return { exited: false, timedOut: true, waitedMs: Date.now() - startedAt };
+}
+
+async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
+  const record = getStoredApp(appId);
+  if (!record?.sandboxRoot) return null;
+  const installerDir = path.join(record.sandboxRoot, 'installers');
+  const staged = fs.existsSync(installerDir)
+    ? fs.readdirSync(installerDir).map((name) => path.join(installerDir, name))
+    : [];
+  const candidates = findInstalledCandidates(record.sandboxRoot, {
+    since,
+    exclude: [record.source, ...staged],
+  });
+  if (candidates.length === 0) {
+    if (logPath) appendLog(logPath, 'Setup finished but no executable was produced inside this environment, so there is nothing new to run.');
+    emitToRenderer('app:setup-complete', { id: appId, name: record.name, installed: false, detail: 'Setup finished, but no executable was found in this environment.' });
+    return null;
+  }
+  const chosen = candidates[0];
+  saveApps(loadApps().map((entry) => (entry.id === appId ? {
+    ...entry,
+    installedExePath: chosen.path,
+    installedAppName: path.basename(chosen.path, path.extname(chosen.path)),
+    installedAt: new Date().toISOString(),
+    setupState: 'complete',
+    // Run now starts a different executable, so the tile must show THAT file's
+    // icon rather than the setup program's. Clearing the marker makes the next
+    // list read extract it; nothing else has to know.
+    iconVersion: null,
+    iconFrom: null,
+  } : entry)));
+  if (logPath) appendLog(logPath, `Setup produced ${chosen.path} (${Math.round(chosen.sizeBytes / 1024)} KB); Run starts that executable now.`);
+  emitToRenderer('app:setup-complete', {
+    id: appId,
+    name: record.name,
+    installed: true,
+    installedExePath: chosen.path,
+    installedAppName: path.basename(chosen.path, path.extname(chosen.path)),
+    detail: `Setup finished. ${path.basename(chosen.path)} was installed inside this environment and is now the app Run starts.`,
+  });
+  return chosen.path;
+}
+
+async function watchSetupCompletion(appId, logPath) {
+  const outcome = await waitForSetupExit(appId, { logPath });
+  if (!outcome.exited) return null;
+  const record = getStoredApp(appId);
+  if (!record?.setupProgram || record.installedExePath) return null;
+  return recordInstalledExecutable(appId, {
+    logPath,
+    since: Date.parse(record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
+  });
+}
+
 ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requestedAppRecord));
+
+// Complete an app's setup in the background, inside the same environment the app
+// would run in, and then point Run at whatever it installed. Only offered for
+// installer families whose unattended switches are documented (see
+// src/services/setupInstall.js); anything else keeps its wizard in a RunContainer
+// window, and this handler refuses rather than guessing at switches.
+ipcMain.handle('setup-in-background', async (_event, requestedAppRecord) => {
+  const appRecord = getStoredApp(requestedAppRecord?.id);
+  if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
+  const plan = planSetupRun({
+    source: appRecord.source,
+    name: appRecord.name,
+    metadata: appRecord.metadata,
+    installedExePath: appRecord.installedExePath,
+  });
+  if (!plan.isSetup) {
+    return { id: appRecord.id, status: 'Failed', error: `${plan.summary} Nothing was run.` };
+  }
+  if (plan.mode === 'installed') {
+    return { id: appRecord.id, status: 'Installed', installedExePath: plan.installedExePath, detail: plan.summary };
+  }
+  if (plan.mode !== 'silent') {
+    return { id: appRecord.id, status: 'Failed', error: `${plan.summary} This installer has to be completed by hand.` };
+  }
+  const logsRoot = appRecord.logsRoot || path.join(appRecord.sandboxRoot, 'logs');
+  const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
+  appendLog(logPath, plan.summary);
+  emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'starting', ...plan });
+  // The unattended switches are passed the same way saved launch arguments are, so
+  // the ordinary contained launch path is reused rather than duplicated: same
+  // engine, same Job Object, same per-app profile.
+  const previousArgs = appRecord.launchArgs || '';
+  const silentRecord = { ...appRecord, launchArgs: plan.args.join(' '), setupProgram: true, setupStartedAt: new Date().toISOString() };
+  saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? silentRecord : entry)));
+  const launched = await runApp(silentRecord, {}).catch((error) => ({ status: 'Failed', error: error.message }));
+  if (launched?.status !== 'Running') {
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchArgs: previousArgs } : entry)));
+    const error = launched?.error || 'The unattended setup did not start inside its environment.';
+    emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'failed', detail: error });
+    return { id: appRecord.id, status: 'Failed', error: `${error} Use the wizard instead: press Run and complete setup in the RunContainer window.` };
+  }
+  emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'running', detail: 'Setup is running inside this environment; this window stays empty until it finishes.' });
+  const outcome = await waitForSetupExit(appRecord.id, { logPath });
+  const installedExePath = await recordInstalledExecutable(appRecord.id, {
+    logPath,
+    since: Date.parse(appRecord.lastLaunchedAt || '') || 0,
+  });
+  if (!installedExePath) {
+    return {
+      id: appRecord.id,
+      status: outcome.timedOut ? 'SettingUp' : 'Installed',
+      detail: outcome.timedOut
+        ? `${plan.family.name} setup is still running after 20 minutes; RunContainer stopped waiting. Its log is in ${logPath}.`
+        : 'Setup finished, but no installed executable was found in this environment.',
+    };
+  }
+  return {
+    id: appRecord.id,
+    status: 'Installed',
+    installedExePath,
+    detail: `Setup completed in the background. Run now starts ${path.basename(installedExePath)}.`,
+  };
+});
 
 // RC-Brain runs continuously in the main process while monitoring is enabled;
 // these are the only renderer-facing entry points it has.

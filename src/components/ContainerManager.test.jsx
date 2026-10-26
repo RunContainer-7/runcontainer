@@ -70,6 +70,9 @@ jest.mock("../services/containerService", () => ({
   onAiStatus: jest.fn(() => () => {}),
   onAiHistory: jest.fn(() => () => {}),
   onAiVerified: jest.fn(() => () => {}),
+  onSetupProgress: jest.fn(() => () => {}),
+  onSetupComplete: jest.fn(() => () => {}),
+  setUpInBackground: jest.fn(),
 }));
 
 describe("ContainerManager", () => {
@@ -510,9 +513,9 @@ describe("ContainerManager", () => {
           unseen: { diagnosisAccuracy: 0.78, actionAccuracy: 0.75 },
           final: { diagnosisAccuracy: 0.91, actionAccuracy: 0.9, unsafeActions: 0 },
         },
-        capabilities: { diagnosisLabels: 19, actionLabels: 11 },
+        capabilities: { diagnosisLabels: 19, actionLabels: 12 },
       },
-      registry: { current: "rc-brain-2.json", previous: null },
+      registry: { current: "rc-brain-4.json", previous: "rc-brain-3.json" },
       experiences: { verified: 0, failed: 0, inconclusive: 0, promoted: 0, pendingPromotion: 0 },
       candidate: { examples: 0, minExamples: 20, canTrain: false },
     });

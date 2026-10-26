@@ -36,9 +36,22 @@ describe('behavioural probe', () => {
     ].join('\r\n');
     const parsed = parseBehaviorProbeOutput(stdout);
     expect(parsed.responsive).toBe(true);
-    expect(parsed.windows).toEqual([{ pid: 12, visible: true, windows: 2, hung: false }]);
+    expect(parsed.windows).toEqual([{ pid: 12, visible: true, windows: 2, foreign: 0, hung: false }]);
     expect(parsed.perf).toEqual([{ pid: 12, cpu: 500000, io: 2048 }]);
-    expect(summarizeProbe(parsed)).toEqual({ windowVisible: true, windowHung: false, cpuMs: 50, ioBytes: 2048 });
+    expect(summarizeProbe(parsed)).toEqual({
+      windowVisible: true, windowForeign: 0, windowCount: 2, windowHung: false, cpuMs: 50, ioBytes: 2048,
+    });
+  });
+
+  it('reports a window that exists but cannot be attributed to the host', () => {
+    // This is the measurement the window agent dispatches for: the app has a visible
+    // window, but it is a child of a process that is neither the app nor the host the
+    // probe was given, so a windowless reading would be a measurement error.
+    expect(buildProbeCSharp()).toContain('ForeignWindowCount');
+    const parsed = parseBehaviorProbeOutput('RCBEHAVE {"responsive":true,"windows":[{"pid":12,"visible":false,"windows":0,"foreign":1,"hung":false}],"perf":[]}');
+    const summary = summarizeProbe(parsed);
+    expect(summary.windowVisible).toBe(false);
+    expect(summary.windowForeign).toBe(1);
   });
 
   it('refuses unreadable probe output instead of guessing', () => {
@@ -48,6 +61,6 @@ describe('behavioural probe', () => {
 
   it('reports null counters when the probe returned no perf rows', () => {
     const parsed = parseBehaviorProbeOutput('RCBEHAVE {"responsive":true,"windows":[],"perf":[]}');
-    expect(summarizeProbe(parsed)).toEqual({ windowVisible: false, windowHung: false, cpuMs: null, ioBytes: null });
+    expect(summarizeProbe(parsed)).toEqual({ windowVisible: false, windowForeign: 0, windowCount: 0, windowHung: false, cpuMs: null, ioBytes: null });
   });
 });

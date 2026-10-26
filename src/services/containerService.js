@@ -326,6 +326,20 @@ export function onAiHistory(callback) {
   return onAiEvent('ai:history', callback);
 }
 
+// Setup progress for an app that is really its own setup program: either it is being
+// set up in the background, or its wizard is waiting in a RunContainer window.
+export function onSetupProgress(callback) {
+  return onAiEvent('app:setup', callback);
+}
+
+export function onSetupComplete(callback) {
+  return onAiEvent('app:setup-complete', callback);
+}
+
+export async function setUpInBackground(container) {
+  return requireIpc('Setting up apps').invoke('setup-in-background', container);
+}
+
 export function onAiVerified(callback) {
   return onAiEvent('ai:verified', callback);
 }

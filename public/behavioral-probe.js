@@ -33,11 +33,18 @@ public static class RunContainerBehaviorProbe
     // RunContainer is a child of RunContainer's host window, so an EnumWindows-only
     // probe reported "no window" for an app whose window was visibly right there, and
     // RunContainer restarted the app. Both top-level windows and hosted children count.
+    //
+    // Foreign counts windows that exist but cannot be attributed through the host: a
+    // child of a process that is neither the app nor the host we were given (an
+    // elevated launcher host, or a window owned elsewhere). That is the one case where
+    // "no window" is a measurement error rather than a fact, so it is reported
+    // separately instead of being folded into the visible count.
     sealed class Tally
     {
         public uint ProcessId;
         public uint HostProcessId;
         public int Count;
+        public int Foreign;
         public bool Hung;
     }
 
@@ -54,10 +61,18 @@ public static class RunContainerBehaviorProbe
             }
             else
             {
-                // A window hosted by RunContainer's own host window still counts.
                 uint parentOwner;
                 GetWindowThreadProcessId(windowParent, out parentOwner);
-                if (tally.HostProcessId != 0 && parentOwner == tally.HostProcessId) tally.Count += 1;
+                // A window hosted by RunContainer's host window still counts, and so does
+                // the app's own child window (an in-process dialog or control).
+                if (parentOwner == tally.ProcessId || (tally.HostProcessId != 0 && parentOwner == tally.HostProcessId))
+                {
+                    tally.Count += 1;
+                }
+                else
+                {
+                    tally.Foreign += 1;
+                }
             }
             if (IsHungAppWindow(hwnd)) tally.Hung = true;
         }
@@ -90,6 +105,11 @@ public static class RunContainerBehaviorProbe
     {
         return Inspect(processId, hostProcessId).Hung;
     }
+
+    public static int ForeignWindowCount(uint processId, uint hostProcessId)
+    {
+        return Inspect(processId, hostProcessId).Foreign;
+    }
 }
 `;
 }
@@ -110,8 +130,9 @@ function buildBehaviorProbeScript() {
     '$perf = @()',
     'foreach ($procId in $ids) {',
     '  $count = [RunContainerBehaviorProbe]::VisibleWindowCount($procId, $hostId)',
+    '  $foreign = [RunContainerBehaviorProbe]::ForeignWindowCount($procId, $hostId)',
     '  $hung = [RunContainerBehaviorProbe]::IsHung($procId, $hostId)',
-    '  $windows += [pscustomobject]@{ pid = [int]$procId; visible = ($count -gt 0); windows = [int]$count; hung = [bool]$hung }',
+    '  $windows += [pscustomobject]@{ pid = [int]$procId; visible = ($count -gt 0); windows = [int]$count; foreign = [int]$foreign; hung = [bool]$hung }',
     '  $row = Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$procId" | Select-Object -First 1',
     '  if ($row) {',
     '    $io = [double]$row.IOReadBytesPerSec + [double]$row.IOWriteBytesPerSec + [double]$row.IOOtherBytesPerSec',
@@ -151,6 +172,7 @@ function parseBehaviorProbeOutput(stdout) {
       pid: Number(entry?.pid),
       visible: Boolean(entry?.visible),
       windows: Number(entry?.windows) || 0,
+      foreign: Number(entry?.foreign) || 0,
       hung: Boolean(entry?.hung),
     }))
     .filter((entry) => Number.isSafeInteger(entry.pid) && entry.pid > 0);
@@ -171,6 +193,11 @@ function summarizeProbe(probe) {
   const perf = probe?.perf || [];
   return {
     windowVisible: windows.some((entry) => entry.visible),
+    // Visible windows that belong to a process other than the app and the host we
+    // were given. Reported so the window agent can tell "no window" apart from
+    // "a window we could not attribute".
+    windowForeign: windows.reduce((sum, entry) => sum + entry.foreign, 0),
+    windowCount: windows.reduce((sum, entry) => sum + entry.windows, 0),
     windowHung: windows.some((entry) => entry.hung),
     cpuMs: perf.length > 0 ? perf.reduce((sum, entry) => sum + entry.cpu, 0) / 10000 : null,
     ioBytes: perf.length > 0 ? perf.reduce((sum, entry) => sum + entry.io, 0) : null,

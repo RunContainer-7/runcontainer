@@ -1,4 +1,4 @@
-// RC-Brain training pipeline (v2).
+// RC-Brain training pipeline (v3).
 //
 //   node scripts/train-ai-brain.js
 //
@@ -12,7 +12,7 @@
 //   - final              a fresh realisation used once for the published report
 //
 // Outputs:
-//   src/ai/model/rc-brain-2.json   weights + schema + metrics
+//   src/ai/model/rc-brain-3.json   weights + schema + metrics
 //   src/ai/model/registry.json     which artefact the app loads, plus history
 //   reports/ai-evaluation.md       human-readable results, including failures
 //
@@ -31,7 +31,7 @@ const { gateDecision } = require('../src/ai/policy');
 const ROOT = path.join(__dirname, '..');
 const KNOWLEDGE = require('../src/ai/knowledge.json');
 const SEED = 20261022;
-const MODEL_ID = 'rc-brain-2';
+const MODEL_ID = 'rc-brain-4';
 const CANDIDATE = process.env.RC_BRAIN_CANDIDATE === '1';
 const MODEL_FILE = CANDIDATE ? `${MODEL_ID}-candidate.json` : `${MODEL_ID}.json`;
 const HIDDEN = { diagnosis: [48, 24], action: [32, 16] };
@@ -44,7 +44,11 @@ const ACTION_BY_ID = Object.fromEntries(KNOWLEDGE.actions.map((entry) => [entry.
 const APPROVAL_ACTIONS = new Set(KNOWLEDGE.actions.filter((entry) => entry.requiresApproval).map((entry) => entry.id));
 const REPAIR_ACTIONS = new Set(['restart_same_profile', 'restart_engine', 'repair_permissions', 'restart_clean_profile']);
 const NON_FAILURE = new Set(['healthy', 'console_headless', 'exited_normally', 'starting_slow']);
-const RESTRAINT_ACTIONS = new Set(['none', 'wait', 'observe', 'escalate']);
+// Dispatch is restraint too: it completes the evidence and never touches the
+// app, so it must not count as an intervention in the safety metrics.
+// Actions that leave the app exactly as it is. A repair proposed where one of
+// these was correct is an over-intervention, and a tool call is not a repair.
+const RESTRAINT_ACTIONS = new Set(['none', 'wait', 'observe', 'escalate', 'spawn_agents', 'consult_runbook']);
 
 // Mild label smoothing keeps a small sigmoid network from becoming certain on
 // every input, which is what made v1 over-confident on unfamiliar evidence.
@@ -390,11 +394,11 @@ function main() {
   const artefact = {
     schema: 'runcontainer.brain.v2',
     id: MODEL_ID,
-    name: 'RC-Brain 2',
-    version: '2.0.0',
+    name: 'RC-Brain 4',
+    version: '4.0.0',
     createdAt: new Date().toISOString(),
     knowledgeVersion: KNOWLEDGE.knowledgeVersion,
-    description: 'RunContainer\'s own two-head behavioural model: structured observations in, diagnosis and repair action out. Trained from scratch on synthetic RunContainer scenarios; cannot read arbitrary log text semantically.',
+    description: 'RunContainer\'s own two-head behavioural model: structured observations in, diagnosis and action out. It has two tools it can ask for help with: it can dispatch the fixed specialist agents (six evidence probes plus the research, expert and harmony agents) to complete an observation it cannot act on, and it can consult the Runbook, the hard-coded table of exact documented error signatures. Trained from scratch on synthetic RunContainer scenarios; it cannot read arbitrary log text semantically, it cannot author, configure or command an agent, and it cannot write a Runbook entry.',
     featureSchema: FEATURE_NAMES,
     labels: { diagnosis: DIAGNOSES, action: ACTIONS },
     actionByDiagnosis: ACTION_BY_DIAGNOSIS,
@@ -496,7 +500,7 @@ function main() {
   const splitTable = (label, evaluation, baseline) => [
     `### ${label}`,
     '',
-    '| Metric | RC-Brain 2 | Keyword baseline |',
+    '| Metric | RC-Brain 3 | Keyword baseline |',
     '| --- | --- | --- |',
     `| Diagnosis accuracy | ${pct(evaluation.diagnosisAccuracy)} | ${pct(baseline.diagnosisAccuracy)} |`,
     `| Action accuracy | ${pct(evaluation.actionAccuracy)} | ${pct(baseline.actionAccuracy)} |`,
@@ -512,13 +516,13 @@ function main() {
   ].join('\n');
 
   const report = [
-    '# RC-Brain 2 evaluation',
+    '# RC-Brain 3 evaluation',
     '',
     `Trained ${artefact.createdAt} from ${corpus.train.length} synthetic RunContainer scenarios${curated.examples.length ? ` plus ${curated.examples.length} promoted verified experiences` : ''}, calibrated on ${calibration.length} separate rows, and evaluated on held-out splits it never fitted.`,
     '',
     `- Model: two feed-forward heads (diagnosis ${HIDDEN.diagnosis.join('x')}, action ${HIDDEN.action.join('x')}), sigmoid, trained from scratch`,
     `- Parameters: ${parameterCount.toLocaleString()}`,
-    `- Input: ${FEATURE_NAMES.length} structured observation features (window, process, engine, log signals, temporal history, exit codes, host pressure)`,
+    `- Input: ${FEATURE_NAMES.length} structured observation features (window, process, engine, log signals, temporal history, exit codes, host pressure, specialist-agent findings)`,
     `- Calibration: temperature ${temperature.toFixed(3)} (NLL ${calibrationResult.nll}); thresholds chosen on calibration only`,
     `- Thresholds: confidence ${thresholds.confidence}, margin ${thresholds.margin} (calibration coverage ${pct(thresholds.calibrationCoverage)}, precision ${pct(thresholds.calibrationPrecision)})`,
     `- Training: ${diagnosisRun.result.iterations} + ${actionRun.result.iterations} iterations, errors ${diagnosisRun.result.error.toFixed(4)} / ${actionRun.result.error.toFixed(4)}`,
@@ -573,7 +577,7 @@ function main() {
   fs.mkdirSync(path.join(ROOT, 'reports'), { recursive: true });
   fs.writeFileSync(reportPath, report, 'utf8');
 
-  console.log(`RC-Brain 2: ${parameterCount} parameters, ${train.length} fit / ${calibration.length} calibration`);
+  console.log(`RC-Brain ${artefact.version.split('.')[0]}: ${parameterCount} parameters, ${train.length} fit / ${calibration.length} calibration`);
   console.log(`thresholds confidence ${thresholds.confidence} margin ${thresholds.margin}`);
   console.log(`familiar ${pct(familiarEval.diagnosisAccuracy)} / action ${pct(familiarEval.actionAccuracy)} (baseline ${pct(artefact.baseline.familiar.diagnosisAccuracy)})`);
   console.log(`unseen ${pct(unseenEval.diagnosisAccuracy)} / action ${pct(unseenEval.actionAccuracy)} (baseline ${pct(artefact.baseline.unseen.diagnosisAccuracy)})`);
