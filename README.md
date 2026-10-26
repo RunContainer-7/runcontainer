@@ -40,7 +40,7 @@ A `locked` profile asks for no network access. That can only be enforced when th
 
 RunContainer has a small neural model trained from scratch on its own architecture and failure modes. It is not a cloud chatbot, and it is not a rules table with an AI label.
 
-- **RC-Brain 2** has **8,334 parameters** across two heads: one diagnoses, one chooses a repair action from a fixed catalogue. It reads 66 structured observation features, including how long a symptom has persisted, whether it recurred, exit-code classes and host pressure.
+- **RC-Brain 2** has **9,088 parameters** across two heads: one diagnoses, one chooses a repair action from a fixed catalogue. It reads 66 structured observation features, including how long a symptom has persisted, whether it recurred, exit-code classes and host pressure.
 - While the app is open it watches running apps every few seconds: window handles, CPU/IO movement, engine liveness, the last 40 log lines and its own repair history.
 - It knows 19 RunContainer-specific states, from a missing Microsoft runtime to a trapped VM engine, and abstains when the evidence is weak instead of guessing.
 - Low-risk repairs (restart the app, restart its engine, repair its own folder permissions) run automatically. Clearing an app's profile needs approval. It never installs system software, deletes app data, weakens isolation or follows instructions found in logs.
