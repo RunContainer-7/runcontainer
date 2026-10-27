@@ -154,10 +154,23 @@ function buildImgInfoArgs({ diskPath }) {
   return ['info', '--output=json', diskPath];
 }
 
+// How the guest's disk is attached. `virtio` is what a provisioned environment image
+// expects. A machine that boots media the user supplies is a different case: no stock
+// Windows or Linux installer carries a virtio driver, so on `virtio` the guest's own
+// setup sees no disk at all and cannot install. `ide` attaches to q35's AHCI controller,
+// which every installer recognises.
+const DISK_INTERFACES = ['virtio', 'ide', 'scsi', 'none'];
+
 // Full boot arguments for an environment VM. No virtual network by default
 // (-nic none): the management channel is QMP on localhost, file transfer and
 // commands go through the guest agent, and networking stays off unless the
 // user explicitly enables it later.
+//
+// `guestAgent` exists because the guest-agent channel is not free. The `pipe` chardev
+// stalls machine init on Windows until a host process connects to it, which is why main.js
+// holds that pipe open from boot. A caller with no guest-agent integration has to say so:
+// passing a pipe name nothing ever connects to leaves QEMU waiting before the guest ever
+// executes a single instruction, and the console then shows a permanently blank screen.
 function buildQemuBootArgs({
   machine = 'q35',
   accel = 'whpx',
@@ -169,13 +182,19 @@ function buildQemuBootArgs({
   pidfilePath,
   vmName,
   display = 'sdl',
+  diskInterface = 'virtio',
+  guestAgent = true,
   cdrom,
   bootOrder,
   extraArgs = [],
 } = {}) {
   if (!QEMU_ACCELS.includes(accel)) throw new Error(`Unknown accelerator "${accel}".`);
-  if (!diskPath || !qmpPort || !agentPipe || !pidfilePath || !vmName) {
-    throw new Error('QEMU boot needs disk, QMP port, agent pipe, pidfile, and VM name.');
+  if (!diskPath || !qmpPort || !pidfilePath || !vmName) {
+    throw new Error('QEMU boot needs disk, QMP port, pidfile, and VM name.');
+  }
+  if (guestAgent && !agentPipe) throw new Error('A guest-agent channel needs a pipe name.');
+  if (!DISK_INTERFACES.includes(diskInterface)) {
+    throw new Error(`Unknown disk interface "${diskInterface}".`);
   }
   if (!Number.isSafeInteger(memoryMB) || !Number.isSafeInteger(cpuCount)) {
     throw new Error('QEMU boot needs numeric memory/CPU (validate first).');
@@ -189,13 +208,16 @@ function buildQemuBootArgs({
     '-rtc', 'base=localtime',
     '-display', display,
     '-nic', 'none',
-    '-drive', `file=${diskPath},format=qcow2,if=virtio`,
-    '-device', 'virtio-serial-pci',
-    '-chardev', `pipe,path=${agentPipe},id=rcagent`,
-    '-device', 'virtserialport,chardev=rcagent,name=org.qemu.guest_agent.0',
-    '-qmp', `tcp:127.0.0.1:${qmpPort},server=on,wait=off`,
-    '-pidfile', pidfilePath,
+    '-drive', `file=${diskPath},format=qcow2,if=${diskInterface}`,
   ];
+  if (guestAgent) {
+    args.push(
+      '-device', 'virtio-serial-pci',
+      '-chardev', `pipe,path=${agentPipe},id=rcagent`,
+      '-device', 'virtserialport,chardev=rcagent,name=org.qemu.guest_agent.0',
+    );
+  }
+  args.push('-qmp', `tcp:127.0.0.1:${qmpPort},server=on,wait=off`, '-pidfile', pidfilePath);
   if (cdrom) args.push('-cdrom', cdrom);
   if (bootOrder) args.push('-boot', `order=${bootOrder}`);
   return args.concat(extraArgs);
@@ -273,6 +295,7 @@ module.exports = {
   QEMU_IMG_BINARY,
   QEMU_MIN_VERSION,
   QEMU_ACCELS,
+  DISK_INTERFACES,
   QEMU_UPDATE_STATE_VERSION,
   parseQemuVersion,
   isSupportedQemuVersion,

@@ -41,12 +41,16 @@ function desktopSizeRect({ width, height }) {
   return bytes(...u16(0), ...u16(0), ...u16(width), ...u16(height), 0xff, 0xff, 0xff, 0x21);
 }
 
-function connect(session, { width = 640, height = 480, version = 'RFB 003.008\n', offered = [1], format = pixelFormat(), name = 'QEMU' } = {}) {
+function connect(session, { width = 640, height = 480, version = 'RFB 003.008\n', offered = [1], format = pixelFormat(), name = 'QEMU', securityResult = 'ok' } = {}) {
   session.receive(ascii(version));
   const versionReply = session.takeOutbox();
   void name;
   session.receive(bytes(offered.length, ...offered));
   const securityReply = session.takeOutbox();
+  // A 3.8 server continues with SecurityResult even when the chosen security type is None
+  // (RFC 6143 7.2.1), which is what QEMU does. 'skip' models a server that does not.
+  if (securityResult === 'ok') session.receive(u32(0));
+  if (securityResult === 'no') session.receive(u32(1));
   session.receive(serverInit({ width, height, format, name }));
   const initReply = session.takeOutbox();
   return { versionReply, securityReply, initReply };
@@ -63,7 +67,7 @@ describe('RFB handshake', () => {
     expect(Array.from(securityReply[1])).toEqual([1]);
 
     // SetEncodings: type 2, then Raw, CopyRect and DesktopSize as signed 32-bit values.
-    const setEncodings = initReply[0];
+    const setEncodings = initReply[1];
     expect(setEncodings).toHaveLength(16);
     expect(setEncodings[0]).toBe(2);
     expect(setEncodings[2]).toBe(0);
@@ -72,9 +76,27 @@ describe('RFB handshake', () => {
     expect(Array.from(setEncodings.slice(8, 12))).toEqual([0, 0, 0, 1]);      // copyRect
     expect(Array.from(setEncodings.slice(12, 16))).toEqual([0xff, 0xff, 0xff, 0x21]); // desktopSize (-223)
     // First request is a full (non-incremental) repaint of the whole screen.
-    expect(initReply[1][0]).toBe(3);
-    expect(initReply[1][1]).toBe(0);
+    expect(initReply[2][0]).toBe(3);
+    expect(initReply[2][1]).toBe(0);
     expect(session.phase).toBe('message');
+  });
+
+  it('asks the server to convert to true colour before anything is painted', () => {
+    const session = new RfbSession();
+    // A palette-mode display, which is what every BIOS screen and installer boot uses.
+    const { initReply } = connect(session, {
+      format: bytes(8, 8, 0, 0, ...u16(255), ...u16(255), ...u16(255), 0, 0, 0, 0, 0, 0),
+    });
+    const setPixelFormat = initReply[0];
+    expect(setPixelFormat).toHaveLength(20);
+    expect(setPixelFormat[0]).toBe(0);
+    expect(Array.from(setPixelFormat.slice(4, 8))).toEqual([32, 24, 0, 1]);
+    expect(Array.from(setPixelFormat.slice(8, 14))).toEqual([0, 255, 0, 255, 0, 255]);
+    expect(Array.from(setPixelFormat.slice(14, 17))).toEqual([16, 8, 0]);
+    // The screen is drawn, not refused: this is the machine's first visible pixels.
+    expect(session.failed).toBe(false);
+    expect(session.pixelFormat.bitsPerPixel).toBe(32);
+    expect(session.pixelFormat.trueColour).toBe(true);
   });
 
   it('lowers its answer for a 3.3 server and accepts its 32-bit security type', () => {
@@ -85,7 +107,8 @@ describe('RFB handshake', () => {
     expect(Array.from(session.takeOutbox()[0])).toEqual([1]);
     session.receive(serverInit());
     const outbox = session.takeOutbox();
-    expect(outbox[0][0]).toBe(2);
+    expect(outbox[0][0]).toBe(0); // the format is requested for these servers too
+    expect(outbox[1][0]).toBe(2);
     expect(session.phase).toBe('message');
   });
 
@@ -111,14 +134,52 @@ describe('RFB handshake', () => {
     expect(errors[0]).toContain('nope!!');
   });
 
-  it('refuses a console it cannot draw instead of painting nonsense', () => {
+  it('reads the SecurityResult a 3.8 server sends even for None, so nothing drifts', () => {
+    // The real QEMU message trace: "RFB 003.008\n", the security list, four zero bytes, then
+    // a ServerInit of 720x400 in 32-bit true colour. Missing the four bytes left the client
+    // reading a pixel format of two bits per pixel and then framing rectangles in the middle
+    // of other messages — the console stayed empty while the guest ran.
+    const ready = [];
+    const session = new RfbSession({ onReady: (info) => ready.push(info) });
+    session.receive(ascii('RFB 003.008\n'));
+    session.takeOutbox();
+    session.receive(bytes(1, 1));
+    expect(session.phase).toBe('result');
+    session.takeOutbox();
+    session.receive(bytes(0, 0, 0, 0));
+    expect(session.phase).toBe('result'); // not enough to decide yet
+    session.receive(serverInit({ width: 720, height: 400 }));
+    expect(session.phase).toBe('message');
+    expect(ready[0]).toMatchObject({ width: 720, height: 400 });
+    expect(session.pixelFormat.bitsPerPixel).toBe(32);
+  });
+
+  it('draws a server that leaves the SecurityResult out anyway', () => {
+    // Nothing is perfect: a server that goes straight to ServerInit is recognised by the
+    // header itself rather than having its pixels eaten as a status.
+    const ready = [];
+    const session = new RfbSession({ onReady: (info) => ready.push(info) });
+    connect(session, { width: 800, height: 600, securityResult: 'skip' });
+    expect(ready[0]).toMatchObject({ width: 800, height: 600 });
+    expect(session.phase).toBe('message');
+  });
+
+  it('reports a SecurityResult that refuses the console', () => {
     const errors = [];
     const session = new RfbSession({ onError: (message) => errors.push(message) });
     session.receive(ascii('RFB 003.008\n'));
+    session.takeOutbox();
     session.receive(bytes(1, 1));
-    // A palette-mode display: 8 bits per pixel with true-colour switched off.
-    session.receive(bytes(...u16(8), ...u16(8), 8, 8, 0, 0, ...u16(255), ...u16(255), ...u16(255), 0, 0, 0, 0, 0, 0, ...u32(0)));
-    expect(errors.join(' ')).toContain('cannot draw');
+    session.takeOutbox();
+    session.receive(bytes(...u32(1), ...u32(6), ...ascii('nope!!')));
+    expect(errors.join(' ')).toContain('nope!!');
+  });
+
+  it('still reports a handshake that is not RFB at all', () => {
+    const errors = [];
+    const session = new RfbSession({ onError: (message) => errors.push(message) });
+    session.receive(ascii('HTTP/1.1 200\n'));
+    expect(errors.join(' ')).toContain('did not answer with RFB');
   });
 
   it('reports the guest screen size and name once the session is up', () => {

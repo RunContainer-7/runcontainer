@@ -47,3 +47,13 @@ jobs:
       # reports that rather than a false failure.
       - name: Window hosting on real Windows (run draws the app inside RunContainer)
         run: node scripts/windows-host-verify.js
+
+      # The Virtualise tab has the same kind of promise, and the same kind of trap: a console
+      # that connects and draws nothing looks exactly like a console that works, until you
+      # look at the pixels. That check needs a real QEMU, which a runner does not ship, so it
+      # is installed here rather than leaving the test skipped and unproven.
+      - name: Install QEMU for the virtual machine console check
+        run: choco install qemu -y --no-progress
+
+      - name: A guest's screen is really drawn (live QEMU, real RFB client)
+        run: npx react-scripts test --testPathPattern vmConsoleLive --watchAll=false

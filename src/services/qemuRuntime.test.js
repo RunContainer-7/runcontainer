@@ -56,6 +56,23 @@ describe('QEMU genuine-VM backend builders', () => {
     expect(() => qemu.buildQemuBootArgs({ accel: 'kvm' })).toThrow();
   });
 
+  it('leaves the guest-agent channel out when the caller has no agent to talk to', () => {
+    const args = qemu.buildQemuBootArgs({
+      accel: 'tcg', memoryMB: 4096, cpuCount: 2, diskPath: 'e\\disk.qcow2', qmpPort: 43002,
+      pidfilePath: 'e\\vm.pid', vmName: 'RunContainer-x', guestAgent: false, diskInterface: 'ide',
+    });
+    const line = args.join(' ');
+    expect(line).not.toContain('chardev');
+    expect(line).not.toContain('virtserialport');
+    expect(line).toContain('if=ide');
+    // The channels a machine is managed through stay in place either way.
+    expect(args).toContain('tcp:127.0.0.1:43002,server=on,wait=off');
+    expect(() => qemu.buildQemuBootArgs({
+      accel: 'tcg', memoryMB: 1024, cpuCount: 1, diskPath: 'd', qmpPort: 1,
+      pidfilePath: 'f', vmName: 'n', guestAgent: false, diskInterface: 'floppy',
+    })).toThrow();
+  });
+
   it('parses accel probes: timeout-hold means usable, fast errors mean not', () => {
     // Real WHPX output seen on Windows 10 Pro: benign warning only.
     expect(qemu.parseAccelProbe({

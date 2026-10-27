@@ -114,6 +114,17 @@ function defaultVmRecord(overrides = {}) {
 // bound to loopback and nothing is drawn by QEMU itself (`-display none`). A USB tablet
 // is attached because it gives the guest absolute pointer coordinates, which is what
 // makes a remote display usable as a mouse instead of a relative one that drifts.
+//
+// Two things are deliberately NOT here, and both were the reason a machine in this tab
+// booted to a blank console:
+//
+// - No guest-agent channel. It is a `pipe` chardev, and QEMU on Windows stalls machine
+//   init until a host process connects to that pipe. This feature has no guest-agent
+//   integration, so nothing ever connected: QEMU opened its console port, RunContainer
+//   reported the machine running, and the guest never executed its first instruction.
+// - No virtio disk. The media the user supplies is a stock installer with no virtio
+//   driver, so the guest's own setup could not see its disk. `ide` attaches to q35's
+//   AHCI controller, which every installer recognises.
 function buildVmBootArgs({
   accel,
   memoryMB,
@@ -122,7 +133,6 @@ function buildVmBootArgs({
   vmName,
   consoleSlot,
   qmpPort,
-  agentPipe,
   pidfilePath,
   isoPath,
   bootFromMedia = true,
@@ -137,16 +147,23 @@ function buildVmBootArgs({
     cpuCount: Number(cpuCount),
     diskPath,
     qmpPort,
-    agentPipe,
     pidfilePath,
     vmName,
     display: 'none',
+    diskInterface: 'ide',
+    guestAgent: false,
     cdrom: isoPath || undefined,
     // 'd' boots the attached media first, which is what an install needs; a VM whose
     // system is already installed boots from its disk.
     bootOrder: isoPath && bootFromMedia ? 'd' : 'c',
     extraArgs: [
       '-vnc', vncTargetFor(consoleSlot),
+      // The tablet gives the guest absolute pointer coordinates, so the drawn console is
+      // usable as a mouse. It needs a controller to sit on: q35 has no USB bus of its own,
+      // and QEMU does not quietly drop an unparented device — it exits before the guest
+      // runs at all ("-device usb-tablet: No 'usb-bus' bus found for device 'usb-tablet'"),
+      // which is a machine that starts, reports itself running, and can never draw.
+      '-device', 'qemu-xhci',
       '-device', 'usb-tablet',
     ],
   });

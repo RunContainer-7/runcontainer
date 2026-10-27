@@ -104,9 +104,12 @@ The point of RunContainer is that pressing Run draws the app's window INSIDE a R
 npm run build
 node scripts/windows-host-verify.js      # Run draws the app inside RunContainer
 node scripts/windows-verify.js           # isolation, container tokens, deletion on real Windows
+npx react-scripts test --testPathPattern vmConsoleLive --watchAll=false   # a guest's screen is really drawn
 ```
 
-`windows-host-verify.js` installs a real graphical program through the app's own IPC, presses Run, and asks Windows where that window is: it must be a child window of the RunContainer window, visible and sensibly sized, with no copy left on the desktop. It also checks that a virtual machine which outlived the app is stopped at startup rather than left holding its disk. Both run in CI (`.github/workflows/windows-verify.yml`). It uses its own data directory, so nothing of yours is touched.
+`windows-host-verify.js` installs a real graphical program through the app's own IPC, presses Run, and asks Windows where that window is: it must be a child window of the RunContainer window, visible and sensibly sized, with no copy left on the desktop. It also checks that a virtual machine which outlived the app is stopped at startup rather than left holding its disk. It uses its own data directory, so nothing of yours is touched.
+
+`src/services/vmConsoleLive.test.js` does the same for the Virtualise tab's own promise. It boots genuine QEMU with the exact arguments the app builds, connects to the guest with the same RFB client the window uses, and requires real non-blank pixels — a console that connects and draws nothing looks identical to one that works until you look at the pixels, which is how three separate bugs in this path shipped unnoticed. It reports what it measured (on the development PC: a 720x400 guest screen, one raw frame, 1679 lit pixels) and skips, never passes, where QEMU is not installed. All three checks run in CI (`.github/workflows/windows-verify.yml`); the workflow installs QEMU so the console check runs there too.
 
 ## Project layout
 

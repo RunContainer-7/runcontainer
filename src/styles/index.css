@@ -143,7 +143,11 @@ body {
     transform: translateX(2px);
 }
 
-.apps-panel, .placeholder-panel {
+/* Every tab's root is one of these: a scrolling column that fills the screen and
+   reserves the strip the bottom navigation floats over. Virtualise is included
+   deliberately — it is the tallest panel in the app, and as a plain div it was
+   neither clipped to the screen nor clear of the navigation, which covered it. */
+.apps-panel, .placeholder-panel, .panel-body {
     flex: 1;
     min-height: 0;
     overflow-y: auto;

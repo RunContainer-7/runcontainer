@@ -27,6 +27,45 @@ export const RFB_ENCODING = {
 const SECURITY_NONE = 1;
 const SECURITY_VNC_AUTH = 2;
 
+// What the console asks the server to send.
+//
+// A server describes its own format in ServerInit, and for a guest that is sitting in VGA
+// text mode — which is the BIOS screen and the first minutes of every operating system
+// setup — that format is 8-bit with a colour table. Refusing those, as this client first
+// did, meant no machine could ever draw its first screen: the handshake failed and the
+// console stayed empty while the guest was running perfectly well. A real VNC client does
+// not refuse them either; it sends SetPixelFormat and lets the server convert. 32-bit
+// true colour is also the cheapest thing to paint into a canvas.
+export const CLIENT_PIXEL_FORMAT = {
+  bitsPerPixel: 32,
+  depth: 24,
+  bigEndian: false,
+  trueColour: true,
+  redMax: 255,
+  greenMax: 255,
+  blueMax: 255,
+  redShift: 16,
+  greenShift: 8,
+  blueShift: 0,
+};
+
+// SetPixelFormat: type 0, three padding bytes, then the 16-byte format.
+function setPixelFormatMessage(format = CLIENT_PIXEL_FORMAT) {
+  const message = new Uint8Array(20);
+  message[0] = 0;
+  message[4] = format.bitsPerPixel;
+  message[5] = format.depth;
+  message[6] = format.bigEndian ? 1 : 0;
+  message[7] = format.trueColour ? 1 : 0;
+  message.set(new Uint8Array(u16(format.redMax)), 8);
+  message.set(new Uint8Array(u16(format.greenMax)), 10);
+  message.set(new Uint8Array(u16(format.blueMax)), 12);
+  message[14] = format.redShift;
+  message[15] = format.greenShift;
+  message[16] = format.blueShift;
+  return message;
+}
+
 const NAMED_KEYSYMS = {
   Enter: 0xff0d,
   Backspace: 0xff08,
@@ -101,10 +140,6 @@ function readU32(bytes, offset) {
   return ((bytes[offset] * 0x1000000) + (bytes[offset + 1] << 16) + (bytes[offset + 2] << 8) + bytes[offset + 3]);
 }
 
-function describePixelFormat(format) {
-  return `${format.bitsPerPixel}-bit with ${format.redMax}/${format.greenMax}/${format.blueMax} channel maxima`;
-}
-
 export class RfbSession {
   constructor({ onRect, onResize, onName, onError, onReady } = {}) {
     this.onRect = onRect || (() => {});
@@ -125,6 +160,11 @@ export class RfbSession {
     this.chunks = [];
     this.buffered = 0;
     this.failed = false;
+    // Set when the guest changes resolution. The canvas is cleared at the new size, so the
+    // next request must paint the whole of it rather than only what changed: a machine that
+    // boots at 0x0 (QEMU does not know the mode yet) reports its real size this way, and an
+    // incremental request after that would leave the screen empty.
+    this.needsFullRepaint = false;
   }
 
   /** Messages to send, in order. Call after every receive(). */
@@ -203,6 +243,7 @@ export class RfbSession {
   step() {
     if (this.phase === 'version') return this.readVersion();
     if (this.phase === 'security') return this.readSecurity();
+    if (this.phase === 'result') return this.readSecurityResult();
     if (this.phase === 'init') return this.readServerInit();
     if (this.phase === 'message') return this.readMessage();
     return false;
@@ -255,7 +296,11 @@ export class RfbSession {
       }
       this.outbox.push(new Uint8Array([SECURITY_NONE]));
       this.outbox.push(new Uint8Array([1])); // ClientInit: shared
-      this.phase = 'init';
+      // Choosing None does not skip the SecurityResult: the protocol says the handshake
+      // continues with it (RFC 6143 §7.2.1). QEMU sends it as four zero bytes, and a client
+      // that does not read it is four bytes out of step from then on — which is exactly how
+      // this console spent its life refusing to draw a guest that was running fine.
+      this.phase = 'result';
       return true;
     }
 
@@ -282,6 +327,47 @@ export class RfbSession {
     return true;
   }
 
+  // SecurityResult: a 32-bit status, and on failure a length-prefixed reason.
+  //
+  // The status is checked against the ServerInit that has to follow it, because not every
+  // server obeys the protocol here: a server that omits the message would otherwise have
+  // its ServerInit eaten as a status, and the console would fail with something unreadable
+  // instead of drawing. A header that is plausible as a ServerInit is treated as one.
+  readSecurityResult() {
+    if (this.buffered < 4) return false;
+
+    // A server that skips the message is recognised by the header itself, so its pixels are
+    // not eaten as a status. Twenty-four bytes is a whole ServerInit header plus the length
+    // of its name, which is as little as any server can send.
+    if (this.buffered >= 24 && looksLikeServerInit(this.peek(24))) {
+      this.phase = 'init';
+      return true;
+    }
+
+    // A refusal says so on its own, and waiting for a ServerInit that is never coming would
+    // leave the console silent instead of explaining why. The reason has to be complete: a
+    // ServerInit arriving in pieces could otherwise have its pixel format read as a length.
+    if (this.buffered >= 8) {
+      const status = readU32(this.peek(4), 0);
+      if (status !== 0) {
+        const length = readU32(this.peek(8), 4);
+        if (this.buffered >= 8 + length) {
+          this.take(8);
+          const reason = length > 0 ? String.fromCharCode(...this.take(length)) : '';
+          throw new Error(reason ? `The VM console refused the connection: ${reason}` : 'The VM console refused the connection.');
+        }
+      }
+    }
+
+    // Nothing left to wait for but the whole header: these four bytes are a successful
+    // SecurityResult and the ServerInit follows them.
+    if (this.buffered < 24) return false;
+    const status = readU32(this.take(4), 0);
+    if (status !== 0) throw new Error('The VM console refused the connection.');
+    this.phase = 'init';
+    return true;
+  }
+
   readServerInit() {
     // ServerInit is width (2), height (2) and the pixel format (16) — twenty bytes —
     // followed by the length-prefixed desktop name.
@@ -301,12 +387,10 @@ export class RfbSession {
       greenShift: header[15],
       blueShift: header[16],
     };
-    if (!this.pixelFormat.trueColour) {
-      throw new Error('This VM console uses a colour palette, which RunContainer cannot draw.');
-    }
-    if (![8, 16, 32].includes(this.pixelFormat.bitsPerPixel)) {
-      throw new Error(`This VM console uses ${describePixelFormat(this.pixelFormat)}, which RunContainer cannot draw.`);
-    }
+    // Kept for the session's own reporting, not for decoding: what arrives is in the format
+    // asked for below, whatever the server said it prefers.
+    this.serverPixelFormat = this.pixelFormat;
+    this.pixelFormat = CLIENT_PIXEL_FORMAT;
     if (this.nameLength === null) {
       if (this.buffered < 4) {
         this.restore(header);
@@ -319,6 +403,10 @@ export class RfbSession {
     }
     this.name = this.nameLength > 0 ? String.fromCharCode(...this.take(this.nameLength)) : '';
     this.onName(this.name);
+
+    // Asked for before anything is painted, so every rectangle that follows is in a format
+    // this canvas can draw.
+    this.outbox.push(setPixelFormatMessage());
 
     // Raw is listed first: a server may only use encodings the client named, so naming
     // Raw is what guarantees this client can always draw whatever arrives.
@@ -379,6 +467,7 @@ export class RfbSession {
       this.pendingRects -= 1;
       this.width = width;
       this.height = height;
+      this.needsFullRepaint = true;
       this.onResize(width, height, this.pixelFormat);
       if (this.pendingRects === 0) return this.finishUpdate();
       return true;
@@ -418,7 +507,9 @@ export class RfbSession {
   // queues requests the server would answer out of order.
   finishUpdate() {
     this.pendingRects = 0;
-    this.outbox.push(this.framebufferUpdateRequest(true));
+    const full = this.needsFullRepaint;
+    this.needsFullRepaint = false;
+    this.outbox.push(this.framebufferUpdateRequest(!full));
     return false;
   }
 
@@ -456,6 +547,23 @@ export class RfbSession {
     if (this.phase !== 'message') return null;
     return this.framebufferUpdateRequest(false);
   }
+}
+
+// Could these bytes be the start of a ServerInit? Used only to tell a SecurityResult apart
+// from the ServerInit of a server that skips it: a pixel format that is not 8, 16 or 32 bits
+// per pixel, a name that would be absurdly long, or a colour depth larger than a pixel are
+// all things no real ServerInit does.
+function looksLikeServerInit(bytes) {
+  if (!bytes || bytes.length < 24) return false;
+  const bitsPerPixel = bytes[4];
+  const depth = bytes[5];
+  const bigEndian = bytes[6];
+  const trueColour = bytes[7];
+  if (![8, 16, 32].includes(bitsPerPixel)) return false;
+  if (depth === 0 || depth > bitsPerPixel) return false;
+  if (bigEndian > 1 || trueColour > 1) return false;
+  const nameLength = readU32(bytes, 20);
+  return nameLength >= 0 && nameLength <= 4096;
 }
 
 // Server pixels to RGBA, honouring the channel maxima and shifts the server declared.

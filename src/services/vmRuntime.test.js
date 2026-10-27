@@ -62,16 +62,39 @@ describe('QEMU command line for a VM', () => {
     vmName: 'Test VM',
     consoleSlot: 0,
     qmpPort: 44800,
-    agentPipe: '\\\\.\\pipe\\rc-vm-1',
     pidfilePath: 'C:\\vms\\vm.pid',
   };
 
   it('draws no window of its own and serves the guest over loopback VNC', () => {
     const args = vm.buildVmBootArgs({ ...base, isoPath: 'C:\\isos\\ubuntu.iso', bootFromMedia: true });
     expect(args).toEqual(expect.arrayContaining(['-display', 'none', '-vnc', '127.0.0.1:10']));
-    // Absolute pointer input is what makes a drawn console usable as a mouse.
+    // Absolute pointer input is what makes a drawn console usable as a mouse — and the
+    // tablet needs a USB controller to attach to, or QEMU exits instead of booting.
     expect(args).toEqual(expect.arrayContaining(['-device', 'usb-tablet']));
+    expect(args.indexOf('qemu-xhci')).toBeGreaterThan(-1);
+    expect(args.indexOf('qemu-xhci')).toBeLessThan(args.indexOf('usb-tablet'));
     expect(args.join(' ')).not.toContain('sdl');
+  });
+
+  it('opens no guest-agent channel, which would stall the boot before any guest runs', () => {
+    // A `pipe` chardev waits for a host process to connect. Nothing in this feature ever
+    // connects, and a machine started that way serves a console that never draws anything,
+    // so the channel is absent rather than merely unused.
+    const args = vm.buildVmBootArgs({ ...base, isoPath: 'C:\\isos\\ubuntu.iso', bootFromMedia: true });
+    const line = args.join(' ');
+    expect(line).not.toContain('chardev');
+    expect(line).not.toContain('virtserialport');
+    expect(line).not.toContain('guest_agent');
+    expect(() => qemu.buildQemuBootArgs({
+      accel: 'tcg', memoryMB: 4096, cpuCount: 2, diskPath: 'd.qcow2',
+      qmpPort: 44800, pidfilePath: 'f', vmName: 'n', guestAgent: true,
+    })).toThrow();
+  });
+
+  it('attaches the disk in a way an unmodified installer can see', () => {
+    const args = vm.buildVmBootArgs({ ...base, isoPath: null, bootFromMedia: false });
+    expect(args.join(' ')).toContain('if=ide');
+    expect(args.join(' ')).not.toContain('if=virtio');
   });
 
   it('boots attached media first for an install, and the disk otherwise', () => {

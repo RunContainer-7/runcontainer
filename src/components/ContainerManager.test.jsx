@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
@@ -768,6 +770,16 @@ describe("ContainerManager", () => {
     await act(async () => { await Promise.resolve(); });
     openTab(container, "Virtualise");
     await act(async () => { await Promise.resolve(); });
+
+    // The tab's root is the scrolling panel class every other tab uses, and the stylesheet
+    // really styles it: that is what keeps the floating tab bar off the panel's content and
+    // lets a tall tab scroll. As a class with no rule, the panel simply overflowed and the
+    // bar was drawn over the machine list and the console.
+    const panel = container.querySelector(".panel-body");
+    expect(panel).not.toBeNull();
+    expect(panel.querySelector(".vm-form")).not.toBeNull();
+    const stylesheet = fs.readFileSync(path.join(__dirname, "..", "styles", "index.css"), "utf8");
+    expect(stylesheet).toMatch(/\.apps-panel,\s*\.placeholder-panel,\s*\.panel-body\s*\{/);
 
     // The feature says what it is, and that the operating system is yours.
     expect(container.textContent).toContain("Experimental");

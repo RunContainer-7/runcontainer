@@ -5515,6 +5515,42 @@ function reconcileVirtualMachines() {
   return leftovers.length;
 }
 
+// Where a virtual machine's QEMU writes its diagnostics. Kept out of the app's own error
+// log because QEMU is chatty at startup and its output is only interesting when a machine
+// misbehaves.
+function vmQemuLogPath() {
+  return path.join(app.getPath('userData'), 'vm-qemu.log');
+}
+
+function fileSize(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch (error) {
+    return 0;
+  }
+}
+
+// The end of what a program wrote after `offset`: what a failure needs is the last thing
+// said, not the first.
+function logTextSince(filePath, offset, maxChars = 400) {
+  try {
+    const descriptor = fs.openSync(filePath, 'r');
+    try {
+      const size = fs.fstatSync(descriptor).size;
+      const start = Math.max(0, Math.min(offset, size));
+      const length = Math.min(size - start, 4096);
+      if (length <= 0) return '';
+      const buffer = Buffer.alloc(length);
+      fs.readSync(descriptor, buffer, 0, length, start);
+      return buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(-maxChars);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch (error) {
+    return '';
+  }
+}
+
 // Is anything already listening on the console port? QEMU would fail to bind and the
 // reason would only reach the log, so the port is checked before QEMU is started.
 function isPortFree(port) {
@@ -5651,7 +5687,6 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
       vmName: `RunContainer-${record.name}`.slice(0, 60),
       consoleSlot: slot,
       qmpPort: 44800 + slot,
-      agentPipe: `\\\\.\\pipe\\rc-vm-${record.id}`,
       pidfilePath: vm.vmPidFile(vmDir, record.id),
       isoPath: bootFromMedia ? isoPath : null,
       bootFromMedia,
@@ -5661,21 +5696,46 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
     return { started: false, error: error.message };
   }
 
+  // QEMU's own words, on disk. Its reasons for not producing a guest ("no ide bus", an
+  // unusable accelerator, unreadable media) are printed to stderr, which 'ignore' threw
+  // away: that silence is what made a blank console impossible to explain.
+  const qemuLogPath = vmQemuLogPath();
+  appendLog(qemuLogPath, `Starting "${record.name}" (QEMU ${status.qemuSystem}): ${args.join(' ')}`);
+  // Where this start begins in the log, so a failure is explained by what QEMU said this
+  // time rather than by a message from an older start.
+  const logStart = fileSize(qemuLogPath);
+  let stderrFd = null;
+  try {
+    stderrFd = fs.openSync(qemuLogPath, 'a');
+  } catch (error) {
+    stderrFd = null;
+  }
+
   let child;
   try {
     // No native window: the guest is drawn by RunContainer through the console below.
-    child = spawn(status.qemuSystem, args, { detached: true, windowsHide: true, stdio: 'ignore' });
+    child = spawn(status.qemuSystem, args, {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', stderrFd === null ? 'ignore' : stderrFd],
+    });
     await new Promise((resolve, reject) => {
       child.once('spawn', resolve);
       child.once('error', reject);
     });
   } catch (error) {
+    if (stderrFd !== null) { try { fs.closeSync(stderrFd); } catch (closeError) { /* gone */ } }
     releaseVmSlot(record.id);
     return { started: false, error: `QEMU could not be started: ${String(error.message).slice(0, 300)}` };
   }
+  // The child holds its own handle, so this process closes its copy: the machine then keeps
+  // running and keeps logging even if RunContainer is killed.
+  if (stderrFd !== null) { try { fs.closeSync(stderrFd); } catch (closeError) { /* gone */ } }
   child.unref();
   vmProcs.set(record.id, child);
+  let qemuExitCode = null;
   child.on('exit', (code) => {
+    qemuExitCode = code;
     if (vmProcs.get(record.id) === child) {
       vmProcs.delete(record.id);
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Virtual machine ${record.name} stopped (QEMU exit code ${code}).`);
@@ -5701,7 +5761,15 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
   if (!ready) {
     stopVmProcess(record.id);
     notifyVmStatus();
-    return { started: false, error: 'QEMU started but its console never opened, so the VM was stopped. Check that hardware acceleration works on this PC.' };
+    // QEMU's own words rather than a guess. A console that never opens is nearly always
+    // QEMU refusing an argument and exiting at once — a QEMU that runs but cannot draw is
+    // rare — and saying "check hardware acceleration" sent the reader in the wrong
+    // direction when the real answer was already on disk.
+    const said = logTextSince(qemuLogPath, logStart);
+    return {
+      started: false,
+      error: `The machine did not open its console${qemuExitCode === null ? '' : ` (QEMU exited with code ${qemuExitCode})`}${said ? `: ${said}` : '.'} It was stopped. Details are in vm-qemu.log.`,
+    };
   }
   return {
     started: true,
