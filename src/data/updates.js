@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.8.0',
+    date: '2026-10-27',
+    title: 'Apps that need administrator approval now render inside RunContainer, and Stop no longer leaves a blank window',
+    changes: [
+      'Fixed an app that opened as a bare window on the desktop after its installer finished. Every app that needs administrator rights is hosted by the elevated launcher rather than by RunContainer itself, because Windows will not let a normal-integrity process re-parent an elevated window. That host window destroyed itself 30 seconds after the launch if it had not found a window to adopt yet, which is exactly what a self-extracting installer or a download-then-install wizard looks like: the wizard, and later the app it started, appeared outside RunContainer with nothing left to host them. The host now stays for as long as the contained tree is alive and only goes once the tree itself is gone.',
+      'An installer that showed more than one window only had its first one rendered. The host stopped looking once it had adopted a window, so a wizard’s second window - the progress dialog or the finish page - stayed on the desktop, which is what “renders in the app but not fully” was. Every window the app owns is now adopted: the largest fills the host, and a dialog keeps its own size, centred, instead of being stretched edge to edge.',
+      'Fixed the last step of that same path: the app an installer starts was no longer recognised once the installer had exited. Window matching walked up the parent process chain, and an orphaned app no longer leads back to the process RunContainer launched, so its window was never adopted and it opened on the desktop. Membership of the containment job is inherited by everything the installer starts and outlives the parent chain, so that is what identifies the window now. Where no administrator approval is involved, the app a setup produced is hosted as soon as setup completes, with a longer budget for an installer that starts it a moment after exiting, and that launch is now awaited so the result the interface reports is the real one instead of an optimistic one.',
+      'Fixed Stop leaving a blank screen. The app’s window was released back to the desktop after the RunContainer window showing it had already been closed, so the release had nowhere left to run and the window was left empty. The window is released first and closed second, and closing that window by hand follows the same order.',
+    ],
+  },
+  {
     version: '0.7.9',
     date: '2026-10-27',
     title: 'RC-Brain 5, an installer that shows its work, JIT on demand, and a first launch that explains the whole app',
