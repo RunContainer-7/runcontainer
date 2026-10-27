@@ -39,3 +39,11 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+      # The one promise none of the checks above can see: that pressing Run really draws
+      # the app's window INSIDE a RunContainer window. This launches the built app, runs a
+      # real graphical program through it, and asks Windows where that window is. It needs
+      # the production build, so it runs last, and a runner with no interactive desktop
+      # reports that rather than a false failure.
+      - name: Window hosting on real Windows (run draws the app inside RunContainer)
+        run: node scripts/windows-host-verify.js

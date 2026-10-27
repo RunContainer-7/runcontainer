@@ -137,4 +137,47 @@ describe('what the interface is told about a VM', () => {
     expect(vm.summarizeVm(null)).toBeNull();
     expect(vm.summarizeVm(record, { running: false }).consolePort).toBeNull();
   });
+
+  it('shows a machine whose QEMU process outlived the app as running, not stopped', () => {
+    // The bug this covers: the process is detached, so it survives RunContainer closing.
+    // The record then said "Stopped" while QEMU still held the disk and the console port,
+    // and Start would have booted a second machine on that same disk.
+    const records = [
+      { id: 'a', name: 'Left over', qemuPid: 4242 },
+      { id: 'b', name: 'Really stopped', qemuPid: 1111 },
+      { id: 'c', name: 'Never started' },
+    ];
+    const seen = vm.reconcileVmRecords(records, { isAlive: (pid) => pid === 4242 });
+    expect(seen[0]).toMatchObject({ status: 'Running', leftover: true, qemuPid: 4242 });
+    expect(seen[1]).toMatchObject({ status: 'Stopped', leftover: false, qemuPid: 1111 });
+    expect(seen[2]).toMatchObject({ status: 'Stopped', leftover: false, qemuPid: null });
+    // With nothing to ask, nothing may be claimed as running.
+    expect(vm.reconcileVmRecords(records)[0].status).toBe('Stopped');
+    expect(vm.reconcileVmRecords(null)).toEqual([]);
+  });
+
+  it('reads a pid out of a pid file, and reads nothing out of nonsense', () => {
+    expect(vm.readVmPid('4242')).toBe(4242);
+    expect(vm.readVmPid('4242\n')).toBe(4242);
+    expect(vm.readVmPid('')).toBeNull();
+    expect(vm.readVmPid('not a pid')).toBeNull();
+    expect(vm.readVmPid('-5')).toBeNull();
+    expect(vm.readVmPid(undefined)).toBeNull();
+  });
+
+  it('refuses to start a machine whose disk is still in use, and says why', () => {
+    expect(vm.vmStartRefusal({ running: true, diskPath: 'C:\\vms\\d.qcow2', diskExists: true }))
+      .toContain('already running');
+    expect(vm.vmStartRefusal({ leftover: true, diskPath: 'C:\\vms\\d.qcow2', diskExists: true }))
+      .toContain('previous session');
+    expect(vm.vmStartRefusal({ diskPath: '', diskExists: false })).toContain('no disk image');
+    expect(vm.vmStartRefusal({ diskPath: 'C:\\vms\\gone.qcow2', diskExists: false })).toContain('missing');
+    expect(vm.vmStartRefusal({ diskPath: 'C:\\vms\\d.qcow2', diskExists: true })).toBeNull();
+  });
+
+  it('keeps a pid file path inside the VM directory, or refuses', () => {
+    expect(vm.vmPidFile('C:\\vms', 'vm-abc-123')).toBe('C:\\vms\\vm-abc-123.pid');
+    expect(() => vm.vmPidFile('C:\\vms', '../escape')).toThrow();
+    expect(() => vm.vmPidFile('', 'vm-1')).toThrow();
+  });
 });

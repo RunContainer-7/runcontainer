@@ -1965,6 +1965,12 @@ function handleWindowHostEvent(appRecord, state, event, logPath) {
     state.ready = true;
     state.readyAt = Date.now();
     if (!state.watchStartedAt) state.watchStartedAt = Date.now();
+    // A host that was slow to start (its assembly is compiled on first use, and the cache
+    // is cold on a new install or after an update) must not cost the whole launch: the
+    // wait before launching can time out and still leave the host watching a moment later.
+    // Clearing the backoff lets the hosting call that follows the launch adopt the live
+    // host instead of giving up on this Run because of a clock.
+    windowHostBackoff.delete(appRecord.id);
     appendLog(logPath, 'Window host is watching for this app’s window.');
   } else if (event.event === 'embedded') {
     state.embedded = true;
@@ -2173,6 +2179,19 @@ function closeGuestWindow(appId) {
   if (!win || win.isDestroyed()) return;
   win.__rcClosing = true;
   guestWindows.delete(appId);
+  // Windows destroys a child window together with its parent, and a hosted app window IS a
+  // child of this one. So a window that is still hosting something releases it to the
+  // desktop first: without that, closing this window would close the app's own window, and
+  // a WinForms or WPF app whose last window is destroyed simply exits.
+  if (win.__rcHostPid) {
+    const record = getStoredApp(appId) || { id: appId };
+    releaseGuestWindowWindows(record, [...trackedPids(record), win.__rcHostPid])
+      .catch(() => {})
+      .finally(() => {
+        if (!win.isDestroyed()) win.destroy();
+      });
+    return;
+  }
   win.destroy();
 }
 
@@ -3708,12 +3727,31 @@ app.whenReady().then(() => {
   }
   createWindow();
   startBehavioralSupervisor();
+  // A virtual machine from a previous session still holds its disk and its console port,
+  // so it is stopped rather than left running invisibly (see reconcileVirtualMachines).
+  try {
+    reconcileVirtualMachines();
+  } catch (error) {
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Virtual machines could not be reconciled at startup: ${error.message}`);
+  }
   // Icon extraction is one short PowerShell call per app and keeps startup fast.
   backfillAppIcons().catch(() => {});
   // Warm the window host in the background after the UI is up, so the first Run does
   // not pay for compiling it.
   const warm = setTimeout(prewarmWindowHost, 1500);
   if (warm.unref) warm.unref();
+});
+
+app.on('before-quit', () => {
+  // Closing RunContainer stops the machines it started: each one owns a disk and a console
+  // port, and there is no window left to show it in once the app is gone.
+  if (vmProcs.size > 0 || loadVmStore().vms.some((record) => record.qemuPid)) {
+    try {
+      reconcileVirtualMachines();
+    } catch (error) {
+      // Quitting must not be blocked by a machine that refuses to stop.
+    }
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -5382,10 +5420,42 @@ function releaseVmSlot(id) {
   vmSlots.delete(id);
 }
 
+// Whether a pid still exists. Windows offers no direct call for this, so signal 0 is used:
+// it throws ESRCH when the process is gone and EPERM when it exists but is not ours.
+function isProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+// A machine whose QEMU process is alive but was not started by this session: the app was
+// closed (or killed) while it ran, and its detached process kept the disk and the console
+// port. Nothing may start it again until that process is gone.
+function vmLeftoverPid(record) {
+  const vm = require('./vm-runtime');
+  const pid = vm.readVmPid(record?.qemuPid);
+  return Number.isSafeInteger(pid) && isProcessAlive(pid) ? pid : null;
+}
+
+function forgetVmPid(id, logPath) {
+  const latest = findVm(id);
+  if (!latest || !latest.qemuPid) return;
+  saveVmRecord({ ...latest, qemuPid: null });
+  if (logPath) appendLog(logPath, `Virtual machine ${latest.name} no longer has a running QEMU process; its record was cleared.`);
+}
+
 function describeVms() {
   const vm = require('./vm-runtime');
-  return loadVmStore().vms.map((record) => vm.summarizeVm(record, {
-    running: isVmRunning(record.id),
+  const stored = loadVmStore().vms;
+  const reconciled = vm.reconcileVmRecords(stored, { isAlive: isProcessAlive });
+  return stored.map((record, index) => vm.summarizeVm(record, {
+    // A machine that outlived the app is running, whatever this session's process map
+    // knows: saying "Stopped" is what let a second machine be started on one disk.
+    running: isVmRunning(record.id) || Boolean(reconciled[index]?.leftover),
     consoleSlot: vmSlots.has(record.id) ? vmSlots.get(record.id) : null,
   })).filter(Boolean);
 }
@@ -5411,9 +5481,38 @@ function stopVmProcess(id) {
   if (child) {
     vmProcs.delete(id);
     try { child.kill(); } catch (error) { /* already gone */ }
+  } else {
+    // No handle: the machine was left running by a previous session, and the pid in its
+    // record is the only way to stop it. Leaving it alive would keep the disk locked, so
+    // the stop is attempted here rather than only reported.
+    const pid = vmLeftoverPid(findVm(id));
+    if (pid) {
+      try {
+        const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        killer.on('error', () => {});
+      } catch (error) {
+        // The caller reports what is still running; nothing here can do more.
+      }
+    }
   }
+  forgetVmPid(id);
   closeVmConsole(id);
   releaseVmSlot(id);
+}
+
+// A machine holds a disk and a console port, so RunContainer does not leave one behind
+// when it closes. Called once at startup as well, for the case where the app was killed
+// rather than closed and the previous session never got the chance.
+function reconcileVirtualMachines() {
+  const vm = require('./vm-runtime');
+  const logPath = path.join(app.getPath('userData'), 'runcontainer-error.log');
+  const leftovers = vm.reconcileVmRecords(loadVmStore().vms, { isAlive: isProcessAlive })
+    .filter((row) => row.leftover);
+  if (leftovers.length === 0) return 0;
+  appendLog(logPath, `${leftovers.length} virtual machine(s) were still running from a previous session; stopping them, because each one holds its disk and its console port.`);
+  for (const row of leftovers) stopVmProcess(row.id);
+  notifyVmStatus();
+  return leftovers.length;
 }
 
 // Is anything already listening on the console port? QEMU would fail to bind and the
@@ -5510,10 +5609,16 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
   const vm = require('./vm-runtime');
   const record = findVm(requested.id);
   if (!record) return { started: false, error: 'That virtual machine is not in RunContainer\u2019s list.' };
-  if (isVmRunning(record.id)) return { started: false, error: 'That virtual machine is already running.' };
-  if (!record.diskPath || !fs.existsSync(record.diskPath)) {
-    return { started: false, error: 'This VM\u2019s disk image is missing, so there is nothing to boot.' };
-  }
+  // Two machines on one disk is the one mistake here that cannot be repaired afterwards,
+  // so this refuses before QEMU is touched — including when the previous session's QEMU
+  // process is still holding the disk.
+  const refusal = vm.vmStartRefusal({
+    running: isVmRunning(record.id),
+    leftover: Boolean(vmLeftoverPid(record)),
+    diskPath: record.diskPath,
+    diskExists: Boolean(record.diskPath && fs.existsSync(record.diskPath)),
+  });
+  if (refusal) return { started: false, error: refusal };
   const status = await refreshQemuStatus();
   if (!status.qemuSystem) return { started: false, error: 'QEMU is not detected on this PC yet.' };
 
@@ -5547,7 +5652,7 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
       consoleSlot: slot,
       qmpPort: 44800 + slot,
       agentPipe: `\\\\.\\pipe\\rc-vm-${record.id}`,
-      pidfilePath: path.join(vmDir, `${record.id}.pid`),
+      pidfilePath: vm.vmPidFile(vmDir, record.id),
       isoPath: bootFromMedia ? isoPath : null,
       bootFromMedia,
     });
@@ -5575,13 +5680,23 @@ ipcMain.handle('vm-start', async (_event, requested = {}) => {
       vmProcs.delete(record.id);
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Virtual machine ${record.name} stopped (QEMU exit code ${code}).`);
     }
+    // The machine is gone, so its record must stop pointing at a pid that no longer
+    // exists: a stale pid is what makes the next Start refuse for the wrong reason.
+    forgetVmPid(record.id);
     closeVmConsole(record.id);
     releaseVmSlot(record.id);
     notifyVmStatus();
   });
 
   const ready = await waitForPort(consolePort);
-  const updated = saveVmRecord({ ...record, lastBootAt: new Date().toISOString(), accel: status.accel || 'tcg' });
+  // The pid is stored so a machine that outlives this session is recognisable at the next
+  // startup — and so Pressing Start cannot boot a second QEMU on the same disk.
+  const updated = saveVmRecord({
+    ...record,
+    lastBootAt: new Date().toISOString(),
+    accel: status.accel || 'tcg',
+    qemuPid: child.pid,
+  });
   notifyVmStatus();
   if (!ready) {
     stopVmProcess(record.id);

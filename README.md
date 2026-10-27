@@ -96,6 +96,18 @@ npm test        # run the test suite
 
 On Windows you can also double-click `run.bat`, which installs dependencies and opens the app.
 
+## Verify the promise on real Windows
+
+The point of RunContainer is that pressing Run draws the app's window INSIDE a RunContainer window. Unit tests cannot see that, so it is checked by running the real app:
+
+```bash
+npm run build
+node scripts/windows-host-verify.js      # Run draws the app inside RunContainer
+node scripts/windows-verify.js           # isolation, container tokens, deletion on real Windows
+```
+
+`windows-host-verify.js` installs a real graphical program through the app's own IPC, presses Run, and asks Windows where that window is: it must be a child window of the RunContainer window, visible and sensibly sized, with no copy left on the desktop. It also checks that a virtual machine which outlived the app is stopped at startup rather than left holding its disk. Both run in CI (`.github/workflows/windows-verify.yml`). It uses its own data directory, so nothing of yours is touched.
+
 ## Project layout
 
 ```
@@ -113,7 +125,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.8.2 && git push origin v0.8.2
+git tag v0.8.3 && git push origin v0.8.3
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

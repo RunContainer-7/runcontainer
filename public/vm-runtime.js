@@ -173,8 +173,65 @@ function summarizeVm(record, { running = false, consoleSlot = null } = {}) {
   };
 }
 
+// --- Lifecycle: a machine must not outlive the app invisibly --------------------------
+//
+// A VM runs in its own process, so a guest keeps running while the interface is busy.
+// That process is detached, which means it also survives RunContainer being closed or
+// killed — and the record on disk was the only thing that knew nothing about it. A machine
+// that was really running, holding its disk and its console port, was therefore drawn as
+// "Stopped", and pressing Start would have booted a SECOND QEMU on the same disk, which is
+// how a guest's filesystem gets corrupted. The record now carries the QEMU pid, and
+// everything that decides whether a machine may be started asks the real world first.
+
+// QEMU is given this path with -pidfile, so the number is written by QEMU itself rather
+// than guessed from a process list.
+function vmPidFile(vmDir, id) {
+  if (!vmDir || !id) throw new Error('A VM pid file needs a directory and an id.');
+  if (!/^[a-z0-9-]+$/i.test(id)) throw new Error(`Refusing to build a pid path from "${id}".`);
+  return `${vmDir}\\${id}.pid`;
+}
+
+// A pid file survives the process that wrote it, so the number in it means nothing on its
+// own: only the caller can say whether that process is still alive.
+function readVmPid(value) {
+  const pid = Number(String(value === undefined || value === null ? '' : value).trim().split(/\s+/)[0]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+// The status the interface should show for each stored machine, and whether its disk is
+// still held by a QEMU process this session did not start.
+function reconcileVmRecords(records, { isAlive } = {}) {
+  const alive = typeof isAlive === 'function' ? isAlive : () => false;
+  return (Array.isArray(records) ? records : []).map((record) => {
+    const pid = readVmPid(record?.qemuPid);
+    const leftover = Number.isSafeInteger(pid) && alive(pid);
+    return {
+      id: record?.id,
+      name: record?.name || 'Virtual machine',
+      qemuPid: Number.isSafeInteger(pid) ? pid : null,
+      leftover,
+      status: leftover ? 'Running' : 'Stopped',
+    };
+  });
+}
+
+// Why a machine may not be started right now, in the words the interface shows. This
+// refuses before QEMU is touched rather than starting and hoping: two machines on one disk
+// is the one mistake here that cannot be repaired afterwards.
+function vmStartRefusal({ running, leftover, diskPath, diskExists } = {}) {
+  if (running) return 'That virtual machine is already running.';
+  if (leftover) return 'This machine is still running from a previous session, so its disk is in use. Stop it first — starting it again would boot a second machine on the same disk.';
+  if (!diskPath) return 'This VM has no disk image recorded, so there is nothing to boot.';
+  if (diskExists === false) return 'This VM\u2019s disk image is missing, so there is nothing to boot.';
+  return null;
+}
+
 module.exports = {
   VM_LIMITS,
+  vmPidFile,
+  readVmPid,
+  reconcileVmRecords,
+  vmStartRefusal,
   VM_CONSOLE_FIRST_DISPLAY,
   VM_CONSOLE_SLOTS,
   VM_STATUSES,

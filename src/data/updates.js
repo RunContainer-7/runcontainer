@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.8.3',
+    date: '2026-10-27',
+    title: 'Run really renders the app inside RunContainer — and that is now checked on real Windows, not assumed',
+    changes: [
+      'An app you run is checked to be inside a RunContainer window, on real Windows, by a new verification you can run yourself: `node scripts/windows-host-verify.js`. It starts the real app, installs a real graphical program through the app\u2019s own IPC, presses Run, and then asks Windows where that program\u2019s window actually is. The window must be a CHILD of the RunContainer window, visible, and large enough to be a window at all — and no copy of it may be left on the desktop. Every earlier check in this repository tested a piece (the launcher, the host script, the process scoping); none of them ever ran the app and looked at the windows that came out, which is why this could be reported without a failing test to point at. It now runs in the Windows verification workflow as well.',
+      'Fixed the case that made Run appear to do nothing for a launch: the window host compiles its Win32 assembly the first time it is used, and on a new install or straight after an update that compile can take longer than the app waits before launching. RunContainer then concluded that hosting was unavailable, closed the window it had just opened, and refused to try again for twenty seconds — so the app opened on the desktop and stayed there. A host that reports it is watching now clears that refusal, so the catch-up attempt that follows a launch adopts it and the app ends up inside RunContainer, as it should.',
+      'Fixed closing a RunContainer window closing the app\u2019s own window. A hosted window is a CHILD window of the RunContainer window, and Windows destroys a child with its parent \u2014 so destroying the host took the app\u2019s window with it, and an app whose last window disappears simply exits. A host window still holding a window now releases it to the desktop before it is destroyed.',
+      'Fixed virtual machines that outlived the app that started them. A VM runs detached so the guest keeps working while the interface is busy, which also means it survives RunContainer being closed or killed \u2014 and nothing recorded its process. The machine was then drawn as Stopped while its QEMU process still held its virtual disk and its console port, and pressing Start would have booted a SECOND machine on the same disk, which corrupts a guest filesystem beyond repair. Each machine\u2019s QEMU pid is now part of its record: RunContainer stops machines that outlived the previous session at startup, stops them when it quits, refuses to start a machine whose disk is still in use and says so in those words, can stop one by its recorded pid when it has no process handle, and clears the pid the moment QEMU exits.',
+      'A virtual-machine state is now measured rather than remembered: the list asks whether the recorded QEMU process is really alive, so \u201cRunning\u201d and \u201cStopped\u201d mean what they say even after a crash. 4 new tests cover the pid file, the reconciliation and the refusal to start a machine twice.',
+      'If the interface still looks like an older version after updating, run the installer again and let it close RunContainer first: files that are in use cannot be replaced while the app is running, and a half-replaced installation keeps the old interface while reporting the new version.',
+    ],
+  },
+  {
     version: '0.8.2',
     date: '2026-10-27',
     title: 'Developer mode: a plain interface by default, and a Virtualise tab that runs a whole operating system inside RunContainer',
