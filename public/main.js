@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const net = require('net');
 const https = require('https');
 const crypto = require('crypto');
 const os = require('os');
@@ -119,7 +120,7 @@ const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json'
 const preferencesPath = path.join(app.getPath('userData'), 'runcontainer-preferences.json');
 // Only these keys may be written: a preference write is not a general settings
 // back door, and an unknown key is dropped rather than stored.
-const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion']);
+const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt']);
 
 function loadPreferences() {
   try {
@@ -5319,6 +5320,371 @@ ipcMain.handle('qemu-set-guest-exe', async (_event, requestedAppRecord) => {
   const updated = { ...appRecord, installedExeGuestPath: guestPath };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
   return { id: appRecord.id, status: updated.status, installedExeGuestPath: guestPath };
+});
+
+// --- Virtual machines (developer mode) ----------------------------------------
+// A VM here is a whole operating system, installed from media the user owns, running
+// on the same custom QEMU backend as the VM engine. QEMU draws no window of its own:
+// its display is a VNC server bound to loopback, and the main process proxies that
+// socket to the renderer, which paints the guest inside a RunContainer window and
+// sends its keyboard and mouse input back. This is experimental, and the interface
+// says so where a VM is created.
+const vmStorePath = path.join(app.getPath('userData'), 'runcontainer-vms.json');
+const vmProcs = new Map();
+const vmSockets = new Map();
+const vmSlots = new Map();
+
+function loadVmStore() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(vmStorePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && Array.isArray(parsed.vms) ? parsed : { vms: [] };
+  } catch (error) {
+    return { vms: [] };
+  }
+}
+
+function saveVmStore(store) {
+  fs.writeFileSync(vmStorePath, `${JSON.stringify({ vms: store.vms || [] }, null, 2)}\n`, 'utf8');
+}
+
+function findVm(id) {
+  return loadVmStore().vms.find((entry) => entry.id === id) || null;
+}
+
+function saveVmRecord(updated) {
+  const store = loadVmStore();
+  saveVmStore({ vms: store.vms.map((entry) => (entry.id === updated.id ? updated : entry)) });
+  return updated;
+}
+
+function isVmRunning(id) {
+  const child = vmProcs.get(id);
+  return Boolean(child) && child.exitCode === null && !child.killed;
+}
+
+// Lowest free console slot, so two VMs never claim one port.
+function claimVmSlot(id) {
+  const vm = require('./vm-runtime');
+  const taken = new Set();
+  for (const [other, slot] of vmSlots.entries()) {
+    if (other !== id) taken.add(slot);
+  }
+  for (let slot = 0; slot < vm.VM_CONSOLE_SLOTS; slot += 1) {
+    if (!taken.has(slot)) {
+      vmSlots.set(id, slot);
+      return slot;
+    }
+  }
+  throw new Error('Every VM console slot is in use. Stop another virtual machine first.');
+}
+
+function releaseVmSlot(id) {
+  vmSlots.delete(id);
+}
+
+function describeVms() {
+  const vm = require('./vm-runtime');
+  return loadVmStore().vms.map((record) => vm.summarizeVm(record, {
+    running: isVmRunning(record.id),
+    consoleSlot: vmSlots.has(record.id) ? vmSlots.get(record.id) : null,
+  })).filter(Boolean);
+}
+
+function notifyVmStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vm-status', describeVms());
+  }
+}
+
+function closeVmConsole(id) {
+  const socket = vmSockets.get(id);
+  if (!socket) return;
+  vmSockets.delete(id);
+  try { socket.destroy(); } catch (error) { /* already closed */ }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vm-console-status', { id, state: 'closed' });
+  }
+}
+
+function stopVmProcess(id) {
+  const child = vmProcs.get(id);
+  if (child) {
+    vmProcs.delete(id);
+    try { child.kill(); } catch (error) { /* already gone */ }
+  }
+  closeVmConsole(id);
+  releaseVmSlot(id);
+}
+
+// Is anything already listening on the console port? QEMU would fail to bind and the
+// reason would only reach the log, so the port is checked before QEMU is started.
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', (error) => resolve(error.code !== 'EADDRINUSE'));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+function waitForPort(port, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const attempt = () => {
+      const socket = net.connect(port, '127.0.0.1');
+      socket.once('connect', () => { socket.destroy(); resolve(true); });
+      socket.once('error', () => {
+        socket.destroy();
+        if (Date.now() > deadline) resolve(false);
+        else setTimeout(attempt, 300);
+      });
+    };
+    attempt();
+  });
+}
+
+ipcMain.handle('vm-list', async () => ({ vms: describeVms() }));
+
+ipcMain.handle('vm-browse-iso', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select installation media (an operating system you own)',
+    filters: [{ name: 'Disk images', extensions: ['iso', 'img'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { path: null };
+  return { path: result.filePaths[0] };
+});
+
+ipcMain.handle('vm-create', async (_event, config = {}) => {
+  const vm = require('./vm-runtime');
+  const qemu = require('./qemu-runtime');
+  const isoPath = config.isoPath ? String(config.isoPath) : null;
+  if (isoPath && !fs.existsSync(isoPath)) {
+    return { created: false, error: 'That installation media is no longer there.' };
+  }
+  const check = vm.validateVmConfig({
+    name: config.name,
+    memoryMB: config.memoryMB,
+    cpuCount: config.cpuCount,
+    diskGB: config.diskGB,
+    isoPath,
+  });
+  if (!check.ok) return { created: false, error: check.errors.join(' ') };
+  if (loadVmStore().vms.some((entry) => entry.name.toLowerCase() === String(config.name).trim().toLowerCase())) {
+    return { created: false, error: 'A virtual machine with that name already exists.' };
+  }
+  const status = await refreshQemuStatus();
+  if (!status.qemuSystem) {
+    return { created: false, error: 'QEMU is not detected on this PC yet. Install it, then press Detect.' };
+  }
+  if (!status.qemuImg) {
+    return { created: false, error: 'qemu-img was not found next to qemu-system, so the virtual disk cannot be created.' };
+  }
+  const record = vm.defaultVmRecord({
+    name: config.name,
+    memoryMB: config.memoryMB,
+    cpuCount: config.cpuCount,
+    diskGB: config.diskGB,
+    isoPath,
+    accel: status.accel || 'tcg',
+  });
+  const vmDir = path.join(app.getPath('userData'), 'vms');
+  fs.mkdirSync(vmDir, { recursive: true });
+  const diskPath = vm.vmDiskPath(vmDir, record.id);
+  if (fs.existsSync(diskPath)) {
+    return { created: false, error: `A disk image already exists at ${diskPath}.` };
+  }
+  try {
+    await executeFile(status.qemuImg, qemu.buildImgCreateArgs({ diskPath, sizeGB: record.diskGB }), { timeout: 180000 });
+  } catch (error) {
+    return { created: false, error: `The virtual disk could not be created: ${String(error.message).slice(0, 300)}` };
+  }
+  const created = { ...record, diskPath };
+  const store = loadVmStore();
+  saveVmStore({ vms: [...store.vms, created] });
+  appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Created virtual machine ${created.name} (${created.diskGB} GB disk, ${created.memoryMB} MB memory).`);
+  return { created: true, vms: describeVms(), vm: vm.summarizeVm(created, { running: false }) };
+});
+
+ipcMain.handle('vm-start', async (_event, requested = {}) => {
+  const vm = require('./vm-runtime');
+  const record = findVm(requested.id);
+  if (!record) return { started: false, error: 'That virtual machine is not in RunContainer\u2019s list.' };
+  if (isVmRunning(record.id)) return { started: false, error: 'That virtual machine is already running.' };
+  if (!record.diskPath || !fs.existsSync(record.diskPath)) {
+    return { started: false, error: 'This VM\u2019s disk image is missing, so there is nothing to boot.' };
+  }
+  const status = await refreshQemuStatus();
+  if (!status.qemuSystem) return { started: false, error: 'QEMU is not detected on this PC yet.' };
+
+  // Media is re-attached only when it is still there. A VM whose system is already
+  // installed boots from its disk; the checkbox in the interface decides whether the
+  // attached media is tried first.
+  const isoPath = record.isoPath && fs.existsSync(record.isoPath) ? record.isoPath : null;
+  const bootFromMedia = Boolean(isoPath) && record.bootFromMedia !== false;
+
+  let slot;
+  try {
+    slot = claimVmSlot(record.id);
+  } catch (error) {
+    return { started: false, error: error.message };
+  }
+  const consolePort = vm.consolePortFor(slot);
+  if (!(await isPortFree(consolePort))) {
+    releaseVmSlot(record.id);
+    return { started: false, error: `Console port ${consolePort} is already in use by another program.` };
+  }
+
+  const vmDir = path.dirname(record.diskPath);
+  let args;
+  try {
+    args = vm.buildVmBootArgs({
+      accel: status.accel || 'tcg',
+      memoryMB: record.memoryMB,
+      cpuCount: record.cpuCount,
+      diskPath: record.diskPath,
+      vmName: `RunContainer-${record.name}`.slice(0, 60),
+      consoleSlot: slot,
+      qmpPort: 44800 + slot,
+      agentPipe: `\\\\.\\pipe\\rc-vm-${record.id}`,
+      pidfilePath: path.join(vmDir, `${record.id}.pid`),
+      isoPath: bootFromMedia ? isoPath : null,
+      bootFromMedia,
+    });
+  } catch (error) {
+    releaseVmSlot(record.id);
+    return { started: false, error: error.message };
+  }
+
+  let child;
+  try {
+    // No native window: the guest is drawn by RunContainer through the console below.
+    child = spawn(status.qemuSystem, args, { detached: true, windowsHide: true, stdio: 'ignore' });
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+  } catch (error) {
+    releaseVmSlot(record.id);
+    return { started: false, error: `QEMU could not be started: ${String(error.message).slice(0, 300)}` };
+  }
+  child.unref();
+  vmProcs.set(record.id, child);
+  child.on('exit', (code) => {
+    if (vmProcs.get(record.id) === child) {
+      vmProcs.delete(record.id);
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Virtual machine ${record.name} stopped (QEMU exit code ${code}).`);
+    }
+    closeVmConsole(record.id);
+    releaseVmSlot(record.id);
+    notifyVmStatus();
+  });
+
+  const ready = await waitForPort(consolePort);
+  const updated = saveVmRecord({ ...record, lastBootAt: new Date().toISOString(), accel: status.accel || 'tcg' });
+  notifyVmStatus();
+  if (!ready) {
+    stopVmProcess(record.id);
+    notifyVmStatus();
+    return { started: false, error: 'QEMU started but its console never opened, so the VM was stopped. Check that hardware acceleration works on this PC.' };
+  }
+  return {
+    started: true,
+    consolePort,
+    vms: describeVms(),
+    vm: vm.summarizeVm(updated, { running: true, consoleSlot: slot }),
+    note: bootFromMedia
+      ? 'The virtual machine is booting from the attached media. Install the system as you would in VirtualBox, then shut it down — later boots can start from its disk.'
+      : 'The virtual machine is booting from its own disk.',
+  };
+});
+
+ipcMain.handle('vm-stop', async (_event, requested = {}) => {
+  const record = findVm(requested.id);
+  if (!record) return { stopped: false, error: 'That virtual machine is not in RunContainer\u2019s list.' };
+  if (!isVmRunning(record.id)) return { stopped: false, error: 'That virtual machine is not running.' };
+  stopVmProcess(record.id);
+  notifyVmStatus();
+  return { stopped: true, vms: describeVms() };
+});
+
+ipcMain.handle('vm-delete', async (_event, requested = {}) => {
+  const record = findVm(requested.id);
+  if (!record) return { deleted: false, error: 'That virtual machine is not in RunContainer\u2019s list.' };
+  stopVmProcess(record.id);
+  // The disk is this VM's whole operating system: removing it is the point of Delete,
+  // so it is attempted after the process is gone and its failure is reported rather
+  // than hidden.
+  let diskRemoved = true;
+  if (record.diskPath && fs.existsSync(record.diskPath)) {
+    try {
+      fs.rmSync(record.diskPath, { force: true });
+    } catch (error) {
+      diskRemoved = false;
+    }
+  }
+  const store = loadVmStore();
+  saveVmStore({ vms: store.vms.filter((entry) => entry.id !== record.id) });
+  notifyVmStatus();
+  return {
+    deleted: true,
+    diskRemoved,
+    vms: describeVms(),
+    note: diskRemoved ? null : 'The VM was removed from the list but its disk image is still on this PC.',
+  };
+});
+
+// The guest console: one loopback TCP socket per VM, bridged to the window that draws
+// it. Nothing outside 127.0.0.1 is ever connected to, and the socket only exists while
+// that VM is running.
+ipcMain.handle('vm-console-connect', async (_event, requested = {}) => {
+  const vm = require('./vm-runtime');
+  const record = findVm(requested.id);
+  if (!record) return { connected: false, error: 'That virtual machine is not in RunContainer\u2019s list.' };
+  if (!isVmRunning(record.id)) return { connected: false, error: 'Start the virtual machine first.' };
+  const slot = vmSlots.get(record.id);
+  if (!Number.isSafeInteger(slot)) return { connected: false, error: 'This VM has no console port assigned.' };
+  closeVmConsole(record.id);
+  const port = vm.consolePortFor(slot);
+  const socket = net.connect(port, '127.0.0.1');
+  vmSockets.set(record.id, socket);
+  socket.on('data', (chunk) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vm-console-data', { id: record.id, bytes: chunk });
+    }
+  });
+  socket.on('error', (error) => {
+    if (vmSockets.get(record.id) === socket) vmSockets.delete(record.id);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vm-console-status', { id: record.id, state: 'error', error: String(error.message || error) });
+    }
+  });
+  socket.on('close', () => {
+    if (vmSockets.get(record.id) === socket) vmSockets.delete(record.id);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vm-console-status', { id: record.id, state: 'closed' });
+    }
+  });
+  socket.once('connect', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('vm-console-status', { id: record.id, state: 'connected', port });
+    }
+  });
+  return { connected: true, port };
+});
+
+ipcMain.handle('vm-console-write', async (_event, requested = {}) => {
+  const socket = vmSockets.get(requested.id);
+  if (!socket || socket.destroyed) return { written: false, error: 'The console is not connected.' };
+  const bytes = requested.bytes;
+  if (!bytes || typeof bytes.length !== 'number') return { written: false, error: 'No console input was provided.' };
+  socket.write(Buffer.from(bytes));
+  return { written: true };
+});
+
+ipcMain.handle('vm-console-disconnect', async (_event, requested = {}) => {
+  closeVmConsole(requested.id);
+  return { disconnected: true };
 });
 
 // Documented project links only (docs site, YouTube channel, Discord, source). The

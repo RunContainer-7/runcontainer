@@ -3,7 +3,7 @@ import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
 import AppErrorBoundary from "./AppErrorBoundary";
-import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig } from "../services/containerService";
+import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig, listVms } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -79,6 +79,19 @@ jest.mock("../services/containerService", () => ({
   // panel every other test is looking at. The tests that are about it opt in.
   getPreferences: jest.fn(async () => ({ beginnerSetupSeen: true })),
   setPreference: jest.fn(async (patch) => patch),
+  // Virtual machines (developer mode).
+  listVms: jest.fn(async () => ({ vms: [] })),
+  browseVmIso: jest.fn(async () => ({ path: null })),
+  createVm: jest.fn(async () => ({ created: true, vm: { id: "vm-new", name: "Test VM" }, vms: [] })),
+  startVm: jest.fn(async () => ({ started: true, vms: [] })),
+  stopVm: jest.fn(async () => ({ stopped: true, vms: [] })),
+  deleteVm: jest.fn(async () => ({ deleted: true, vms: [] })),
+  connectVmConsole: jest.fn(async () => ({ connected: true, port: 5910 })),
+  writeVmConsole: jest.fn(async () => ({ written: true })),
+  disconnectVmConsole: jest.fn(async () => ({ disconnected: true })),
+  onVmConsoleData: jest.fn(() => () => {}),
+  onVmConsoleStatus: jest.fn(() => () => {}),
+  onVmsChanged: jest.fn(() => () => {}),
 }));
 
 // Stands in for any panel that throws while rendering, which is the case the boundary
@@ -96,6 +109,11 @@ describe("ContainerManager", () => {
     });
     return container;
   };
+
+  // The navigation labels, including whichever tabs developer mode has added.
+  const navLabels = (container) => Array.from(container.querySelectorAll(".nav-button"))
+    .map((entry) => entry.textContent)
+    .join(" ");
 
   const openTab = (container, label) => {
     const button = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent.includes(label));
@@ -650,7 +668,7 @@ describe("ContainerManager", () => {
     });
   });
 
-  it("shows the model, evaluation and monitoring control in Settings", async () => {
+  it("shows a plain RC-Brain summary, and its audit detail only in developer mode", async () => {
     getAiStatus.mockResolvedValue({
       available: true,
       enabled: true,
@@ -684,13 +702,35 @@ describe("ContainerManager", () => {
     const container = render();
     openTab(container, "Settings");
     await act(async () => { await Promise.resolve(); });
+    // The normal interface: what RC-Brain is, that it is watching, and what it may do.
+    // The engineering detail stays out of it.
     expect(container.textContent).toContain("RC-Brain");
-    expect(container.textContent).toContain("8,334 parameters");
-    expect(container.textContent).toContain("Familiar cases:");
-    expect(container.textContent).toContain("Held-out evaluation");
     expect(container.textContent).toContain("42 checks done");
     expect(container.textContent).toContain("May run automatically: Restart the app.");
     expect(container.textContent).toContain("Needs your approval: Restart with a clean profile.");
+    expect(container.textContent).not.toContain("Held-out evaluation");
+    expect(container.textContent).not.toContain("8,334 parameters");
+    expect(container.textContent).not.toContain("Model file:");
+    expect(container.textContent).not.toContain("Verified outcomes and experience");
+    expect(navLabels(container)).not.toContain("Virtualise");
+
+    // Developer mode: the same app, plus the detail and one extra tab.
+    const enable = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Enable developer mode");
+    expect(enable).not.toBeUndefined();
+    act(() => {
+      enable.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(setPreference).toHaveBeenCalledWith(expect.objectContaining({ developerMode: true }));
+    expect(container.textContent).toContain("Held-out evaluation");
+    expect(container.textContent).toContain("8,334 parameters");
+    expect(container.textContent).toContain("Familiar cases:");
+    expect(container.textContent).toContain("Model file: rc-brain-5.json");
+    expect(container.textContent).toContain("Verified outcomes and experience");
+    expect(navLabels(container)).toContain("Virtualise");
+
+    // Pausing monitoring keeps the rest of what this panel shows: the toggle's answer is
+    // merged into the status rather than swapped in for it.
     const pause = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent.includes("Pause monitoring"));
     expect(pause).not.toBeUndefined();
     act(() => {
@@ -698,6 +738,53 @@ describe("ContainerManager", () => {
     });
     await act(async () => { await Promise.resolve(); });
     expect(setAiMonitoring).toHaveBeenCalledWith(false);
+    expect(container.textContent).toContain("8,334 parameters");
+    expect(container.textContent).toContain("Model file: rc-brain-5.json");
+
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("runs a virtual machine from the Virtualise tab, with the media the user supplies", async () => {
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true });
+    listVms.mockResolvedValue({
+      vms: [
+        {
+          id: "vm-1",
+          name: "Windows 11 test",
+          memoryMB: 4096,
+          cpuCount: 2,
+          diskGB: 40,
+          status: "Stopped",
+          isoName: "Win11.iso",
+          diskName: "vm-1.qcow2",
+          accel: "whpx",
+          consolePort: null,
+        },
+      ],
+    });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Virtualise");
+    await act(async () => { await Promise.resolve(); });
+
+    // The feature says what it is, and that the operating system is yours.
+    expect(container.textContent).toContain("Experimental");
+    expect(container.textContent).toContain("You supply the operating system");
+    expect(container.textContent).toContain("ships no guest OS and no licence");
+    // A machine that already exists, with its configuration and its state.
+    expect(container.textContent).toContain("Windows 11 test");
+    expect(container.textContent).toContain("4 GB memory");
+    expect(container.textContent).toContain("media: Win11.iso");
+    expect(container.textContent).toContain("Disk: vm-1.qcow2");
+    expect(container.querySelector("input[placeholder=\"Windows 11 test\"]")).not.toBeNull();
+    // No QEMU on this PC yet, and the tab says so instead of offering a Start that fails.
+    expect(container.textContent).toContain("QEMU is not detected yet");
+    const start = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Start");
+    expect(start).not.toBeUndefined();
+    // Nothing is drawn until a machine is running.
+    expect(container.querySelector(".vm-canvas")).toBeNull();
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });

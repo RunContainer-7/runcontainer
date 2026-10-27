@@ -4,6 +4,20 @@
 
 export const UPDATES = [
   {
+    version: '0.8.2',
+    date: '2026-10-27',
+    title: 'Developer mode: a plain interface by default, and a Virtualise tab that runs a whole operating system inside RunContainer',
+    changes: [
+      'Settings has one new switch: Enable developer mode. Off is the normal interface. On reveals the technical detail behind RC-Brain, the launch timings, and a Virtualise tab - and nothing else about the app changes, because it is a development switch rather than a different product. The choice is recorded once for this installation and stays until it is turned off.',
+      'The RC-Brain panel in Settings is no longer an engineering audit. It now says what RC-Brain is, whether it is watching, what it may do on its own and that inference stays on this PC. The held-out evaluation numbers, the model artefact and registry, the label counts, the verified-outcome and learning-loop counters, the specialist-agent catalogue and the model limits moved behind developer mode, where they belong.',
+      'Virtualise is a new tab that only developer mode reveals. It configures and runs a real virtual machine on RunContainer\u2019s own QEMU backend: name, memory, CPUs, virtual disk size, and installation media you choose. The machine boots from that media for a fresh install, or from its own disk once a system is installed, and the guest screen is drawn inside the RunContainer window instead of a window of QEMU\u2019s own.',
+      'The console inside the window is a real RFB (VNC) client written for this purpose. QEMU serves the guest on loopback and RunContainer paints it: raw and copy rectangles, resolution changes when the guest changes mode, and keyboard and mouse sent back to the guest, including Ctrl+Alt+Del. The socket lives in the main process, so the window never opens a network connection of its own.',
+      'It is labelled experimental where a machine is created, and that is honest: frames are uncompressed over loopback, there are no guest additions, and integration stops at the keyboard and mouse. RunContainer still ships no guest operating system and no licence, downloads none, and asks for media you already own. QEMU remains a program you install yourself.',
+      'Fixed a bug the new tests found: pausing monitoring replaced the whole RC-Brain status with the toggle\u2019s answer, so the panel lost the model name, parameter count and model file until the next poll put them back. The answer is now merged into the status instead.',
+      'Virtual machine configuration is validated in the main process, not only in the interface: memory, CPU, disk and name limits, a name that is safe to use as a file name, media that must be an ISO or disk image, and a console port per machine that is checked as free before QEMU starts. Deleting a machine removes the disk it owns, and says so if that removal fails.',
+    ],
+  },
+  {
     version: '0.8.1',
     date: '2026-10-27',
     title: 'Fixed a blank window: an app left mid-setup no longer takes the interface down with it',

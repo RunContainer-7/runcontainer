@@ -1,24 +1,30 @@
-// Bumps the app version everywhere it is written down, so package.json, the lockfile
-// and the in-app fallback cannot drift apart.
+// Bumps the app version everywhere it is written down, so package.json, the lockfile,
+// the in-app fallback and the documented release tag cannot drift apart.
+//
+// Usage: node scripts/set-version.js 0.8.2
 const fs = require('fs');
 const path = require('path');
 
-const NEXT = '0.8.1';
+const NEXT = String(process.argv[2] || '').trim();
+if (!/^\d+\.\d+\.\d+$/.test(NEXT)) {
+  console.error('Usage: node scripts/set-version.js <major.minor.patch>');
+  process.exit(1);
+}
 const root = process.cwd();
 
 function bumpJson(file, paths) {
   const full = path.join(root, file);
-  const text = fs.readFileSync(full, 'utf8');
-  const data = JSON.parse(text);
+  const data = JSON.parse(fs.readFileSync(full, 'utf8'));
   for (const keyPath of paths) {
     const parts = keyPath.split('.');
     let node = data;
     for (const part of parts.slice(0, -1)) node = node[part];
-    if (node[parts[parts.length - 1]] === undefined) throw new Error(`${file}: ${keyPath} not found`);
-    node[parts[parts.length - 1]] = NEXT;
+    const last = parts[parts.length - 1];
+    if (node[last] === undefined) throw new Error(`${file}: ${keyPath} not found`);
+    node[last] = NEXT;
   }
   // Preserve the lockfile's own formatting (2-space indent, trailing newline).
-  fs.writeFileSync(full, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(full, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   console.log(`${file}: set ${paths.join(', ')} to ${NEXT}`);
 }
 
@@ -40,3 +46,5 @@ if (readmeNext !== readmeText) {
   fs.writeFileSync(readme, readmeNext, 'utf8');
   console.log(`README.md: release tag example set to v${NEXT}`);
 }
+
+console.log(`Reminder: cut the release with  git tag v${NEXT} && git push origin v${NEXT}`);

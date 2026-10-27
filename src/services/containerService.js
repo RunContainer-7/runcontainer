@@ -369,3 +369,63 @@ export async function setUpInBackground(container) {
 export function onAiVerified(callback) {
   return onAiEvent('ai:verified', callback);
 }
+
+// --- Virtual machines (developer mode) ---------------------------------------
+// A VM is a whole operating system on the custom QEMU backend, with its screen drawn
+// inside a RunContainer window. The guest is served over loopback VNC and the socket
+// lives in the main process; these calls carry bytes, never a URL.
+export async function listVms() {
+  if (!ipcRenderer) return { vms: [] };
+  try {
+    return await ipcRenderer.invoke('vm-list');
+  } catch (error) {
+    return { vms: [], error: error?.message };
+  }
+}
+
+export async function browseVmIso() {
+  return requireIpc('Choosing installation media').invoke('vm-browse-iso');
+}
+
+export async function createVm(config) {
+  return requireIpc('Creating virtual machines').invoke('vm-create', config);
+}
+
+export async function startVm(vm) {
+  return requireIpc('Starting virtual machines').invoke('vm-start', { id: vm?.id });
+}
+
+export async function stopVm(vm) {
+  return requireIpc('Stopping virtual machines').invoke('vm-stop', { id: vm?.id });
+}
+
+export async function deleteVm(vm) {
+  return requireIpc('Deleting virtual machines').invoke('vm-delete', { id: vm?.id });
+}
+
+export async function connectVmConsole(vm) {
+  return requireIpc('Opening the VM console').invoke('vm-console-connect', { id: vm?.id });
+}
+
+export async function writeVmConsole(id, bytes) {
+  if (!ipcRenderer) return { written: false };
+  return ipcRenderer.invoke('vm-console-write', { id, bytes });
+}
+
+export async function disconnectVmConsole(id) {
+  if (!ipcRenderer) return { disconnected: false };
+  return ipcRenderer.invoke('vm-console-disconnect', { id });
+}
+
+// Guest screen updates and console state, one event stream per VM.
+export function onVmConsoleData(callback) {
+  return onAiEvent('vm-console-data', callback);
+}
+
+export function onVmConsoleStatus(callback) {
+  return onAiEvent('vm-console-status', callback);
+}
+
+export function onVmsChanged(callback) {
+  return onAiEvent('vm-status', callback);
+}

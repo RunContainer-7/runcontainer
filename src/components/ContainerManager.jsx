@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, setUpInBackground, runContainerWithJit, getPreferences, setPreference } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
+import VirtualiseTab from "./VirtualiseTab";
 import { UPDATES } from "../data/updates";
 
 // The same names the main process uses for these strategies (src/services/runtimeProfile.js),
@@ -30,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.1";
+const APP_VERSION_FALLBACK = "0.8.2";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -62,7 +63,12 @@ const tabIcons = {
   Profiles: "◧",
   Info: "◌",
   Updates: "↓",
+  Virtualise: "▢",
 };
+// The one tab that only developer mode reveals. Everything else is the same app either
+// way: developer mode adds the technical detail and the ability to run a VM, and takes
+// nothing away.
+const DEVELOPER_ONLY_TABS = ["Virtualise"];
 // Only these actions have an executor in the main process. Advice and escalation
 // are shown with the diagnosis and never disguised as a repair button.
 const EXECUTABLE_AI_ACTIONS = ["restart_same_profile", "restart_engine", "repair_permissions", "restart_clean_profile"];
@@ -113,6 +119,10 @@ export default function ContainerManager() {
   // The beginner introduction is offered once for this installation, never once per
   // version. Nothing is shown until the preference has been read, so it cannot flash.
   const [showBeginnerSetup, setShowBeginnerSetup] = useState(false);
+  // Developer mode: this installation's switch between the plain interface and the
+  // technical one. It reveals the audit detail behind RC-Brain, the launch timings, and
+  // the Virtualise tab. It is one preference, recorded once for this installation.
+  const [developerMode, setDeveloperMode] = useState(false);
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -125,9 +135,25 @@ export default function ContainerManager() {
     Promise.resolve(getPreferences())
       .then((preferences) => {
         if (preferences?.beginnerSetupSeen !== true) setShowBeginnerSetup(true);
+        if (preferences?.developerMode === true) setDeveloperMode(true);
       })
       .catch(() => {});
   }, []);
+
+  // Switching developer mode on or off is one preference write. Nothing is hidden that
+  // existed before it: the plain interface is the same either way, and leaving the
+  // Virtualise tab closes it rather than leaving a dead tab open.
+  function toggleDeveloperMode() {
+    const next = !developerMode;
+    setDeveloperMode(next);
+    Promise.resolve(setPreference({
+      developerMode: next,
+      developerModeEnabledAt: next ? new Date().toISOString() : null,
+    })).catch(() => {});
+    if (!next) setActiveTab((current) => (DEVELOPER_ONLY_TABS.includes(current) ? "Settings" : current));
+  }
+
+  const visibleTabs = developerMode ? [...tabs, ...DEVELOPER_ONLY_TABS] : tabs;
 
   function finishBeginnerSetup() {
     setShowBeginnerSetup(false);
@@ -362,7 +388,10 @@ export default function ContainerManager() {
   function handleToggleAiMonitoring() {
     const next = !(aiStatus?.enabled);
     Promise.resolve(setAiMonitoring(next))
-      .then((status) => { if (status) setAiStatus(status); })
+      // Merged, not replaced: the toggle's answer carries the monitoring state, and
+      // replacing the whole status with it dropped the model, registry and capability
+      // detail the same panel shows until the next poll put it back.
+      .then((status) => { if (status) setAiStatus((current) => ({ ...(current || {}), ...status })); })
       .catch((error) => setAiMessage(error?.message || "Monitoring could not be changed."));
   }
 
@@ -1270,6 +1299,23 @@ export default function ContainerManager() {
           <h3>Settings</h3>
           <p>Nothing to set up. RunContainer decides how to keep each app apart from the rest of your PC.</p>
           <div className="profile-list">
+            <div className={`profile-card ${developerMode ? 'active' : ''}`}>
+              <strong>Developer mode</strong>
+              <span>
+                {developerMode
+                  ? 'On. The technical detail behind RC-Brain, the launch timings, and the Virtualise tab — which runs a whole operating system on RunContainer\u2019s QEMU backend — are shown.'
+                  : 'Off. This is the normal interface. Turn it on for the technical detail behind RC-Brain, the launch timings, and a Virtualise tab that runs a whole operating system inside its own window, separate from your PC. Nothing else about the app changes.'}
+              </span>
+              <span className="muted">
+                A development switch, not a different product: the app behaves identically either way, and this stays on
+                until you turn it off.
+              </span>
+              <div className="detail-actions">
+                <button className={`settings-button ${developerMode ? '' : 'ghost'}`} onClick={toggleDeveloperMode}>
+                  {developerMode ? 'Turn off developer mode' : 'Enable developer mode'}
+                </button>
+              </div>
+            </div>
             <div className="profile-card active">
               <strong>Each app runs in its own space</strong>
               <span>
@@ -1291,6 +1337,7 @@ export default function ContainerManager() {
             </div>
           </div>
 
+          {developerMode && (
           <div className="profile-list performance-panel">
             <div className="profile-card">
               <strong>Performance on this PC</strong>
@@ -1315,6 +1362,7 @@ export default function ContainerManager() {
               </span>
             </div>
           </div>
+          )}
 
           <div className="ai-panel">
           <div className="panel-title-row">
@@ -1325,27 +1373,22 @@ export default function ContainerManager() {
             <div className="pill">{aiStatus?.available ? 'Loaded' : 'Unavailable'}</div>
           </div>
           <p>
-            RC-Brain watches running apps while RunContainer is open, compares what it sees with how RunContainer is supposed to behave,
-            and diagnoses what is wrong. It is a small neural network trained from scratch on RunContainer’s own scenarios — not a cloud
-            chatbot, and not a set of if-statements wearing an AI label.
+            RC-Brain watches the apps RunContainer starts and tells you what it thinks is wrong when one misbehaves. It runs on this
+            PC, and its explanations and repairs are the only things it offers — it cannot touch your files or weaken isolation.
           </p>
           <div className="profile-list">
             <div className="profile-card active">
-              <strong>
-                {aiStatus?.model?.name || 'RC-Brain'}
-                {aiStatus?.model?.parameters ? ` · ${aiStatus.model.parameters.toLocaleString()} parameters` : ''}
-                {aiStatus?.model?.version ? ` ${aiStatus.model.version}` : ''}
-              </strong>
+              <strong>{aiStatus?.model?.name || 'RC-Brain'}{aiStatus?.model?.version ? ` ${aiStatus.model.version}` : ''}</strong>
               <span>
-                Two heads: one chooses the diagnosis, one chooses the action.
-                {aiStatus?.model?.features
-                  ? ` ${aiStatus.model.features} structured observations in, ${aiStatus.model.hiddenLayers?.diagnosis?.join('×') || '—'} hidden units for diagnosis and ${aiStatus.model.hiddenLayers?.action?.join('×') || '—'} for action.`
-                  : ' Numbers come from the loaded model file, so they are shown once it loads.'}
+                A small model that runs on this PC. It watches the apps RunContainer starts, notices when one stops behaving
+                normally, and says what it thinks is wrong and what to try next.
               </span>
               <span className="muted">
-                Version {aiStatus?.model?.version || 'not loaded'} · knowledge {aiStatus?.knowledgeVersion || 'unknown'} · trained {aiStatus?.model?.createdAt ? new Date(aiStatus.model.createdAt).toLocaleDateString() : 'unknown'}
+                Trained {aiStatus?.model?.createdAt ? new Date(aiStatus.model.createdAt).toLocaleDateString() : 'unknown'} · works offline, and never uploads anything.
               </span>
             </div>
+            {developerMode && (
+            <>
             <div className="profile-card">
               <strong>Held-out evaluation</strong>
               <span>
@@ -1367,12 +1410,19 @@ export default function ContainerManager() {
                   : 'Capabilities are reported by the loaded model.'}
               </span>
               <span className="muted">
-                Model file: {aiStatus?.registry?.current || 'unknown'} · previous for rollback: {aiStatus?.registry?.previous || 'none'}
+                {aiStatus?.model?.parameters ? `${aiStatus.model.parameters.toLocaleString()} parameters, ` : ''}
+                {aiStatus?.model?.features ? `${aiStatus.model.features} observation features, ` : ''}
+                diagnosis head {aiStatus?.model?.hiddenLayers?.diagnosis?.join('×') || '—'}, action head {aiStatus?.model?.hiddenLayers?.action?.join('×') || '—'}.
+              </span>
+              <span className="muted">
+                Model file: {aiStatus?.registry?.current || 'unknown'} · previous for rollback: {aiStatus?.registry?.previous || 'none'} · knowledge {aiStatus?.knowledgeVersion || 'unknown'}
               </span>
               <div className="detail-actions">
                 <button className="settings-button ghost" disabled={aiWorking || !aiStatus?.registry?.previous} onClick={handleRollbackModel}>Roll back model</button>
               </div>
             </div>
+            </>
+            )}
             <div className="profile-card">
               <strong>Monitoring</strong>
               <span>Checks running apps every few seconds while RunContainer is open. It is not a Windows service and stops when the app closes.</span>
@@ -1419,6 +1469,8 @@ export default function ContainerManager() {
             <p className="status-line">RC-Brain is not loaded{aiStatus?.error ? `: ${aiStatus.error}` : '.'} Monitoring will not diagnose or repair anything until it is available.</p>
           )}
 
+          {developerMode && (
+          <>
           <h4>Verified outcomes and experience</h4>
           <div className="profile-card">
             <strong>Repair verification</strong>
@@ -1540,8 +1592,14 @@ export default function ContainerManager() {
             </>
           )}
           <p className="muted">Limits: {(aiStatus?.limits || []).join(' ')}</p>
+          </>
+          )}
           </div>
         </div>
+      )}
+
+      {activeTab === "Virtualise" && (
+        <VirtualiseTab />
       )}
 
       {activeTab === "Info" && (
@@ -1817,7 +1875,7 @@ export default function ContainerManager() {
       )}
 
       <div className="bottom-nav">
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab}
             className={`nav-button ${activeTab === tab ? "active" : ""}`}
