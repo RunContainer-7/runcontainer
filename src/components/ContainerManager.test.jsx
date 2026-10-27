@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
-import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus } from "../services/containerService";
+import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -73,6 +73,11 @@ jest.mock("../services/containerService", () => ({
   onSetupProgress: jest.fn(() => () => {}),
   onSetupComplete: jest.fn(() => () => {}),
   setUpInBackground: jest.fn(),
+  runContainerWithJit: jest.fn(),
+  // Already seen by default, so the once-ever introduction does not overlay the
+  // panel every other test is looking at. The tests that are about it opt in.
+  getPreferences: jest.fn(async () => ({ beginnerSetupSeen: true })),
+  setPreference: jest.fn(async (patch) => patch),
 }));
 
 describe("ContainerManager", () => {
@@ -91,6 +96,13 @@ describe("ContainerManager", () => {
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
   };
+
+  beforeEach(() => {
+    // The Jest preset resets mock implementations before every test, so the defaults
+    // the panels depend on are set here. Tests that are about the introduction
+    // override getPreferences themselves.
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true });
+  });
 
   afterEach(() => {
     jest.clearAllMocks();
@@ -325,6 +337,77 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("shows the beginner introduction once, and never offers it again", async () => {
+    getPreferences.mockResolvedValue({});
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    // Ten steps, numbered 0/9 to 9/9, starting with what RunContainer is.
+    expect(container.textContent).toContain("0/9");
+    expect(container.textContent).toContain("RunContainer is an app that opens other apps inside itself");
+    for (let step = 0; step < 9; step += 1) {
+      const next = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Next");
+      act(() => { next.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    }
+    expect(container.textContent).toContain("9/9");
+    expect(container.textContent).toContain("Where to get help, and how to support the project");
+    expect(container.textContent).toContain("Discord");
+    const finish = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Start using RunContainer");
+    act(() => { finish.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await Promise.resolve(); });
+    // Recorded as app-wide state, so the next launch (and the next version) skips it.
+    expect(setPreference).toHaveBeenCalledWith(expect.objectContaining({ beginnerSetupSeen: true }));
+    expect(container.textContent).not.toContain("Start using RunContainer");
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
+  it("leaves the introduction closed when this installation has already seen it", async () => {
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).not.toContain("0/9");
+    expect(setPreference).not.toHaveBeenCalled();
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
+  it("Enable JIT saves the strategy and starts that app straight away", async () => {
+    listContainers.mockResolvedValue([
+      {
+        id: "managed-app",
+        name: "Managed demo",
+        source: "C:\\apps\\managed\\app.exe",
+        status: "Installed",
+        runtime: { kind: "dotnet", label: "Managed .NET", machine: "x64", subsystem: "Windows GUI", jit: "This app ships IL." },
+      },
+    ]);
+    setAppConfig.mockResolvedValue({ id: "managed-app", status: "Installed", runtimeJit: "fast-start" });
+    runContainerWithJit.mockResolvedValue({ id: "managed-app", status: "Running", pid: 4242 });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Tweaks");
+    const appSelect = container.querySelector("#tweak-app");
+    act(() => {
+      appSelect.value = "managed-app";
+      appSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const strategy = container.querySelector('select[aria-label="JIT strategy"]');
+    act(() => {
+      strategy.value = "fast-start";
+      strategy.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const enable = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Enable JIT");
+    expect(enable).not.toBeUndefined();
+    await act(async () => {
+      enable.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // Saved first, so the launch that follows uses the choice just made.
+    expect(setAppConfig).toHaveBeenCalledWith(expect.objectContaining({ id: "managed-app", runtimeJit: "fast-start" }));
+    expect(runContainerWithJit).toHaveBeenCalledWith(expect.objectContaining({ id: "managed-app", runtimeJit: "fast-start" }));
+    // The outcome is reported where launch results always are: the Apps panel.
+    openTab(container, "Apps");
+    expect(container.textContent).toContain("starting with JIT");
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
   it("reports what an app runs on, and offers no JIT strategy for native code", async () => {
     listContainers.mockResolvedValue([
       {
@@ -515,7 +598,7 @@ describe("ContainerManager", () => {
         },
         capabilities: { diagnosisLabels: 19, actionLabels: 12 },
       },
-      registry: { current: "rc-brain-4.json", previous: "rc-brain-3.json" },
+      registry: { current: "rc-brain-5.json", previous: "rc-brain-4.json" },
       experiences: { verified: 0, failed: 0, inconclusive: 0, promoted: 0, pendingPromotion: 0 },
       candidate: { examples: 0, minExamples: 20, canTrain: false },
     });

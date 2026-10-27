@@ -100,25 +100,31 @@ const FEATURE_NAMES = [
 
 // Log patterns only classify what the text LOOKS like. They are observations,
 // not decisions: the model learns how much each signal matters in context.
+//
+// v4 widens each class to the phrasings real Windows software actually writes —
+// the dialog text users paste, the installer wording, the developer phrasing —
+// because a signal that only recognises one wording throws the same failure away
+// as "unexplained". The classes are unchanged: still one key per signal, so the
+// feature schema and the model's inputs stay exactly as they were.
 const LOG_SIGNALS = [
-  ['missingRuntime', /(vcruntime\d+|msvcp\d+|ucrtbase)\.dll[^\n]*(missing|not found|could not be found)|api-ms-win-crt[^\n]*(missing|not found)|0xc0000135/i],
-  ['unhandledCrash', /unhandled exception|fatal error|fatal crash|0xc0000142|0xc000007b|access violation|renderer process crashed|application was unable to start correctly/i],
-  ['accessDenied', /access is denied|permission denied|eacces|errno 13|unauthorized|privilege not held|0x80070005/i],
-  ['diskFull', /no space left|disk full|not enough space|enospc|insufficient disk/i],
-  ['networkIssue', /network is unreachable|could not resolve|connection refused|offline|blocked by (firewall|policy)|no internet/i],
-  ['timeout', /timed out|timeout|not responding|took too long/i],
-  ['crashLoop', /crash(ed)? (again|repeatedly)|restart loop|keeps crashing|failed again after/i],
-  ['unsupported', /not supported|unsupported|requires windows|needs hyper-v|no vm image|virtualization is not enabled|no prepared image/i],
-  ['installerFailed', /installation failed|installer[^\n]*(failed|error)|setup[^\n]*(failed|aborted)/i],
+  ['missingRuntime', /(vcruntime\d+|msvcp\d+|ucrtbase)\.dll[^\n]*(missing|not found|could not be found)|api-ms-win-crt[^\n]*(missing|not found)|0xc0000135|the code execution cannot proceed because[^\n]*(was not found|missing)|dll load failed|(could not|cannot|unable to) (find|locate|load)[^\n]*\.dll/i],
+  ['unhandledCrash', /unhandled exception|fatal error|fatal crash|0xc0000142|0xc000007b|access violation|renderer process crashed|application was unable to start correctly|(has )?stopped working|stopped responding and was closed|segmentation fault|unexpectedly quit|the program crashed/i],
+  ['accessDenied', /access is denied|permission denied|eacces|errno 13|unauthorized|privilege not held|0x80070005|you (do not|don't) have permission|requires (elevated|administrator) privileges|requested registry access is not allowed|operation not permitted|access to the path[^\n]*is denied/i],
+  ['diskFull', /no space left|disk full|not enough space|enospc|insufficient disk|there is not enough space on the disk|write error: no space|out of disk space/i],
+  ['networkIssue', /network is unreachable|could not resolve|connection refused|offline|blocked by (firewall|policy)|no internet|failed to connect|host is down|name or service not known|network path was not found|connection reset by peer|temporary failure in name resolution/i],
+  ['timeout', /timed out|timeout|not responding|took too long|deadline exceeded|took longer than expected|operation timed out/i],
+  ['crashLoop', /crash(ed)? (again|repeatedly)|restart loop|keeps crashing|failed again after|repeated restarts|crash on startup|starts and (then )?(crashes|exits)/i],
+  ['unsupported', /not supported|unsupported|requires windows|needs hyper-v|no vm image|virtualization is not enabled|no prepared image|this app (can't|cannot) run on your pc|requires a newer version of windows|is not compatible with|platform not supported|your pc doesn't meet the requirements/i],
+  ['installerFailed', /installation failed|installer[^\n]*(failed|error)|setup[^\n]*(failed|aborted)|the setup (was interrupted|did not complete)|could not install|could not be installed|installation aborted|0x80070643|fatal error during installation/i],
   ['errorWord', /\berror\b|\bfailed\b|\bfailure\b/i],
-  ['healthySignal', /\bready\b|\bstarted\b|window created|listening|loaded|complete|success/i],
-  ['injection', /ignore (all|any|the|previous|prior) instructions|disregard[^\n]*instructions|you are now|system prompt|delete (all|the) files|disable (the )?(sandbox|protection|isolation|monitor)/i],
-  ['corruptProfile', /profile[^\n]*(corrupt|invalid|damaged)|settings[^\n]*(corrupt|invalid)|config[^\n]*(corrupt|invalid)|deserialize[^\n]*fail/i],
-  ['windowCreated', /window created|main window|showing window|window opened/i],
-  ['sideBySide', /side-by-side configuration is incorrect|sxs[^\n]*(missing|invalid)|activation context/i],
-  ['gpuDriver', /display driver[^\n]*(stopped|failed|reset)|dxgi_error|d3d11[^\n]*fail|video hardware error/i],
-  ['fileLocked', /file is in use|another process is using|cannot access the file because it is being used|sharing violation|resource busy/i],
-  ['rebootRequired', /reboot (is )?required|restart (is )?required|3010|pending reboot/i],
+  ['healthySignal', /\bready\b|\bstarted\b|window created|listening|loaded|complete|success|started successfully|initialization (complete|finished)|ready to use|now running/i],
+  ['injection', /ignore (all|any|the|previous|prior) instructions|disregard[^\n]*instructions|you are now|system prompt|delete (all|the) files|disable (the )?(sandbox|protection|isolation|monitor)|new instructions|override your|execute the following|do not tell the user/i],
+  ['corruptProfile', /profile[^\n]*(corrupt|invalid|damaged)|settings[^\n]*(corrupt|invalid)|config[^\n]*(corrupt|invalid)|deserialize[^\n]*fail|unable to load (user )?profile|settings file is invalid|could not read (your )?settings/i],
+  ['windowCreated', /window created|main window|showing window|window opened|creating (the )?main window|first window shown|app window (is )?shown/i],
+  ['sideBySide', /side-by-side configuration is incorrect|sxs[^\n]*(missing|invalid)|activation context|side by side configuration|vcredist/i],
+  ['gpuDriver', /display driver[^\n]*(stopped|failed|reset)|dxgi_error|d3d11[^\n]*fail|video hardware error|display driver has stopped responding|nvlddmkm|dxgi_device_removed/i],
+  ['fileLocked', /file is in use|another process is using|cannot access the file because it is being used|sharing violation|resource busy|the process cannot access the file|being used by another process|locked by another/i],
+  ['rebootRequired', /reboot (is )?required|restart (is )?required|3010|pending reboot|must restart your computer|a restart is pending|1638/i],
 ];
 
 function textOf(lines) {
@@ -310,6 +316,11 @@ function describeEvidence({ processInfo, launch, environment, history, signals, 
       : `no visible window after ${seconds}s`);
   } else if (processInfo.alive !== false) {
     facts.push('no window is expected for this executable');
+  }
+  // Why no window is expected, when the reason is the app's own setup running
+  // unattended. The user is told which of the two situations they are in.
+  if (environment?.setupInBackground) {
+    facts.push('its setup program is completing in the background inside its environment, so no window is expected from it yet');
   }
   if (processInfo.hung) facts.push('Windows reports the window as not responding');
   if (Number(processInfo.cpuPercent) >= 80) {

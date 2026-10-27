@@ -25,7 +25,7 @@ function readRegistry(dir = MODEL_DIR) {
   } catch (error) {
     // Last resort only, for a build whose registry file is missing entirely: the
     // newest shipped artefact is what the app would load in that case.
-    return { schema: 'runcontainer.brain.registry.v1', current: 'rc-brain-4.json', previous: null, history: [] };
+    return { schema: 'runcontainer.brain.registry.v1', current: 'rc-brain-5.json', previous: null, history: [] };
   }
 }
 

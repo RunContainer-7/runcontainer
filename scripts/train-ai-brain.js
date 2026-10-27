@@ -12,7 +12,7 @@
 //   - final              a fresh realisation used once for the published report
 //
 // Outputs:
-//   src/ai/model/rc-brain-3.json   weights + schema + metrics
+//   src/ai/model/rc-brain-5.json   weights + schema + metrics
 //   src/ai/model/registry.json     which artefact the app loads, plus history
 //   reports/ai-evaluation.md       human-readable results, including failures
 //
@@ -31,10 +31,19 @@ const { gateDecision } = require('../src/ai/policy');
 const ROOT = path.join(__dirname, '..');
 const KNOWLEDGE = require('../src/ai/knowledge.json');
 const SEED = 20261022;
-const MODEL_ID = 'rc-brain-4';
+const MODEL_ID = 'rc-brain-5';
+// The name, version and report headings are derived from the artefact id, so a
+// retrain can never ship a file called rc-brain-5 whose own name says RC-Brain 4.
+const MODEL_NUMBER = Number(String(MODEL_ID).split('-').pop());
+const MODEL_NAME = `RC-Brain ${MODEL_NUMBER}`;
+const MODEL_VERSION = `${MODEL_NUMBER}.0.0`;
 const CANDIDATE = process.env.RC_BRAIN_CANDIDATE === '1';
 const MODEL_FILE = CANDIDATE ? `${MODEL_ID}-candidate.json` : `${MODEL_ID}.json`;
-const HIDDEN = { diagnosis: [48, 24], action: [32, 16] };
+// v5 is wider than v4: the corpus now carries several wordings for each condition
+// instead of one, and the smaller pair of networks fitted that extra variety less
+// accurately than the same networks fitted the narrower corpus. Capacity is the
+// honest way to pay for the extra variety — it shows up in the parameter count.
+const HIDDEN = { diagnosis: [64, 32], action: [48, 24] };
 const ITERATIONS = 3000;
 
 const DIAGNOSES = KNOWLEDGE.diagnoses.map((entry) => entry.id);
@@ -182,7 +191,16 @@ function chooseThresholds({ diagnosisNet, actionNet, calibration, temperature })
       // Thresholds are chosen on calibration only. Coverage has a floor so the
       // model cannot win by refusing almost everything, and unsafe or
       // over-intervening decisions are penalised hard.
-      const score = precision * Math.min(1, coverage / 0.6) - unsafe * 0.5 - (overInterventions / calibration.length) * 0.5;
+      //
+      // The floor is 80%, not 60%. At 60% a threshold could buy a fraction of a
+      // percent of precision by abstaining more, and the search happily took it:
+      // the model answered less and less on evidence it had never seen, which made
+      // an unfamiliar failure unnameable rather than merely uncertain. Abstaining is
+      // a real action for a monitor (it means "gather more evidence"), so it may not
+      // be free currency for precision. Unsafe and over-intervening decisions still
+      // cost more than anything else, and exact ties still prefer the most decisive
+      // threshold because the search runs from the lowest confidence upwards.
+      const score = precision * Math.min(1, coverage / 0.8) - unsafe * 0.5 - (overInterventions / calibration.length) * 0.5;
       if (score > best.score) best = { confidence, margin, score, coverage, precision, unsafe, overInterventions };
     }
   }
@@ -394,8 +412,8 @@ function main() {
   const artefact = {
     schema: 'runcontainer.brain.v2',
     id: MODEL_ID,
-    name: 'RC-Brain 4',
-    version: '4.0.0',
+    name: MODEL_NAME,
+    version: MODEL_VERSION,
     createdAt: new Date().toISOString(),
     knowledgeVersion: KNOWLEDGE.knowledgeVersion,
     description: 'RunContainer\'s own two-head behavioural model: structured observations in, diagnosis and action out. It has two tools it can ask for help with: it can dispatch the fixed specialist agents (six evidence probes plus the research, expert and harmony agents) to complete an observation it cannot act on, and it can consult the Runbook, the hard-coded table of exact documented error signatures. Trained from scratch on synthetic RunContainer scenarios; it cannot read arbitrary log text semantically, it cannot author, configure or command an agent, and it cannot write a Runbook entry.',
@@ -463,13 +481,39 @@ function main() {
   const modelDir = path.join(ROOT, 'src', 'ai', 'model');
   fs.mkdirSync(modelDir, { recursive: true });
   const modelPath = path.join(modelDir, MODEL_FILE);
-  fs.writeFileSync(modelPath, `${JSON.stringify(artefact)}\n`, 'utf8');
-
   const reportPath = path.join(ROOT, 'reports', CANDIDATE ? 'ai-candidate.md' : 'ai-evaluation.md');
   const registryPath = path.join(modelDir, 'registry.json');
-  // A candidate stays on disk and in the report; the active registry entry is
-  // only changed by scripts/promote-model.js after its gates pass.
-  if (!CANDIDATE) {
+
+  const pct = (value) => `${(value * 100).toFixed(1)}%`;
+
+  // The gates are evaluated BEFORE anything is written, and in particular before the
+  // registry is touched. A run that misses its thresholds must not leave the app
+  // pointed at a model that failed them — that is how a failed experiment would ship.
+  // Only a passing, non-candidate run activates its own artefact; the other way in is
+  // scripts/promote-model.js, which applies the same gates from src/ai/registry.js.
+  const failures = [];
+  if (familiarEval.diagnosisAccuracy < 0.9) failures.push(`familiar diagnosis accuracy ${pct(familiarEval.diagnosisAccuracy)} < 90%`);
+  if (familiarEval.diagnosisAccuracy < artefact.baseline.familiar.diagnosisAccuracy + 0.1) failures.push('familiar accuracy is not clearly better than the keyword baseline');
+  if (finalEval.diagnosisAccuracy < artefact.baseline.final.diagnosisAccuracy + 0.05) failures.push('final accuracy is not clearly better than the keyword baseline');
+  // On unseen families the baseline is strong (its keyword rules encode several
+  // of those symptoms directly), so the honest gate is "not materially worse",
+  // not an arbitrary 10-point win. The advantage must still show up on familiar
+  // and final splits above.
+  if (unseenEval.diagnosisAccuracy < 0.8) failures.push(`unseen-family accuracy ${pct(unseenEval.diagnosisAccuracy)} < 80%`);
+  if (unseenEval.diagnosisAccuracy + 0.02 < artefact.baseline.unseen.diagnosisAccuracy) failures.push('unseen-family accuracy is materially worse than the keyword baseline');
+  if (ambiguousEval.overInterventions > 0) failures.push(`${ambiguousEval.overInterventions} repair(s) proposed on a restraint case`);
+  if (familiarEval.falsePositiveRate > 0.05 || unseenEval.falsePositiveRate > 0.1) failures.push('false positive rate above the release gate');
+  if (ambiguousEval.unsafeActions > 0) failures.push('unsafe action on an ambiguous/restraint case');
+  if (finalEval.unsafeActions > 0) failures.push('unsafe action on the final untouched split');
+  if (finalEval.diagnosisAccuracy < 0.75) failures.push(`final untouched accuracy ${pct(finalEval.diagnosisAccuracy)} < 75%`);
+  if (audit.labelConflicts > 0) failures.push(`${audit.labelConflicts} label conflicts on identical evidence`);
+  if (audit.trainHoldoutLeakage > 0) failures.push(`${audit.trainHoldoutLeakage} identical rows appear in both training and holdout`);
+
+  // The artefact and the report are always written: a failing run is still evidence,
+  // and the numbers in it are the reason to fix something.
+  fs.writeFileSync(modelPath, `${JSON.stringify(artefact)}\n`, 'utf8');
+
+  if (!CANDIDATE && failures.length === 0) {
     let registry = { schema: 'runcontainer.brain.registry.v1', current: MODEL_FILE, previous: null, history: [] };
     if (fs.existsSync(registryPath)) {
       try {
@@ -479,6 +523,13 @@ function main() {
         registry = { schema: 'runcontainer.brain.registry.v1', current: MODEL_FILE, previous: null, history: [] };
       }
     }
+    // The artefact that was active until this line is the one a rollback must reach,
+    // so it is recorded as `previous`. Leaving it at whatever was there before would
+    // skip a version: activating 5 would have rolled back to 3.
+    const previouslyActive = registry.current && path.basename(registry.current) !== MODEL_FILE
+      ? path.basename(registry.current)
+      : registry.previous;
+    registry.previous = previouslyActive || null;
     registry.current = MODEL_FILE;
     registry.updatedAt = new Date().toISOString();
     registry.history = [
@@ -496,11 +547,10 @@ function main() {
     fs.writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
   }
 
-  const pct = (value) => `${(value * 100).toFixed(1)}%`;
   const splitTable = (label, evaluation, baseline) => [
     `### ${label}`,
     '',
-    '| Metric | RC-Brain 3 | Keyword baseline |',
+    `| Metric | ${MODEL_NAME} | Keyword baseline |`,
     '| --- | --- | --- |',
     `| Diagnosis accuracy | ${pct(evaluation.diagnosisAccuracy)} | ${pct(baseline.diagnosisAccuracy)} |`,
     `| Action accuracy | ${pct(evaluation.actionAccuracy)} | ${pct(baseline.actionAccuracy)} |`,
@@ -516,7 +566,7 @@ function main() {
   ].join('\n');
 
   const report = [
-    '# RC-Brain 3 evaluation',
+    `# ${MODEL_NAME} evaluation`,
     '',
     `Trained ${artefact.createdAt} from ${corpus.train.length} synthetic RunContainer scenarios${curated.examples.length ? ` plus ${curated.examples.length} promoted verified experiences` : ''}, calibrated on ${calibration.length} separate rows, and evaluated on held-out splits it never fitted.`,
     '',
@@ -584,28 +634,12 @@ function main() {
   console.log(`ambiguous ${pct(ambiguousEval.diagnosisAccuracy)} / over-interventions ${ambiguousEval.overInterventions}/${ambiguousEval.restraintCases}`);
   console.log(`final ${pct(finalEval.diagnosisAccuracy)} / action ${pct(finalEval.actionAccuracy)} / FPR ${pct(finalEval.falsePositiveRate)} / unsafe ${finalEval.unsafeActions}`);
   console.log(`corpus: ${audit.rows} rows, ${audit.distinctFeatureVectors} distinct, ${audit.labelConflicts} label conflicts, leakage ${audit.trainHoldoutLeakage}`);
-  console.log(`Wrote ${modelPath} and ${reportPath}${CANDIDATE ? ' (candidate; active registry unchanged)' : ` and ${registryPath}`}`);
+  console.log(`Wrote ${modelPath} and ${reportPath}${CANDIDATE || failures.length > 0 ? ' (active registry unchanged)' : ` and ${registryPath}`}`);
 
-  const failures = [];
-  if (familiarEval.diagnosisAccuracy < 0.9) failures.push(`familiar diagnosis accuracy ${pct(familiarEval.diagnosisAccuracy)} < 90%`);
-  if (familiarEval.diagnosisAccuracy < artefact.baseline.familiar.diagnosisAccuracy + 0.1) failures.push('familiar accuracy is not clearly better than the keyword baseline');
-  if (finalEval.diagnosisAccuracy < artefact.baseline.final.diagnosisAccuracy + 0.05) failures.push('final accuracy is not clearly better than the keyword baseline');
-  // On unseen families the baseline is strong (its keyword rules encode several
-  // of those symptoms directly), so the honest gate is "not materially worse",
-  // not an arbitrary 10-point win. The advantage must still show up on familiar
-  // and final splits above.
-  if (unseenEval.diagnosisAccuracy < 0.8) failures.push(`unseen-family accuracy ${pct(unseenEval.diagnosisAccuracy)} < 80%`);
-  if (unseenEval.diagnosisAccuracy + 0.02 < artefact.baseline.unseen.diagnosisAccuracy) failures.push('unseen-family accuracy is materially worse than the keyword baseline');
-  if (ambiguousEval.overInterventions > 0) failures.push(`${ambiguousEval.overInterventions} repair(s) proposed on a restraint case`);
-  if (familiarEval.falsePositiveRate > 0.05 || unseenEval.falsePositiveRate > 0.1) failures.push('false positive rate above the release gate');
-  if (ambiguousEval.unsafeActions > 0) failures.push('unsafe action on an ambiguous/restraint case');
-  if (finalEval.unsafeActions > 0) failures.push('unsafe action on the final untouched split');
-  if (finalEval.diagnosisAccuracy < 0.75) failures.push(`final untouched accuracy ${pct(finalEval.diagnosisAccuracy)} < 75%`);
-  if (audit.labelConflicts > 0) failures.push(`${audit.labelConflicts} label conflicts on identical evidence`);
-  if (audit.trainHoldoutLeakage > 0) failures.push(`${audit.trainHoldoutLeakage} identical rows appear in both training and holdout`);
   if (failures.length > 0) {
     console.error('RC-Brain did not meet its release thresholds:');
     for (const failure of failures) console.error(`- ${failure}`);
+    console.error('The active model was left exactly as it was.');
     process.exit(1);
   }
 }

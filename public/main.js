@@ -52,6 +52,7 @@ const {
   buildWindowHostCSharp,
   buildWindowHostScript,
   buildWindowHostScriptArgs,
+  launchShowState,
   parseWindowHostOutput,
   parseWindowHostEvents,
   nativeHandleToInt,
@@ -114,6 +115,34 @@ const {
 
 let mainWindow;
 const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json');
+// One-time, app-wide state for this installation (see loadPreferences below).
+const preferencesPath = path.join(app.getPath('userData'), 'runcontainer-preferences.json');
+// Only these keys may be written: a preference write is not a general settings
+// back door, and an unknown key is dropped rather than stored.
+const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion']);
+
+function loadPreferences() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(preferencesPath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function savePreferences(patch = {}) {
+  const updated = { ...loadPreferences() };
+  for (const [key, value] of Object.entries(patch)) {
+    if (!PREFERENCE_KEYS.has(key)) continue;
+    updated[key] = value;
+  }
+  try {
+    fs.writeFileSync(preferencesPath, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    // Best effort: a failed write only means the introduction is offered again.
+  }
+  return updated;
+}
 const sandboxMonitors = new Map();
 // One live deletion job per app, so a long retry loop can be cancelled from the UI.
 const deleteJobs = new Map();
@@ -1132,6 +1161,17 @@ function behavioralEngineResponsive(appRecord) {
   return true;
 }
 
+// A setup program that was started in its documented unattended mode, inside this
+// environment, and has not produced an app yet. It shows no window on purpose while it
+// works, so it must not be read as an app whose window never appeared: that reading is
+// what made RC-Brain restart a working installer in the middle of its own setup.
+function backgroundSetupRunning(appRecord) {
+  return Boolean(appRecord?.setupProgram
+    && appRecord.setupPlanMode === 'silent'
+    && !appRecord.installedExePath
+    && appRecord.status === 'Running');
+}
+
 async function probeAppBehavior(appRecord, state) {
   const engine = appRecord.activeEngine || appRecord.launchMode || 'rcvm';
   const isVm = engine === 'qemu' || engine === 'hyperv';
@@ -1179,8 +1219,9 @@ async function probeAppBehavior(appRecord, state) {
     running: true,
     engine,
     pidCount: pids.length,
-    // GUI-subsystem images are expected to show a window; console tools are not.
-    windowExpected: !isVm && behavioralMonitor.isGuiExecutable(appRecord.source),
+    // GUI-subsystem images are expected to show a window; console tools are not. An
+    // unattended setup is the documented exception: no window is expected from it yet.
+    windowExpected: !isVm && behavioralMonitor.isGuiExecutable(appRecord.source) && !backgroundSetupRunning(appRecord),
     windowVisible: probe ? Boolean(probe.windowVisible) : null,
     windowHung: probe ? Boolean(probe.windowHung) : false,
     windowAgeMs: now - windowSince,
@@ -1194,6 +1235,9 @@ async function probeAppBehavior(appRecord, state) {
       qemuProvisioned: isQemuProvisioned(),
       hypervReady: Boolean(appRecord.hypervVm),
       appContainerSupported: isAppContainerSupported(),
+      // Read by the model's evidence list so the diagnosis can say why no window is
+      // expected instead of leaving the user to guess.
+      setupInBackground: backgroundSetupRunning(appRecord),
       runtimePresent: fs.existsSync(path.join(system32, 'vcruntime140.dll')) && fs.existsSync(path.join(system32, 'msvcp140.dll')),
     },
     logLines,
@@ -1521,7 +1565,7 @@ function aiCandidateInfo() {
     // The candidate belongs to whichever model is active, so its name is derived
     // from the registry rather than hard-coded: after a retrain a fixed name would
     // silently stop finding candidates at all.
-    const current = aiRegistry().current || 'rc-brain-4.json';
+    const current = aiRegistry().current || 'rc-brain-5.json';
     const file = path.join(__dirname, '..', 'src', 'ai', 'model', current.replace(/\.json$/, '-candidate.json'));
     if (fs.existsSync(file)) {
       const artefact = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -1842,6 +1886,10 @@ const GUEST_WINDOW_HEADER_PX = 56;
 // and stops when its host window closes, RunContainer asks it to, or its app ends.
 const appWindowHosts = new Map();
 
+// One guard per app: after the host has proved it cannot start, later hosting calls
+// for the same launch are skipped instead of reopening a window that cannot be used.
+const windowHostBackoff = new Map();
+
 function windowHostStateDir() {
   const dir = path.join(app.getPath('userData'), 'window-host');
   ensureDirectory(dir);
@@ -1909,7 +1957,15 @@ function recordWindowHosted(appId, embedded, extra = {}) {
 
 function handleWindowHostEvent(appRecord, state, event, logPath) {
   if (!event) return;
-  if (event.event === 'embedded') {
+  if (event.event === 'watching') {
+    // Proof from the host itself, not an assumption: the host assembly loaded and
+    // the watch loop is running, so a window this app opens from now on will be
+    // adopted. This is what a hidden launch is allowed to depend on.
+    state.ready = true;
+    state.readyAt = Date.now();
+    if (!state.watchStartedAt) state.watchStartedAt = Date.now();
+    appendLog(logPath, 'Window host is watching for this app’s window.');
+  } else if (event.event === 'embedded') {
     state.embedded = true;
     state.embeddedPid = event.pid || state.embeddedPid;
     const win = guestWindows.get(appRecord.id);
@@ -1982,6 +2038,10 @@ async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop
     refused: null,
     error: null,
     exited: false,
+    // Set only by the host's own `watching` event (see handleWindowHostEvent).
+    ready: false,
+    readyAt: null,
+    watchStartedAt: null,
   };
   if (process.platform !== 'win32' || !parentHandle) return state;
   try {
@@ -2056,6 +2116,56 @@ async function waitForWindowHost(state, timeoutMs) {
   return state;
 }
 
+// Waits, briefly, for the host to say it is watching. Compiling the host assembly
+// is the only reason this is not instant, and it is cached after the first launch.
+async function waitForWindowHostReady(state, timeoutMs = 2500) {
+  const deadline = Date.now() + Math.max(Number(timeoutMs) || 0, 0);
+  while (Date.now() < deadline) {
+    if (state.ready || state.error || state.exited) return state;
+    await delay(60);
+  }
+  return state;
+}
+
+// Whether a live, watching host exists for this app right now. A hidden launch is
+// only ever allowed when this is true: otherwise the app would create its first
+// window hidden with nobody to adopt it, and it would stay invisible while looking
+// like a window hang to the monitor. This is measured, never assumed.
+function windowHostingAllowed(appRecord) {
+  if (process.platform !== 'win32') return false;
+  if (appRecord?.windowHosting === false) return false;
+  const state = appWindowHosts.get(appRecord?.id);
+  return Boolean(state && state.ready && !state.error && !state.exited);
+}
+
+// A short, honest reason for the interface when a window cannot be hosted here.
+function windowHostingRefusal(appRecord) {
+  if (process.platform !== 'win32') return 'window hosting is a Windows feature';
+  if (appRecord?.windowHosting === false) return 'window hosting is switched off in Settings for this app';
+  const state = appWindowHosts.get(appRecord?.id);
+  if (!state) return 'the window host is not running';
+  if (state.error) return `the window host failed: ${state.error}`;
+  if (state.exited) return 'the window host stopped';
+  if (!state.ready) return 'the window host did not report that it is watching in time';
+  return null;
+}
+
+// The show-state an app is actually launched with, and the reason when it is not hidden.
+// The rule itself lives in public/window-host.js so it can be tested on its own.
+function showStateForLaunch(appRecord, logPath) {
+  const state = launchShowState({
+    isGui: startsHidden(appRecord.source),
+    platform: process.platform,
+    windowHosting: appRecord?.windowHosting,
+    host: appWindowHosts.get(appRecord?.id) || null,
+  });
+  if (state !== 0 && startsHidden(appRecord.source)) {
+    const reason = windowHostingRefusal(appRecord) || 'window hosting is unavailable';
+    if (logPath) appendLog(logPath, `This app is started with its window shown rather than hidden, because ${reason}. It cannot be left invisible.`);
+  }
+  return state;
+}
+
 // Only safe once this app's processes are gone: destroying the host destroys a hosted child.
 function closeGuestWindow(appId) {
   const win = guestWindows.get(appId);
@@ -2120,7 +2230,11 @@ function ensureGuestWindow(appRecord, note) {
   // so no renderer round-trip is needed here.
 
   const pagePath = guestWindowPagePath();
-  const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`;
+  const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}`
+    + `&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`
+    // The page offers to complete this setup unattended only when a documented
+    // unattended mode exists for this installer (see src/services/setupInstall.js).
+    + `&autosetup=${appRecord.setupProgram && appRecord.setupPlanMode === 'silent' && !appRecord.installedExePath ? 1 : 0}`;
   if (pagePath) {
     win.loadFile(pagePath, { search }).catch((error) => {
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load: ${error.message}`);
@@ -2153,9 +2267,17 @@ function ensureGuestWindow(appRecord, note) {
 // Hosts the app's (or the VM console's) window under a second RunContainer window and
 // leaves a watcher running, so windows that appear later are hosted too instead of
 // sitting on the desktop. Returns what happened by the time the caller stops waiting.
-async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000 } = {}) {
+// readyMs is the budget for the host to say it is watching before the launch decision
+// is taken. It costs nothing when the host answers (the wait ends on the event) and
+// only takes this long when the host cannot start at all, where the alternative is
+// launching an app nobody can adopt.
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 4000 } = {}) {
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
+  // A host that has just proved it cannot start is not retried on every early call:
+  // that would only flash a second window open and shut. The next Run clears this.
+  const backoffUntil = windowHostBackoff.get(appRecord?.id) || 0;
+  if (backoffUntil > Date.now()) return null;
   const win = ensureGuestWindow(appRecord, note);
   // Show the window as soon as Run is pressed. The app's own window appears inside it a
   // moment later; until then the window says what is happening instead of leaving the
@@ -2171,6 +2293,19 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
     logPath,
   });
   win.__rcHostState = state;
+  // Whether the app may be started with a hidden first window depends on the host
+  // actually watching. Ask it, and wait for its answer before anything is launched.
+  await waitForWindowHostReady(state, readyMs);
+  if (!state.ready) {
+    const reason = windowHostingRefusal(appRecord) || 'the window host did not start';
+    windowHostBackoff.set(appRecord.id, Date.now() + 20000);
+    appendLog(logPath, `Window hosting is unavailable (${reason}). This app is launched normally and keeps its own window; isolation is unaffected.`);
+    setGuestWindowStatus(win, `RunContainer could not host this app’s window (${reason}), so it opens on your desktop instead. Isolation is unaffected.`);
+    recordWindowHosted(appRecord.id, false, { windowHostReason: reason, hostedWindowPid: null, windowHostState: 'unavailable' });
+    // No blank RunContainer window is left behind when nothing will be hosted in it.
+    closeGuestWindow(appRecord.id);
+    return { embedded: false, ready: false, reason };
+  }
   await waitForWindowHost(state, timeoutMs);
   if (state.embedded) {
     win.__rcHostPid = state.embeddedPid || pid;
@@ -2311,7 +2446,7 @@ async function runWithAppContainer(appRecord, sandboxRoot, logPath) {
       workingDirectory: sandboxRoot,
       capabilities: caps,
       appArgs: argCheck.args || undefined,
-      showState: startsHidden(appRecord.source) ? 0 : -1,
+      showState: showStateForLaunch(appRecord, logPath),
     }));
 
     if (!launch.verified || launch.processSid !== launch.containerSid) {
@@ -2594,8 +2729,9 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
       runtimeEnv,
       // An elevated window cannot be re-parented by this medium-integrity process, so
       // the elevated launcher hosts it instead (same integrity level). It must not start
-      // hidden: the window has to exist before the host can adopt it.
-      startHidden: elevated ? false : startsHidden(appRecord.source),
+      // hidden: the window has to exist before the host can adopt it. An ordinary launch
+      // is hidden only when a watching host is there to adopt the first window.
+      startHidden: !elevated && showStateForLaunch(appRecord, logPath) === 0,
       resultFile: elevated ? statePaths.resultFile : '',
       stopFile: elevated ? statePaths.stopFile : '',
       hostWindowTitle: elevated ? rcvmAdminHostTitle(appRecord) : '',
@@ -3842,6 +3978,38 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   const logsRoot = appRecord.logsRoot || path.join(sandboxRoot, 'logs');
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   ensureSandboxLayout(sandboxRoot);
+  // Run is a fresh attempt at hosting, including after the host failed to start on a
+  // previous launch. The backoff only exists to stop one launch flapping.
+  windowHostBackoff.delete(appRecord.id);
+
+  // A JIT run is an explicit request from the JIT launcher: the strategy is recorded
+  // first, then the app is started immediately with it. A native executable has no
+  // intermediate language to translate, so it is still started right away and the log
+  // says plainly that no JIT strategy applied, rather than implying one did.
+  if (requestedAppRecord?.jitRun === true) {
+    const runtime = appRecord.runtime || detectAppRuntime(appRecord.source);
+    const requested = runtimeProfile.normalizeStrategy(requestedAppRecord.runtimeJit);
+    const applied = runtime?.kind === 'dotnet' ? requested : 'auto';
+    const updated = {
+      ...appRecord,
+      runtimeJit: applied,
+      ...(runtime ? { runtime } : {}),
+      lastRunWithJit: true,
+      jitRequestedAt: new Date().toISOString(),
+      jitRuntimeKind: runtime?.kind || 'unknown',
+    };
+    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? updated : entry)));
+    appRecord = updated;
+    if (runtime?.kind === 'dotnet') {
+      const env = runtimeProfile.sanitizeEnvironment(runtimeProfile.runtimeEnvironment(applied, runtime.kind));
+      appendLog(logPath, `JIT run requested. Strategy “${runtimeProfile.strategyLabel(applied)}” applied to this managed .NET app`
+        + `${Object.keys(env).length ? `: ${Object.entries(env).map(([key, value]) => `${key}=${value}`).join(', ')}` : ' (runtime defaults)'}. Starting it now.`);
+    } else if (runtime?.kind === 'native') {
+      appendLog(logPath, 'JIT run requested, but this app is already machine code: there is no JIT translation to enable, so it is started now with the normal launch path.');
+    } else {
+      appendLog(logPath, 'JIT run requested, but RunContainer could not read this executable’s header, so no JIT strategy was applied. It is started now with the normal launch path.');
+    }
+  }
 
   // A Microsoft Store bridge installs into WindowsApps, outside every boundary this app can
   // enforce, and its window is a UWP frame no host window can adopt. Refusing before the
@@ -3930,7 +4098,9 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   // host can spend starting, so the app's first window is hosted the moment it exists.
   if (appRecord.windowHosting !== false && process.platform === 'win32') {
     hostAppWindowEverywhere({ ...appRecord, pid: null }, null, logPath, {
-      note: 'This app runs in its own environment. Its window is hosted here.',
+      note: appRecord.setupProgram && appRecord.setupPlanMode === 'silent'
+        ? 'Setup is completing in the background inside this environment. This window reports its progress, and the app starts here when setup finishes.'
+        : 'This app runs in its own environment. Its window is hosted here.',
       timeoutMs: 600,
     }).catch(() => {});
   }
@@ -3972,6 +4142,12 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   // look for the app it produced. This is what turns "Run did nothing for ages"
   // into a named result.
   if (result?.status === 'Running' && appRecord.setupProgram) {
+    // An unattended setup has no window of its own, so the second RunContainer window
+    // is its progress surface: it must show that setup is still working rather than
+    // sit empty for as long as the install takes.
+    if (appRecord.setupPlanMode === 'silent' && !appRecord.installedExePath) {
+      startSetupProgressReporting(appRecord, logPath);
+    }
     watchSetupCompletion(appRecord.id, logPath).catch(() => {});
   }
   return result;
@@ -4045,10 +4221,76 @@ async function watchSetupCompletion(appId, logPath) {
   if (!outcome.exited) return null;
   const record = getStoredApp(appId);
   if (!record?.setupProgram || record.installedExePath) return null;
-  return recordInstalledExecutable(appId, {
+  const installed = await recordInstalledExecutable(appId, {
     logPath,
     since: Date.parse(record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
   });
+  stopSetupProgressReporting(appId);
+  // Setup finished with nobody waiting at a wizard: start what it installed, so pressing
+  // Run once reaches the app instead of asking for a second press.
+  const updated = installed ? getStoredApp(appId) : null;
+  if (updated?.installedExePath && updated.status !== 'Running') {
+    appendLog(logPath, `Setup has finished; starting ${path.basename(updated.installedExePath)} with its own window now.`);
+    emitToRenderer('app:setup', {
+      id: appId,
+      name: updated.name,
+      phase: 'starting-app',
+      detail: `Setup finished. Starting ${path.basename(updated.installedExePath)} now.`,
+    });
+    runApp({ id: appId }).catch(() => {});
+  }
+  return installed;
+}
+
+// "4m 07s" - a long setup is described in the same units everywhere it is reported.
+function formatDuration(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  return `${seconds}s`;
+}
+
+// One reporter per app while an unattended setup runs. It says which installer is
+// working, how long it has been working, and the newest line of its own log. Nothing
+// here invents progress: the clock is real and the line is quoted.
+const setupProgressTimers = new Map();
+
+function stopSetupProgressReporting(appId) {
+  const timer = setupProgressTimers.get(appId);
+  if (timer) clearInterval(timer);
+  setupProgressTimers.delete(appId);
+}
+
+function startSetupProgressReporting(appRecord, logPath) {
+  stopSetupProgressReporting(appRecord.id);
+  const startedAt = Date.parse(appRecord.setupStartedAt || '') || Date.now();
+  const tick = () => {
+    const record = getStoredApp(appRecord.id);
+    if (!record) {
+      stopSetupProgressReporting(appRecord.id);
+      return;
+    }
+    if (!backgroundSetupRunning(record)) {
+      stopSetupProgressReporting(appRecord.id);
+      return;
+    }
+    const win = guestWindows.get(appRecord.id);
+    if (!win || win.isDestroyed()) return;
+    const lines = behavioralMonitor.readLogTail(logPath, { maxLines: 4 }) || [];
+    const latest = [...lines].reverse().find((line) => line && !/^(Launch started|Using container|Isolation engine|RC-Brain)/.test(line));
+    const elapsed = formatDuration(Date.now() - startedAt);
+    const trimmed = latest && latest.length > 120 ? `${latest.slice(0, 119)}…` : latest;
+    setGuestWindowStatus(win, `Setup is working in the background (${record.setupFamilyName || 'installer'}), running for ${elapsed}.`
+      + (trimmed ? ` Latest: ${trimmed}` : '')
+      + ' The app you pressed Run on starts here as soon as setup finishes.');
+  };
+  tick();
+  const timer = setInterval(tick, 4000);
+  if (timer.unref) timer.unref();
+  setupProgressTimers.set(appRecord.id, timer);
 }
 
 ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requestedAppRecord));
@@ -4058,7 +4300,9 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requested
 // installer families whose unattended switches are documented (see
 // src/services/setupInstall.js); anything else keeps its wizard in a RunContainer
 // window, and this handler refuses rather than guessing at switches.
-ipcMain.handle('setup-in-background', async (_event, requestedAppRecord) => {
+ipcMain.handle('setup-in-background', async (_event, requestedAppRecord) => setupAppInBackground(requestedAppRecord));
+
+async function setupAppInBackground(requestedAppRecord) {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
   const plan = planSetupRun({
@@ -4108,13 +4352,26 @@ ipcMain.handle('setup-in-background', async (_event, requestedAppRecord) => {
         : 'Setup finished, but no installed executable was found in this environment.',
     };
   }
+  stopSetupProgressReporting(appRecord.id);
+  // Setup is finished and the app exists, so it is started: the point of pressing Run
+  // was to see the app, and it should not need a second press once setup is done.
+  emitToRenderer('app:setup', {
+    id: appRecord.id,
+    name: appRecord.name,
+    phase: 'starting-app',
+    detail: `Setup completed in the background. Starting ${path.basename(installedExePath)} now.`,
+  });
+  const started = await runApp({ id: appRecord.id }).catch(() => null);
   return {
     id: appRecord.id,
-    status: 'Installed',
+    status: started?.status === 'Running' ? 'Running' : 'Installed',
     installedExePath,
-    detail: `Setup completed in the background. Run now starts ${path.basename(installedExePath)}.`,
+    launch: started || null,
+    detail: started?.status === 'Running'
+      ? `Setup completed in the background and ${path.basename(installedExePath)} is starting in a RunContainer window.`
+      : `Setup completed in the background. Run now starts ${path.basename(installedExePath)}.`,
   };
-});
+}
 
 // RC-Brain runs continuously in the main process while monitoring is enabled;
 // these are the only renderer-facing entry points it has.
@@ -4688,6 +4945,10 @@ ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
     }
     return { ok: true };
   }
+  if (payload.action === 'background-setup') {
+    const result = await setupAppInBackground({ id: appRecord.id }).catch((error) => ({ status: 'Failed', error: error.message }));
+    return { ok: result?.status !== 'Failed', result, error: result?.error };
+  }
   if (payload.action === 'release') {
     const released = await releaseGuestWindowWindows(appRecord, [...trackedPids(appRecord), appRecord.hostedWindowPid]);
     if (win && !win.isDestroyed()) {
@@ -4698,6 +4959,16 @@ ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
     return { ok: true, released };
   }
   return { ok: false, error: 'Unknown window action.' };
+});
+
+// The beginner introduction is shown once for this installation and never again —
+// not once per version. The answer therefore lives in an app-wide file, not on an
+// app record, and it outlives every app being deleted.
+ipcMain.handle('get-preferences', async () => loadPreferences());
+ipcMain.handle('set-preference', async (_event, payload = {}) => {
+  const updated = savePreferences(payload);
+  emitToRenderer('app:preferences', updated);
+  return updated;
 });
 
 // The UI asks the main process for the version, so package.json stays the single source.

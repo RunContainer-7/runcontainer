@@ -47,6 +47,51 @@ function decision(overrides = {}) {
   };
 }
 
+describe('tool use, said out loud', () => {
+  // A notice that says nothing about tools used to read as "it did something and did
+  // not say", which is the ambiguity this removes: not using a tool is stated as
+  // plainly as using one.
+  it('states that no tool was used instead of leaving it to be inferred', () => {
+    const summary = monitor.describeToolUse(null, null);
+    expect(summary.used).toBe(false);
+    expect(summary.tool).toBeNull();
+    expect(summary.label).toBe('No tool was used on this incident: RC-Brain did not dispatch specialist agents and did not consult the Runbook.');
+  });
+
+  it('names the tool, the agents and the reasoning agents that actually ran', () => {
+    const summary = monitor.describeToolUse({
+      toolId: 'spawn_agents',
+      agents: [{ id: 'engine', label: 'Engine agent', ok: true }],
+      specialist: { research: {}, expert: {}, harmony: null },
+    }, null);
+    expect(summary.used).toBe(true);
+    expect(summary.toolLabel).toBe('Dispatch specialist agents');
+    expect(summary.agents).toEqual([{ id: 'engine', label: 'Engine agent' }]);
+    expect(summary.label).toContain('Tool used on this incident: Dispatch specialist agents');
+    expect(summary.label).toContain('agents: Engine agent');
+  });
+
+  it('describes a Runbook lookup, matched or not, and a dispatch recorded earlier', () => {
+    const matched = monitor.describeToolUse({
+      toolId: 'consult_runbook',
+      agents: [],
+      runbook: { matched: true, rule: { id: 'dll_missing' } },
+    }, null);
+    expect(matched.runbook).toBe('dll_missing');
+    expect(matched.label).toContain('matched the documented signature dll_missing');
+
+    const unmatched = monitor.describeToolUse({ toolId: 'consult_runbook', agents: [], runbook: { matched: false } }, null);
+    expect(unmatched.runbook).toBeNull();
+    expect(unmatched.label).toContain('no exact documented signature matched');
+
+    // A dispatch from earlier in the same incident is described with the same labels.
+    const earlier = monitor.describeToolUse(null, { toolId: 'spawn_agents', spawned: ['window'], reasoning: ['expert'] });
+    expect(earlier.used).toBe(true);
+    expect(earlier.agents).toEqual([{ id: 'window', label: 'Window agent' }]);
+    expect(earlier.specialists).toEqual([{ id: 'expert', label: 'Expert agent' }]);
+  });
+});
+
 describe('behavioural observation helpers', () => {
   it('reads only the tail of a log file', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-behavior-'));

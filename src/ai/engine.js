@@ -39,7 +39,7 @@ function shippedModelFiles(dir = MODEL_DIR) {
 
 function resolveFallbackModel(dir = MODEL_DIR) {
   const files = shippedModelFiles(dir);
-  return path.join(dir, files[0] || 'rc-brain-4.json');
+  return path.join(dir, files[0] || 'rc-brain-5.json');
 }
 
 const FALLBACK_MODEL = resolveFallbackModel();

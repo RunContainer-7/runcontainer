@@ -31,16 +31,18 @@ function observation(overrides = {}) {
 // never a stale number in a test.
 const FEATURE_COUNT = require('./features').FEATURE_NAMES.length;
 
-describe('RC-Brain 4', () => {
+describe('RC-Brain 5', () => {
   let brain;
   beforeAll(() => {
     brain = createBrain();
   });
 
-  it('loads the shipped v4 model with split evaluation metadata', () => {
+  it('loads the shipped v5 model with split evaluation metadata', () => {
     expect(brain.available).toBe(true);
-    expect(brain.model.id).toBe('rc-brain-4');
-    expect(brain.model.parameters).toBeGreaterThan(9000);
+    expect(brain.model.id).toBe('rc-brain-5');
+    // v5 is wider than v4 (9,088 parameters) to pay for the broader corpus; the
+    // floor is a regression guard, not the exact count, which the trainer owns.
+    expect(brain.model.parameters).toBeGreaterThan(12000);
     expect(brain.model.features).toBe(75);
     expect(brain.model.labels.action).toContain('spawn_agents');
     expect(brain.model.capabilities.spawnAgents).toBe(true);
@@ -58,7 +60,7 @@ describe('RC-Brain 4', () => {
     expect(brain.model.capabilities.novelDiagnosis).toBe(false);
     // The model cannot author an agent, give it arguments or run anything through it.
     expect(brain.model.capabilities.readsArbitraryText).toBe(false);
-    expect(brain.registry.current).toBe('rc-brain-4.json');
+    expect(brain.registry.current).toBe('rc-brain-5.json');
   });
 
   it('leaves a healthy, windowed app alone', () => {

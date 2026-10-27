@@ -1,7 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, setUpInBackground } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, setUpInBackground, runContainerWithJit, getPreferences, setPreference } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
+import BeginnerSetup from "./BeginnerSetup";
 import { UPDATES } from "../data/updates";
+
+// The same names the main process uses for these strategies (src/services/runtimeProfile.js),
+// so the interface and the log describe a JIT run in identical words.
+const JIT_STRATEGY_LABELS = { "fast-start": "Fast start", throughput: "Maximum speed", auto: "Automatic (runtime default)" };
+
+// What "Enable JIT" honestly did for this app. A native executable has no intermediate
+// language for a just-in-time compiler to translate, and the message says that instead
+// of implying the switch did something.
+function jitRunMessage(container, strategy) {
+  const name = container?.name || "the app";
+  const kind = container?.runtime?.kind;
+  if (kind === "dotnet") return `${name} is starting with JIT: the .NET runtime will compile its IL with the “${JIT_STRATEGY_LABELS[strategy] || strategy}” strategy.`;
+  if (kind === "native") return `${name} is starting. It is already machine code, so there is no JIT translation to enable — RunContainer says so rather than pretending a switch helped.`;
+  return `${name} is starting. RunContainer could not read this executable's header, so no JIT strategy was applied.`;
+}
 
 function useBootAnimation() {
   const [booting, setBooting] = useState(true);
@@ -17,7 +33,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.7.8";
+const APP_VERSION_FALLBACK = "0.7.9";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -88,7 +104,31 @@ export default function ContainerManager() {
   const [aiExperiences, setAiExperiences] = useState([]);
   const [aiVerification, setAiVerification] = useState(null);
   const [aiWorking, setAiWorking] = useState(false);
+  const [jitRunning, setJitRunning] = useState(false);
+  const [jitNote, setJitNote] = useState("");
+  // The beginner introduction is offered once for this installation, never once per
+  // version. Nothing is shown until the preference has been read, so it cannot flash.
+  const [showBeginnerSetup, setShowBeginnerSetup] = useState(false);
   const booting = useBootAnimation();
+
+  useEffect(() => {
+    Promise.resolve(getPreferences())
+      .then((preferences) => {
+        if (preferences?.beginnerSetupSeen !== true) setShowBeginnerSetup(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  function finishBeginnerSetup() {
+    setShowBeginnerSetup(false);
+    // Recorded even when the walkthrough was skipped: it is a once-ever offer, and the
+    // record is what guarantees an update does not replay it.
+    Promise.resolve(setPreference({
+      beginnerSetupSeen: true,
+      beginnerSetupSeenAt: new Date().toISOString(),
+      beginnerSetupSeenVersion: appVersion,
+    })).catch(() => {});
+  }
 
   useEffect(() => {
     // Promise.resolve keeps this safe when the bridge is unavailable (for example in tests
@@ -475,6 +515,38 @@ export default function ContainerManager() {
       });
   }
 
+  function handleEnableJit(container) {
+    if (!container) {
+      setInstallMessage("Pick an app in Tweaks first, then press Enable JIT.");
+      return;
+    }
+    setJitNote("");
+    setJitRunning(true);
+    setInstallMessage(`Starting ${container.name} with JIT…`);
+    // The strategy is saved before the launch, because the launch is the point of the
+    // button: it has to use the choice just made, not the one after it.
+    Promise.resolve(setAppConfig({ id: container.id, runtimeJit: tweakRuntime }))
+      .then((saved) => {
+        if (saved?.status === "Failed") setJitNote(saved.error);
+        return runContainerWithJit({ ...container, runtimeJit: tweakRuntime });
+      })
+      .then((result) => {
+        if (!result || result.status !== "Running") {
+          setInstallMessage(`${container.name} was not launched: ${result?.error || result?.reason || "RunContainer did not confirm that an app process started."}`);
+          return;
+        }
+        updateContainerStatus(container.id, result.status);
+        const jitRun = jitRunMessage(container, tweakRuntime);
+        // The JIT line is shown with the running app, not only as a passing status line:
+        // it is the answer to "what did pressing Enable JIT actually do?".
+        setActiveSession({ ...container, ...result, status: "Running", embedded: false, jitRun });
+        setInstallMessage(jitRun);
+        refreshContainers();
+      })
+      .catch((error) => setInstallMessage(`Could not start ${container.name} with JIT: ${error?.message || "Unknown launch error."}`))
+      .finally(() => setJitRunning(false));
+  }
+
   function handleSetProfile(container, profile) {
     setAppProfile({ id: container.id, profile })
       .then((result) => {
@@ -814,16 +886,18 @@ export default function ContainerManager() {
                   {aiDecision.action?.label ? ` · chosen action: ${aiDecision.action.label}` : ''}
                 </span>
                 <span>{aiDecision.explanation}</span>
-                {aiDecision.agents && (
-                  <span className="muted">
-                    ◈ {aiDecision.agents.tool === 'consult_runbook' ? 'Runbook consulted' : 'Specialist agents dispatched'}
-                    {aiDecision.agents.tool === 'consult_runbook'
-                      ? aiDecision.agents.runbook?.matched
-                        ? `: ${aiDecision.agents.runbook.rule.label}`
-                        : ': no exact signature matched, so the components were measured'
-                      : `: ${(aiDecision.agents.spawned || []).map((agent) => agent.label).join(', ') || 'none answered'}`}
-                  </span>
-                )}
+                {/* Answered on every notice, including when the answer is "no":
+                    whether RC-Brain used either of its two tools on this incident.
+                    The main process summarizes it; the fallback covers notices
+                    recorded before that summary existed. */}
+                <span className="muted">
+                  ◈ {aiDecision.tools?.label
+                    || (aiDecision.agents
+                      ? (aiDecision.agents.tool === 'consult_runbook'
+                        ? `Tool used on this incident: Consult the Runbook${aiDecision.agents.runbook?.matched ? ` matched ${aiDecision.agents.runbook.rule.label}` : ' with no exact signature matched, so the components were measured'}.`
+                        : `Tool used on this incident: Dispatch specialist agents: ${(aiDecision.agents.spawned || []).map((agent) => agent.label).join(', ') || 'none answered'}.`)
+                      : 'No tool was used on this incident: RC-Brain did not dispatch specialist agents and did not consult the Runbook.')}
+                </span>
                 {aiDecision.agents?.arbitration && (
                   <span className="muted">
                     ◈ Harmony: {aiDecision.agents.arbitration.summary || aiDecision.agents.arbitration.reason}
@@ -841,7 +915,12 @@ export default function ContainerManager() {
                 )}
                 {aiMessage && <span className="behavioral-repair-status">{aiMessage}</span>}
                 {aiDecision.canRepair === false && (
-                  <span className="muted">Automatic repair has already run twice in the last ten minutes, so RC-Brain will not act again until it is asked.</span>
+                  <span className="muted">
+                    Automatic repair has already run twice in the last ten minutes, so RC-Brain will not act again until it is asked.
+                    {aiDecision.tools?.used
+                      ? ' It used its tools on this incident, so the measurements behind this diagnosis are already in.'
+                      : ' It used no tool on this incident.'}
+                  </span>
                 )}
                 <span className="muted behavioral-disclaimer">RC-Brain may restart the app, repair its own folder or restart its engine. It cannot delete app data, change Windows settings or weaken isolation without your approval.</span>
               </>
@@ -922,6 +1001,9 @@ export default function ContainerManager() {
                         ? 'Its files and settings stay in its own folder.'
                         : 'This app could not be kept in its own space, so it shares your normal Windows environment.'}
                   </div>
+                )}
+                {activeSession.status === 'Running' && activeSession.jitRun && (
+                  <div className="muted">{activeSession.jitRun}</div>
                 )}
               </div>
               <div className="detail-actions">
@@ -1110,9 +1192,25 @@ export default function ContainerManager() {
                       <option value="fast-start">Fast start (less background compilation)</option>
                       <option value="throughput">Maximum speed (tiered compilation + PGO)</option>
                     </select>
+                    <button
+                      className="settings-button"
+                      onClick={() => handleEnableJit(picked)}
+                      disabled={!picked || jitRunning}
+                      title={picked ? `Start ${picked.name} now with this JIT strategy` : 'Select an app first'}
+                    >
+                      {jitRunning ? 'Starting…' : 'Enable JIT'}
+                    </button>
                   </div>
                   <span className="muted">
-                    RunContainer runs on Electron’s V8, which already JIT-compiles JavaScript. That is built in, and there is no per-app switch for it. Changes apply the next time you press Run.
+                    Enable JIT starts the app selected above straight away, with the strategy chosen here applied on the way in —
+                    no second press. {picked?.lastRunWithJit
+                      ? `This app was last started as a JIT run${picked.jitRuntimeKind === 'dotnet' ? ' (strategy applied)' : ''}.`
+                      : ''}
+                  </span>
+                  {jitNote && <span className="muted">Note: {jitNote}</span>}
+                  <span className="muted">
+                    RunContainer runs on Electron’s V8, which already JIT-compiles JavaScript. That is built in, and there is no per-app switch for it.
+                    Changes apply the next time you press Run.
                   </span>
                 </div>
               </div>
@@ -1698,6 +1796,14 @@ export default function ContainerManager() {
             </div>
           </div>
         </div>
+      )}
+
+      {showBeginnerSetup && (
+        <BeginnerSetup
+          version={appVersion}
+          onFinish={finishBeginnerSetup}
+          onOpenLink={openExternalUrl}
+        />
       )}
 
       <div className="bottom-nav">

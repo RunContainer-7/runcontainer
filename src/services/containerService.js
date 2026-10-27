@@ -65,6 +65,32 @@ export async function runContainer(container) {
   return requireIpc('Running apps').invoke('run-exe', container);
 }
 
+// A JIT run: the app is started immediately, with the chosen runtime strategy applied
+// on the way in (see the jitRun handling in public/main.js runApp).
+export async function runContainerWithJit(container) {
+  return requireIpc('Running apps with JIT').invoke('run-exe', { ...container, jitRun: true });
+}
+
+// One-time, app-wide state for this installation (for example whether the beginner
+// introduction has already been shown).
+export async function getPreferences() {
+  if (!ipcRenderer) return {};
+  try {
+    return await ipcRenderer.invoke('get-preferences');
+  } catch (error) {
+    return {};
+  }
+}
+
+export async function setPreference(patch = {}) {
+  if (!ipcRenderer) return {};
+  try {
+    return await ipcRenderer.invoke('set-preference', patch);
+  } catch (error) {
+    return {};
+  }
+}
+
 export async function killContainer(container) {
   return requireIpc('Stopping apps').invoke('kill-exe', container);
 }

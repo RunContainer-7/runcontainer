@@ -9,9 +9,10 @@
 // before offering "review and train", and what CI runs.
 //
 // --train re-runs the full training pipeline with the curated examples added to
-// the fit set, writes rc-brain-2-candidate.json, and leaves the active model
-// untouched. --activate then applies scripts/promote-model.js, which re-checks
-// every gate. Training is offline and local; nothing leaves the machine.
+// the fit set, writes the active model's own name with -candidate on the end
+// (rc-brain-5-candidate.json today), and leaves the active model untouched.
+// --activate then applies scripts/promote-model.js, which re-checks every gate.
+// Training is offline and local; nothing leaves the machine.
 
 const fs = require('fs');
 const path = require('path');
@@ -79,6 +80,17 @@ function validate(curatedFile) {
   };
 }
 
+function candidateFilename() {
+  const registryPath = path.join(ROOT, 'src', 'ai', 'model', 'registry.json');
+  let active = 'rc-brain-5.json';
+  try {
+    active = JSON.parse(fs.readFileSync(registryPath, 'utf8')).current || active;
+  } catch (error) {
+    // No readable registry: the trainer's own current model is the fallback.
+  }
+  return `${path.basename(active, '.json')}-candidate.json`;
+}
+
 function train(curatedFile) {
   const validation = validate(curatedFile);
   if (!validation.ok) return { trained: false, validation };
@@ -91,7 +103,10 @@ function train(curatedFile) {
     },
     stdio: 'inherit',
   });
-  const candidateFile = 'rc-brain-2-candidate.json';
+  // Derived from the active model rather than written down: a hard-coded name is
+  // how this script spent three versions inspecting rc-brain-2-candidate.json,
+  // a file the trainer stopped writing, and reporting every candidate as failed.
+  const candidateFile = candidateFilename();
   const report = inspect(candidateFile);
   return {
     trained: result.status === 0 && report.ok,

@@ -2,6 +2,7 @@ const {
   buildWindowHostCSharp,
   buildWindowHostScript,
   buildWindowHostScriptArgs,
+  launchShowState,
   parseWindowHostOutput,
   parseWindowHostEvents,
   nativeHandleToInt,
@@ -143,6 +144,37 @@ describe("window host launcher", () => {
     const csharp = buildWindowHostCSharp();
     expect(csharp).toContain("public static bool Embed(long childHandle, long parentHandle, int topInset)");
     expect(csharp).toContain("MoveWindow(child, 0, inset, width, height, true)");
+  });
+
+  it("says it is watching only once the host assembly has loaded", () => {
+    // The caller waits for this event before allowing a hidden launch. Without it, the
+    // only way to know the host exists would be to assume it does.
+    const script = buildWindowHostScript();
+    expect(script).toContain("event = 'watching'");
+    const watchBranch = script.slice(script.indexOf("$Mode -eq 'watch'"), script.indexOf("[RunContainerWindowHost]::Watch"));
+    expect(watchBranch).toContain("event = 'watching'");
+    // It is emitted through the same machine-readable channel as every other event.
+    expect(parseWindowHostEvents(`${RESULT_PREFIX}{"event":"watching"}`)).toEqual([{ event: "watching" }]);
+    // And the prewarm path keeps its own readiness signal.
+    expect(script).toContain("event = 'ready'");
+  });
+
+  it("starts a graphical app hidden only when a watching host will adopt it", () => {
+    const watching = { ready: true, error: null, exited: false };
+    // The one case where hiding is safe.
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: true, host: watching })).toBe(0);
+    // Every other case starts the app visibly, because a hidden window nobody adopts is
+    // an app that never appears: no host at all, one that has not reported watching, one
+    // that failed or exited, hosting switched off for the app, and non-Windows.
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: true, host: null })).toBe(-1);
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: true, host: { ready: false } })).toBe(-1);
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: true, host: { ready: true, error: "host failed" } })).toBe(-1);
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: true, host: { ready: true, exited: true } })).toBe(-1);
+    expect(launchShowState({ isGui: true, platform: "win32", windowHosting: false, host: watching })).toBe(-1);
+    expect(launchShowState({ isGui: true, platform: "linux", windowHosting: true, host: watching })).toBe(-1);
+    // A console app has no window to host, so it never starts hidden.
+    expect(launchShowState({ isGui: false, platform: "win32", windowHosting: true, host: watching })).toBe(-1);
+    expect(launchShowState()).toBe(-1);
   });
 
   it("splits watcher output into one event per line", () => {

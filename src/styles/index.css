@@ -990,3 +990,105 @@ details.advanced-settings[open] > summary::before {
 .ai-panel .pill {
     white-space: nowrap;
 }
+
+/* The beginner introduction. It sits above every other panel so the first thing a new
+   user sees is the explanation, not a half-read app list behind it. */
+.beginner-backdrop {
+    z-index: 120;
+}
+
+.beginner-panel {
+    width: min(100%, 620px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.beginner-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.beginner-header h3 {
+    margin: 2px 0 0;
+}
+
+.beginner-kicker {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #93c5fd;
+}
+
+.beginner-count {
+    flex: none;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(96, 165, 250, 0.35);
+    color: #bfdbfe;
+    font-size: 12px;
+}
+
+.beginner-lead {
+    margin: 0;
+    color: #e2e8f0;
+    line-height: 1.55;
+}
+
+.beginner-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+    color: #cbd5e1;
+    line-height: 1.5;
+}
+
+.beginner-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.beginner-note {
+    margin: 0;
+    font-size: 12px;
+}
+
+.beginner-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    border-top: 1px solid rgba(96, 165, 250, 0.18);
+    padding-top: 12px;
+}
+
+.beginner-progress {
+    display: flex;
+    gap: 5px;
+}
+
+.beginner-dot {
+    width: 16px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.3);
+}
+
+.beginner-dot.done {
+    background: rgba(96, 165, 250, 0.55);
+}
+
+.beginner-dot.active {
+    background: #60a5fa;
+}
+
+.beginner-foot-note {
+    margin: 0;
+    font-size: 11.5px;
+    text-align: right;
+}

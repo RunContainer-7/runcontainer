@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { detectLogSignals } = require('../ai/features');
+const { AGENT_BY_ID } = require('../ai/agents');
 
 const STATES = {
   STARTING: 'STARTING',
@@ -197,6 +198,60 @@ function withAgentEvidence(observation, dispatch) {
       agentFindings: (dispatch.report?.facts || []).slice(0, 8),
     },
     history: { ...(observation.history || {}), agentsAvailable: true, agentsDispatched: true },
+  };
+}
+
+// One line answering "did it use its tools?" for an incident, in the model's own
+// terms. An absent section used to read as "it did something and did not say", which
+// is exactly the ambiguity this removes: not using a tool is stated as plainly as
+// using one.
+const TOOL_LABELS = { spawn_agents: 'Dispatch specialist agents', consult_runbook: 'Consult the Runbook' };
+
+function describeToolUse(dispatch, lastAgents) {
+  const record = dispatch || lastAgents;
+  if (!record) {
+    return {
+      used: false,
+      tool: null,
+      toolLabel: null,
+      agents: [],
+      specialists: [],
+      runbook: null,
+      label: 'No tool was used on this incident: RC-Brain did not dispatch specialist agents and did not consult the Runbook.',
+    };
+  }
+  const tool = record.toolId || record.tool || 'spawn_agents';
+  // A fresh dispatch carries agent objects under `agents`; a dispatch recorded earlier in
+  // the same incident carries their ids under `spawned`. Both are described with the same
+  // labels.
+  const rawAgents = Array.isArray(record.agents)
+    ? record.agents
+    : (Array.isArray(record.spawned) ? record.spawned : []);
+  const agents = rawAgents.map((agent) => {
+    if (agent && typeof agent === 'object') return { id: agent.id, label: agent.label || AGENT_BY_ID[agent.id]?.label || agent.id };
+    return { id: agent, label: AGENT_BY_ID[agent]?.label || String(agent) };
+  });
+  const rawSpecialists = Array.isArray(record.reasoning)
+    ? record.reasoning
+    // A fresh dispatch carries the reasoning agents' own conclusions, keyed by id.
+    : (record.specialist ? ['research', 'expert', 'harmony'].filter((id) => Boolean(record.specialist[id])) : []);
+  const specialists = rawSpecialists.map((id) => ({ id, label: AGENT_BY_ID[id]?.label || String(id) }));
+  const runbookRule = record.runbook && typeof record.runbook === 'object' ? record.runbook : null;
+  const runbookId = typeof record.runbook === 'string' ? record.runbook : (runbookRule?.matched ? runbookRule.rule?.id || null : null);
+  const parts = [`Tool used on this incident: ${TOOL_LABELS[tool] || tool}`];
+  if (tool === 'consult_runbook') {
+    parts.push(runbookId ? `matched the documented signature ${runbookId}` : 'no exact documented signature matched, so the components were measured');
+  }
+  parts.push(agents.length > 0 ? `agents: ${agents.map((agent) => agent.label).join(', ')}` : 'no agent answered');
+  if (specialists.length > 0) parts.push(`reasoning: ${specialists.map((agent) => agent.label).join(', ')}`);
+  return {
+    used: true,
+    tool,
+    toolLabel: TOOL_LABELS[tool] || tool,
+    agents,
+    specialists,
+    runbook: runbookId,
+    label: `${parts.join(' · ')}.`,
   };
 }
 
@@ -514,6 +569,9 @@ function createBehavioralSupervisor({
             arbitration: dispatch.arbitration || null,
           } : null,
           arbitration: decision.arbitration || null,
+          // Said on every notice, whether or not a tool ran, so the answer is never
+          // inferred from a missing section.
+          tools: describeToolUse(dispatch, state.lastAgents),
           canRepair: canRepairFn(state, now()),
           autoExecute: decision.decision === 'execute' && Boolean(decision.action.autonomous) && canRepairFn(state, now()),
           observation: {
@@ -581,6 +639,7 @@ function createBehavioralSupervisor({
 }
 
 module.exports = {
+  describeToolUse,
   STATES,
   RULES,
   readLogTail,

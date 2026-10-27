@@ -681,6 +681,11 @@ function buildWindowHostScript() {
     "  } elseif ($Mode -eq 'embeddebug') {",
     '    Write-Output ([RunContainerWindowHost]::EmbedSteps([int64]$ProcessId, [int64]$Parent))',
     "  } elseif ($Mode -eq 'watch') {",
+    // A positive signal that the host really is watching, emitted after the host
+    // assembly has loaded and before the watch loop starts. A caller that gets it
+    // knows a window created later will be adopted, so an app may be started with a
+    // hidden first window. Without it, starting hidden would mean starting invisible.
+    `    Write-Output ('${RESULT_PREFIX}' + (@{ event = 'watching' } | ConvertTo-Json -Compress))`,
     '    [RunContainerWindowHost]::Watch([int64]$Parent, $InsetTop, $PidFile, $SandboxRoot, $StopFile, $RevealAfterMs)',
     "  } elseif ($Mode -eq 'release') {",
     '    $count = [RunContainerWindowHost]::ReleaseProcessWindows([uint32]$ProcessId, [int64]$Parent)',
@@ -730,6 +735,22 @@ function buildWindowHostScriptArgs(scriptPath, {
   return args;
 }
 
+// The show-state an app is actually launched with.
+//
+// A GUI app is started with a hidden first window so it can be hosted before it is ever
+// drawn on the desktop. That only works if a watching host will adopt that window the
+// moment it exists. Hide it and nobody adopts it and the app runs invisibly, which looks
+// exactly like a window that never appeared — and is how a working app was diagnosed as a
+// window hang and restarted. So: hidden only on a positive `watching` event from a host
+// with no error, otherwise visible. -1 means "Windows' default", which is visible.
+function launchShowState({ isGui, platform = process.platform, windowHosting = true, host = null } = {}) {
+  if (!isGui) return -1;
+  if (platform !== 'win32') return -1;
+  if (windowHosting === false) return -1;
+  if (!host || host.ready !== true || host.error || host.exited) return -1;
+  return 0;
+}
+
 function parseWindowHostOutput(stdout) {
   const text = String(stdout || '');
   const line = text.split(/\r?\n/).reverse().find((entry) => entry.startsWith(RESULT_PREFIX));
@@ -775,6 +796,7 @@ module.exports = {
   buildWindowHostCSharp,
   buildWindowHostScript,
   buildWindowHostScriptArgs,
+  launchShowState,
   parseWindowHostOutput,
   parseWindowHostEvents,
   nativeHandleToInt,
