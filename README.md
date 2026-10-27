@@ -110,6 +110,20 @@ git tag v0.7.6 && git push origin v0.7.6
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.
 
+## Code signing
+
+Release installers are signed for free by [SignPath.io](https://signpath.io) through the SignPath Foundation, so Windows shows a publisher instead of "Unknown publisher".
+
+**Free code signing provided by SignPath.io, certificate by SignPath Foundation.**
+
+- The certificate belongs to SignPath Foundation, so that is the publisher name on the installer — not the name of an individual maintainer.
+- Signing runs inside the release workflow, from the tagged commit, on GitHub-hosted runners, and signs only the installer that workflow built from that tag. The signature is read back off the file with `Get-AuthenticodeSignature` before it is attached to the release, and the release fails if it is not valid.
+- Every signing request is approved by a person, so a release waits for that approval instead of publishing anything unsigned.
+- Roles: an approver who authorises each signing request, and a submitter whose API token the workflow uses. <!-- TODO(maintainer): name them here, e.g. "Approver: @handle — Submitter: @handle". SignPath requires the signing policy and its roles to be published. -->
+- Privacy: RunContainer collects no telemetry. See the [privacy policy](https://runcontainer-7.github.io/9-runcontainer/policies).
+
+A signature identifies who built the file and proves it was not modified afterwards. It is not a promise that Windows stays quiet: SmartScreen reputation builds from clean downloads over time, so a very new version can still prompt.
+
 ## Support
 
 If you have an issue with the app, report any bugs, need assistance or just want to ask any questions/feature request, you can either head over to the official documentation website: https://runcontainer-7.github.io/9-runcontainer/, or you can join our support discord server, which included priority support over GitHub Issue: https://discord.gg/UKTGRMMmC4.

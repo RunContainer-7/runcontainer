@@ -9,6 +9,11 @@ name: Stable release
 # Cut a stable release by tagging: git tag v0.7.1 && git push origin v0.7.1
 # Tags must match package.json. Pre-releases are manual (mark the release
 # "pre-release" on GitHub); this workflow only publishes what you tag.
+#
+# Code signing is optional at the workflow level: every signing step is skipped
+# while the SignPath repository variables are unset, so releases keep publishing
+# unsigned while a SignPath Foundation application is still being reviewed
+# instead of failing on a missing token.
 
 on:
   push:
@@ -17,6 +22,9 @@ on:
 
 permissions:
   contents: write
+  # The SignPath signing action downloads the artifact it signs with the
+  # workflow token, and naming any permission at all sets the rest to none.
+  actions: read
 
 jobs:
   release:
@@ -89,7 +97,65 @@ jobs:
           if (-not (Test-Path $setup)) { throw "Installer was not produced at $setup." }
           Write-Output "Built $setup ($((Get-Item $setup).Length) bytes)"
 
-      - name: Attach installer to the GitHub Release
+      # ---- Code signing ----------------------------------------------------
+      # SignPath Foundation signs open-source Windows builds without charge, and
+      # the certificate is issued to the Foundation rather than to this project.
+      # Everything below is skipped until SIGNPATH_ORGANIZATION_ID exists, so an
+      # unapproved project still publishes.
+
+      # SignPath signs an artifact produced by this workflow run and nothing
+      # else, which is what keeps the signed file provably built from this tag.
+      - name: Upload the unsigned installer for signing
+        id: unsigned-installer
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: out/RunContainer-Setup-*.exe
+          if-no-files-found: error
+
+      # Every signing request is approved by a person, so this step waits for
+      # that approval instead of racing ahead and publishing an unsigned file.
+      - name: Sign the installer with SignPath
+        id: signpath
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          # The action's own default is 10 minutes, but every signing request is
+          # approved by hand, so a release cut outside working hours would fail
+          # on the timeout rather than on anything being wrong.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: out/signed
+
+      # Read the signature back off the exact file that is about to be
+      # published. A signing service that reports success while leaving the
+      # artifact unsigned would otherwise ship unsigned and unnoticed.
+      - name: Verify the signature on the signed installer
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem 'out\signed\RunContainer-Setup-*.exe' -ErrorAction Stop | Select-Object -First 1
+          $sig = Get-AuthenticodeSignature $setup.FullName
+          Write-Output "Signature status: $($sig.Status)"
+          Write-Output "Signed by: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "Installer is not validly signed ($($sig.Status))." }
+
+      - name: Attach the signed installer to the GitHub Release
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/signed/RunContainer-Setup-*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Attach the unsigned installer to the GitHub Release
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID == '' }}
         uses: softprops/action-gh-release@v2
         with:
           files: out/RunContainer-Setup-*.exe
