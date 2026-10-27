@@ -12,8 +12,10 @@ name: Stable release
 #
 # Code signing is optional at the workflow level: every signing step is skipped
 # while the SignPath repository variables are unset, so releases keep publishing
-# unsigned while a SignPath Foundation application is still being reviewed
-# instead of failing on a missing token.
+# unsigned instead of failing on a missing token. The SignPath Foundation
+# application was declined for now, because the program needs a project with more
+# visible public traction, so releases stay unsigned until a signing service is
+# configured.
 
 on:
   push:

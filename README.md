@@ -112,15 +112,15 @@ The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.e
 
 ## Code signing
 
-Release installers are signed for free by [SignPath.io](https://signpath.io) through the SignPath Foundation, so Windows shows a publisher instead of "Unknown publisher".
+**Release installers are not code-signed at the moment.** Windows shows "Unknown publisher", and SmartScreen may warn before the installer runs, so only run an installer downloaded from the [Releases page](../../releases) or the official website.
 
-**Free code signing provided by SignPath.io, certificate by SignPath Foundation.**
+The release workflow is built for the [SignPath Foundation](https://signpath.io) program, which signs qualifying open-source Windows builds without charge, and its signing steps are skipped until they are configured, so a release publishes unsigned instead of failing. That application was declined for now: the Foundation issues its own certificate only to projects that already show public traction (stars, forks, contributors, outside articles or discussion) and invited a reapplication once RunContainer has more of it.
 
-- The certificate belongs to SignPath Foundation, so that is the publisher name on the installer — not the name of an individual maintainer.
-- Signing runs inside the release workflow, from the tagged commit, on GitHub-hosted runners, and signs only the installer that workflow built from that tag. The signature is read back off the file with `Get-AuthenticodeSignature` before it is attached to the release, and the release fails if it is not valid.
-- Every signing request is approved by a person, so a release waits for that approval instead of publishing anything unsigned.
-- Roles: an approver who authorises each signing request, and a submitter whose API token the workflow uses. <!-- TODO(maintainer): name them here, e.g. "Approver: @handle — Submitter: @handle". SignPath requires the signing policy and its roles to be published. -->
-- Privacy: RunContainer collects no telemetry. See the [privacy policy](https://runcontainer-7.github.io/9-runcontainer/policies).
+When a signing service is configured, it signs the installer that workflow built from the tagged commit, on GitHub-hosted runners, and only that file: the signature is read back off it with `Get-AuthenticodeSignature` before it is attached to the release, and the release fails if it is not valid. Every signing request is approved by a person, so a release waits for that approval instead of publishing anything unsigned. Signing needs these repository settings:
+
+- Variable `SIGNPATH_ORGANIZATION_ID` — the service's organization id. Every signing step is skipped while it is empty.
+- Variables `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_SIGNING_POLICY_SLUG` — the project and the signing policy that authorises a release.
+- Secret `SIGNPATH_API_TOKEN` — the submitter's API token.
 
 A signature identifies who built the file and proves it was not modified afterwards. It is not a promise that Windows stays quiet: SmartScreen reputation builds from clean downloads over time, so a very new version can still prompt.
 
