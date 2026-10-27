@@ -154,6 +154,31 @@ describe('RCVM user-mode container backend', () => {
     expect(buildRcvmLaunchScript(SCRIPT_OPTS)).not.toContain('[RcvmWindowHost]::Begin');
   });
 
+  it('keeps the elevated host alive for the app the installer starts', () => {
+    // Two defects left an elevated app's window on the desktop with nothing to be
+    // hosted in. The host destroyed itself 30s after launch when no window had appeared
+    // yet, which is routine for a self-extracting or download-then-install wizard; and
+    // an installer that starts the app it installed leaves that app orphaned, so
+    // matching windows by parent process no longer finds it.
+    const script = buildRcvmLaunchScript({
+      ...SCRIPT_OPTS,
+      stopFile: 'C:\\data\\state\\app.stop',
+      hostWindowTitle: 'RunContainer — Demo (administrator approved)',
+    });
+    const host = script.slice(script.indexOf('public static class RcvmWindowHost'));
+    // The host gives up only once the contained tree itself is gone.
+    const giveUp = host.slice(host.indexOf('giveUpAtMs > 0'));
+    expect(giveUp).toContain('!RcvmLauncher.JobActive(jobName)');
+    // Job membership still identifies the app's window after its parent has exited.
+    expect(host).toContain('RcvmLauncher.JobHasProcess(jobName, owner)');
+    expect(script).toContain('IsProcessInJob(proc, job, out member)');
+    // Every window the app owns is adopted, not only the first one, so an installer's
+    // splash, wizard and progress dialog all render inside the host.
+    expect(host).toContain('hostedWindows.Add(found)');
+    expect(host).toContain('for (int i = 0; i < found.Count; i += 1) Adopt(found[i]);');
+    expect(host).toContain('static void ChoosePrimary()');
+  });
+
   it('quotes the host window title instead of interpolating it', () => {
     const script = buildRcvmLaunchScript({ ...SCRIPT_OPTS, hostWindowTitle: "Bad'); Remove-Item C:\\x; ('" });
     expect(script).toContain("Begin('Bad''); Remove-Item C:\\x; (''");

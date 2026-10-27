@@ -2248,18 +2248,23 @@ function ensureGuestWindow(appRecord, note) {
 
   // A hosted child window must be released before its parent disappears, so closing
   // the window runs the release in the main process first.
-  let closing = false;
   win.on('close', (event) => {
-    if (win.__rcClosing || closing) return;
+    if (win.__rcClosing) return;
     event.preventDefault();
-    closing = true;
+    win.__rcClosing = true;
+    guestWindows.delete(appRecord.id);
     const record = getStoredApp(appRecord.id) || appRecord;
-    releaseGuestWindowWindows(record, [...trackedPids(record), record.hostedWindowPid]).finally(() => {
-      if (!win.isDestroyed()) win.destroy();
-    });
+    releaseGuestWindowWindows(record, [...trackedPids(record), record.hostedWindowPid])
+      .catch((error) => {
+        appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest-window release on close: ${error.message}`);
+      })
+      .finally(() => {
+        if (!win.isDestroyed()) win.destroy();
+      });
   });
   win.on('closed', () => {
     guestWindows.delete(appRecord.id);
+    win.__rcClosing = false;
   });
   return win;
 }
@@ -2888,12 +2893,16 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
     // elevated launcher itself (Windows blocks this process from re-parenting it), so only
     // a normal launch needs the Electron host window here.
     if (!elevated) {
-      hostAppWindowEverywhere(updatedApp, pid, logPath, {
+      const hosted = await hostAppWindowEverywhere(updatedApp, pid, logPath, {
         note: 'This app runs in its own environment. Its window is hosted here.',
-      }).then(() => {
-        const latest = getStoredApp(appRecord.id);
-        if (latest) broadcastContainerStatus(latest);
-      }).catch(() => {});
+      });
+      const again = getStoredApp(appRecord.id);
+      if (again && !again.windowHosted && hosted?.embedded) {
+        // The hosted PID may differ from the launch PID when the app's real window is in a
+        // child process. Persist the hosted PID so Stop/Delete can release it.
+        saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, windowHosted: true, hostedWindowPid: hosted.pid || pid } : entry)));
+      }
+      if (again) broadcastContainerStatus(again);
     }
     return {
       id: appRecord.id,
@@ -4069,12 +4078,11 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     broadcastContainerStatus(alreadyRunning);
     // Pressing Run on an app that is already running must still present it inside
     // RunContainer; otherwise its window sits on the desktop and Run appears to do nothing.
-    hostAppWindowEverywhere(alreadyRunning, existingPids[0], logPath, {
+    const hostResult = await hostAppWindowEverywhere(alreadyRunning, existingPids[0], logPath, {
       note: 'This app was already running. Its window is hosted here.',
-    }).then(() => {
-      const latest = getStoredApp(appRecord.id);
-      if (latest) broadcastContainerStatus(latest);
-    }).catch(() => {});
+    });
+    const latest = getStoredApp(appRecord.id);
+    if (latest) broadcastContainerStatus(latest);
     return {
       id: appRecord.id,
       status: 'Running',
@@ -4237,7 +4245,33 @@ async function watchSetupCompletion(appId, logPath) {
       phase: 'starting-app',
       detail: `Setup finished. Starting ${path.basename(updated.installedExePath)} now.`,
     });
-    runApp({ id: appId }).catch(() => {});
+    const started = await runApp({ id: appId }).catch(() => null);
+    if (started?.status === 'Running' && started?.pid) {
+      // The app the installer produced is running in its own environment. Its window has
+      // to end up here, not on the desktop: the launch was asked for once and the user is
+      // waiting at this RunContainer window for it. An elevated app is the one exception -
+      // Windows will not let this process parent an elevated window, and the elevated
+      // launcher already opened a RunContainer administrator window that hosts it.
+      const fresh = getStoredApp(appId);
+      if (started.elevated) {
+        if (fresh) broadcastContainerStatus(fresh);
+      } else {
+        const hostResult = await hostAppWindowEverywhere(started, started.pid, logPath, {
+          note: `Setup finished. ${path.basename(updated.installedExePath)} is starting here.`,
+          // A longer budget than a normal launch: an installer that starts the real app a
+          // moment after it exits would otherwise get a host that had already stopped
+          // looking, and the app would open on the desktop instead.
+          timeoutMs: 45000,
+        });
+        if (hostResult?.embedded) {
+          saveApps(loadApps().map((entry) => (entry.id === appId
+            ? { ...entry, windowHosted: true, hostedWindowPid: hostResult.pid || started.pid }
+            : entry)));
+        }
+        const latest = getStoredApp(appId);
+        if (latest) broadcastContainerStatus(latest);
+      }
+    }
   }
   return installed;
 }
@@ -5407,8 +5441,10 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
       : entry));
     saveApps(apps);
     appendLog(appLog, `App ${appRecord.id} stopped.`);
-    // The window belonged to the process that was just confirmed stopped, so the second
-    // window has nothing left to show.
+    // The window belonged to the process that was just confirmed stopped. Release it back
+    // to the desktop first, then close the second RunContainer window once the release is
+    // finished, so the renderer is never torn down mid-release (which left the screen blank).
+    await releaseAppWindow(appRecord, trackedPids(appRecord), appLog);
     closeGuestWindow(appRecord.id);
     const updated = apps.find((entry) => entry.id === appRecord.id);
     if (updated) broadcastContainerStatus(updated);

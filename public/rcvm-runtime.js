@@ -216,6 +216,9 @@ public class RcvmLauncher {
   static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
 
   [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr OpenProcess(uint access, bool inheritHandle, uint processId);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint size, IntPtr retLen);
 
   [DllImport("advapi32.dll", SetLastError = true)]
@@ -340,6 +343,37 @@ public class RcvmLauncher {
     lock (jobs) { jobs.TryGetValue(jobName, out job); }
     if (job == IntPtr.Zero) return;
     TerminateJobObject(job, 0);
+  }
+
+  // True while the contained tree still has a live process. The host window keeps
+  // watching for a window as long as that is true, because an installer that finishes
+  // and starts the app it installed is the most common way an elevated app's window
+  // appears - well after the launch itself returned.
+  public static bool JobActive(string jobName)
+  {
+    IntPtr job;
+    lock (jobs) { jobs.TryGetValue(jobName, out job); }
+    if (job == IntPtr.Zero) return false;
+    return ActiveProcesses(job) > 0;
+  }
+
+  // Job membership is inherited by descendants, so it still identifies the app's window
+  // after the installer that started it has exited and left it orphaned in the process
+  // list, where the parent chain no longer leads back to the process that was launched.
+  public static bool JobHasProcess(string jobName, uint processId)
+  {
+    IntPtr job;
+    lock (jobs) { jobs.TryGetValue(jobName, out job); }
+    if (job == IntPtr.Zero) return false;
+    IntPtr proc = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, processId);
+    if (proc == IntPtr.Zero) return false;
+    try
+    {
+      bool member;
+      if (!IsProcessInJob(proc, job, out member)) return false;
+      return member;
+    }
+    finally { CloseHandle(proc); }
   }
 
   // Post-launch verification of the ACTUAL process: job membership against OUR
@@ -586,7 +620,12 @@ public static class RcvmWindowHost
   const int WsOverlappedWindow = 0x00CF0000;
 
   static IntPtr host = IntPtr.Zero;
-  static IntPtr hosted = IntPtr.Zero;
+  // Every window of this app that the host has adopted. An installer wizard routinely
+  // shows more than one (an unpacking splash, then the wizard, then a progress dialog),
+  // and each of them belongs inside the host rather than on the desktop.
+  static List<IntPtr> hostedWindows = new List<IntPtr>();
+  // The adopted window that fills the host; the others keep their own size, centred.
+  static IntPtr primary = IntPtr.Zero;
   static uint appPid;
   static string jobName = "";
   static string stopFile = "";
@@ -654,13 +693,71 @@ public static class RcvmWindowHost
 
   static void Fit()
   {
-    if (hosted == IntPtr.Zero || host == IntPtr.Zero) return;
+    if (host == IntPtr.Zero) return;
     HostRect client;
     if (!GetClientRect(host, out client)) return;
     int width = client.Right - client.Left;
     int height = client.Bottom - client.Top;
     if (width <= 0 || height <= 0) return;
-    MoveWindow(hosted, 0, 0, width, height, true);
+    for (int i = 0; i < hostedWindows.Count; i += 1)
+    {
+      IntPtr window = hostedWindows[i];
+      if (!IsWindow(window)) continue;
+      if (window == primary)
+      {
+        MoveWindow(window, 0, 0, width, height, true);
+        continue;
+      }
+      // A second window (a dialog) keeps its own size instead of being stretched
+      // edge to edge, which would throw the app's own layout apart.
+      HostRect own;
+      if (!GetWindowRect(window, out own)) continue;
+      int ownWidth = Math.Min(Math.Max(own.Right - own.Left, 320), Math.Max(width - 48, 320));
+      int ownHeight = Math.Min(Math.Max(own.Bottom - own.Top, 200), Math.Max(height - 48, 200));
+      MoveWindow(window, Math.Max((width - ownWidth) / 2, 0), Math.Max((height - ownHeight) / 2, 0), ownWidth, ownHeight, true);
+    }
+  }
+
+  // Adopts one window: makes it a real child of the host and shows it inside.
+  static bool Adopt(IntPtr found)
+  {
+    ShowWindow(found, SwHide);
+    int style = GetWindowLong32(found, GwlStyle);
+    SetParent(found, host);
+    // SetParent deliberately keeps WS_POPUP, and a popup still reports its OWNER from
+    // GetParent, so the style change has to happen before the result is checked.
+    SetWindowLong32(found, GwlStyle, (style | WsChild) & ~WsPopup);
+    SetWindowLong32(found, GwlExStyle, GetWindowLong32(found, GwlExStyle) & ~WsExAppWindow);
+    if (GetParent(found) != host)
+    {
+      // Never leave an app invisible: if hosting is refused, put the window back on
+      // the desktop exactly as it was.
+      SetParent(found, IntPtr.Zero);
+      SetWindowLong32(found, GwlStyle, style);
+      ShowWindow(found, SwShow);
+      return false;
+    }
+    hostedWindows.Add(found);
+    ShowWindow(found, SwShow);
+    return true;
+  }
+
+  // The largest adopted window is the app's main one: an installer's wizard is bigger
+  // than the splash screen or progress dialog beside it.
+  static void ChoosePrimary()
+  {
+    IntPtr best = IntPtr.Zero;
+    long bestArea = 0;
+    for (int i = 0; i < hostedWindows.Count; i += 1)
+    {
+      IntPtr window = hostedWindows[i];
+      if (!IsWindow(window)) continue;
+      HostRect rect;
+      if (!GetWindowRect(window, out rect)) continue;
+      long area = (long)(rect.Right - rect.Left) * (rect.Bottom - rect.Top);
+      if (area > bestArea) { bestArea = area; best = window; }
+    }
+    primary = best;
   }
 
   static Dictionary<uint, uint> Parents()
@@ -705,13 +802,16 @@ public static class RcvmWindowHost
       DestroyWindow(host);
       return;
     }
-    if (hosted != IntPtr.Zero)
+    // A window the app closed is no longer ours to fit; the list is the only record of
+    // what has been adopted, because a hosted window is no longer a top-level one and
+    // EnumWindows can no longer see it.
+    for (int i = hostedWindows.Count - 1; i >= 0; i -= 1)
     {
-      if (!IsWindow(hosted) || GetParent(hosted) != host) hosted = IntPtr.Zero;
-      else { Fit(); return; }
+      IntPtr window = hostedWindows[i];
+      if (!IsWindow(window) || GetParent(window) != host) hostedWindows.RemoveAt(i);
     }
     Dictionary<uint, uint> parents = Parents();
-    IntPtr found = IntPtr.Zero;
+    List<IntPtr> found = new List<IntPtr>();
     EnumWindows(delegate(IntPtr hwnd, IntPtr param)
     {
       if (GetParent(hwnd) != IntPtr.Zero) return true;
@@ -722,39 +822,33 @@ public static class RcvmWindowHost
       if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 150) return true;
       uint owner;
       GetWindowThreadProcessId(hwnd, out owner);
-      if (owner == 0 || !InLineage(owner, parents)) return true;
-      found = hwnd;
-      return false;
+      if (owner == 0) return true;
+      // The started process and everything below it, plus every process still inside the
+      // job. Membership outlives the parent chain: an installer that exits after starting
+      // what it installed leaves the app orphaned in the process list, where the parent
+      // chain no longer leads back to the process that was launched.
+      if (!InLineage(owner, parents) && !RcvmLauncher.JobHasProcess(jobName, owner)) return true;
+      if (hostedWindows.Contains(hwnd)) return true;
+      found.Add(hwnd);
+      return true;
     }, IntPtr.Zero);
-    if (found == IntPtr.Zero)
+    // Every window this app owns is adopted, not just the first one.
+    for (int i = 0; i < found.Count; i += 1) Adopt(found[i]);
+    if (hostedWindows.Count > 0)
     {
-      // A console tool legitimately never opens a window; do not leave an empty host
-      // window behind forever, and do not kill the app for it either.
-      if (giveUpAtMs > 0 && unchecked(Environment.TickCount - startedAtMs) > giveUpAtMs)
-      {
-        DestroyWindow(host);
-      }
+      ChoosePrimary();
+      Fit();
       return;
     }
-    ShowWindow(found, SwHide);
-    int style = GetWindowLong32(found, GwlStyle);
-    SetParent(found, host);
-    // SetParent deliberately keeps WS_POPUP, and a popup still reports its OWNER from
-    // GetParent, so the style change has to happen before the result is checked.
-    SetWindowLong32(found, GwlStyle, (style | WsChild) & ~WsPopup);
-    SetWindowLong32(found, GwlExStyle, GetWindowLong32(found, GwlExStyle) & ~WsExAppWindow);
-    if (GetParent(found) != host)
+    // A console tool legitimately never opens a window, but a contained tree that is
+    // still alive may still be about to: an installer that finishes and starts the app
+    // it installed shows a window long after the launch itself. Destroying the host on a
+    // timer is what left those windows on the desktop with nothing to be hosted in, so
+    // the host only goes once the tree it belongs to is gone.
+    if (giveUpAtMs > 0 && unchecked(Environment.TickCount - startedAtMs) > giveUpAtMs && !RcvmLauncher.JobActive(jobName))
     {
-      // Never leave an app invisible: if hosting is refused, put the window back on
-      // the desktop exactly as it was.
-      SetParent(found, IntPtr.Zero);
-      SetWindowLong32(found, GwlStyle, style);
-      ShowWindow(found, SwShow);
-      return;
+      DestroyWindow(host);
     }
-    hosted = found;
-    Fit();
-    ShowWindow(found, SwShow);
   }
 }
 `;
