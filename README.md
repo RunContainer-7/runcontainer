@@ -49,7 +49,7 @@ RunContainer has a small neural model trained from scratch on its own architectu
 - After a repair it waits for three consecutive observations and re-checks the original condition; a restart alone is not reported as success.
 - Evaluation, split by construction: **99.7%** on familiar holdout variants, **92.2%** on whole failure families absent from training, **94.8%** on an untouched final split, **0 unsafe destructive actions** on every split and **0%** repairs proposed for normal behaviour on the final split. A keyword baseline scores 45.3%, 68.8% and 48.1%. Two limits are reported rather than rounded away: a restraint set of 16 cases where the right move is to wait, gather evidence or escalate is answered correctly only 25% of the time — all twelve misses are the same honest scenario, an app that has logged nothing at all yet — and the `consult_runbook` action has no held-out figure, because the held-out splits contain no instance of it.
 - Verified outcomes can be promoted, with consent, into a local curated dataset; training a candidate and activating it are separate, gated offline steps, and the previous model can be rolled back. Monitoring never updates weights by itself.
-- If the model is missing or corrupt, the **AI** tab says so and no diagnosis or repair happens. There is no silent rule-based fallback.
+- If the model is missing or corrupt, **Settings** says so and no diagnosis or repair happens. There is no silent rule-based fallback.
 
 Train and verify it locally:
 
@@ -60,6 +60,14 @@ npm test -- --watchAll=false         # corpus audit, parity, policy, verificatio
 ```
 
 The model artefact, feature schema, knowledge specification and evaluation report live in `src/ai/` and `reports/ai-evaluation.md`. Details: the documentation's [RC-Brain page](https://runcontainer-7.github.io/9-runcontainer/guide/ai-brain).
+
+## Developer mode and virtual machines
+
+RunContainer's interface is deliberately plain by default. One switch in **Settings** — **Enable developer mode** — adds the technical detail behind RC-Brain, the launch timings, and an eighth tab, **Virtualise**, which configures and runs a whole operating system on RunContainer's own QEMU backend. The choice is recorded once per installation, survives updates, and changes nothing else about the app: RC-Brain's summaries stay where they were.
+
+**Virtualise** creates a machine with its own virtual disk, memory and CPUs, boots installation media you supply, and draws the guest's screen inside the RunContainer window through an RFB (VNC) client written for the purpose — QEMU never opens a window of its own, and the socket stays in the main process so the window opens no connection itself. It is labelled experimental, and that is honest: frames are uncompressed over loopback, there are no guest additions, integration stops at the keyboard and the mouse, Stop is an immediate power-off, there are no snapshots, and a Windows guest needs the storage driver before setup can see its own disk. No guest operating system and no licence is shipped or downloaded.
+
+Details: the documentation's [Developer mode & VMs page](https://runcontainer-7.github.io/9-runcontainer/guide/developer-mode).
 
 ## One honest limit
 
