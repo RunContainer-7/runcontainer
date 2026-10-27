@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.8.1',
+    date: '2026-10-27',
+    title: 'Fixed a blank window: an app left mid-setup no longer takes the interface down with it',
+    changes: [
+      'Fixed RunContainer opening to a blank window. The once-a-second clock that shows how long a background setup has been running was declared inside the launch-animation hook but read by the component that draws the app list, so every tick referred to a name that did not exist in its scope. React removes the whole interface when a component throws, which is why the window went empty rather than showing an error. The clock now lives in the component that reads it, and any app sitting in an unattended setup at launch no longer has that effect.',
+      'A setup whose recorded start time cannot be read now leaves the elapsed-time line out entirely, instead of printing a nonsense duration.',
+      'Added a last line of defence for the window itself: if any panel ever throws again, RunContainer shows the real error with a Reload button instead of an empty screen, and the error is written to runcontainer-console.log so it can be reported. Installed apps and their files are untouched by a fault in the interface.',
+      'A regression test covers it: a container that is setting up in the background must keep the interface rendered while the clock ticks.',
+    ],
+  },
+  {
     version: '0.8.0',
     date: '2026-10-27',
     title: 'Apps that need administrator approval now render inside RunContainer, and Stop no longer leaves a blank window',

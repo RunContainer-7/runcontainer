@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
+import AppErrorBoundary from "./AppErrorBoundary";
 import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
@@ -79,6 +80,12 @@ jest.mock("../services/containerService", () => ({
   getPreferences: jest.fn(async () => ({ beginnerSetupSeen: true })),
   setPreference: jest.fn(async (patch) => patch),
 }));
+
+// Stands in for any panel that throws while rendering, which is the case the boundary
+// exists for.
+function BrokenPanel() {
+  throw new Error("panel exploded");
+}
 
 describe("ContainerManager", () => {
   const render = () => {
@@ -367,6 +374,77 @@ describe("ContainerManager", () => {
     expect(container.textContent).not.toContain("0/9");
     expect(setPreference).not.toHaveBeenCalled();
     act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
+  // The elapsed clock ticks once a second while an app is setting up in the background.
+  // Reading it from a scope that does not declare it throws on every tick, and React
+  // removes the whole interface when a component throws - which is the blank window.
+  it("keeps the interface rendered while an app is setting up in the background", async () => {
+    listContainers.mockResolvedValue([
+      {
+        id: "slow-setup",
+        name: "Slow setup app",
+        source: "C:\\apps\\slow\\setup.exe",
+        status: "Installed",
+        setupProgram: true,
+        setupPlanMode: "silent",
+        setupSummary: "An unattended setup is running.",
+        setupStartedAt: new Date(Date.now() - 90 * 1000).toISOString(),
+      },
+    ]);
+    jest.useFakeTimers();
+    try {
+      const container = render();
+      await act(async () => { await Promise.resolve(); });
+      act(() => { jest.advanceTimersByTime(3000); });
+      expect(container.textContent).toContain("Setup has been running for");
+      expect(container.textContent).toContain("Apps");
+      act(() => { ReactDOM.unmountComponentAtNode(container); });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("leaves the elapsed line out when a setup start time cannot be read", async () => {
+    listContainers.mockResolvedValue([
+      {
+        id: "unreadable-clock",
+        name: "Unreadable clock",
+        source: "C:\\apps\\odd\\setup.exe",
+        status: "Installed",
+        setupProgram: true,
+        setupPlanMode: "silent",
+        setupSummary: "An unattended setup is running.",
+        setupStartedAt: "not a timestamp",
+      },
+    ]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).not.toContain("NaN");
+    expect(container.textContent).not.toContain("Setup has been running for");
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
+  it("shows the real error instead of an empty window if a panel throws", () => {
+    // The boundary is what stands between a fault in one panel and a blank app.
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      act(() => {
+        ReactDOM.render(
+          <AppErrorBoundary>
+            <BrokenPanel />
+          </AppErrorBoundary>,
+          host
+        );
+      });
+    } finally {
+      logged.mockRestore();
+    }
+    expect(host.querySelector(".crash-screen")).not.toBeNull();
+    expect(host.textContent).toContain("panel exploded");
+    expect(host.textContent).toContain("Reload RunContainer");
   });
 
   it("Enable JIT saves the strategy and starts that app straight away", async () => {

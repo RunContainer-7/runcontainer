@@ -21,9 +21,6 @@ function jitRunMessage(container, strategy) {
 
 function useBootAnimation() {
   const [booting, setBooting] = useState(true);
-  // Ticks only while something is being set up, so a long setup is visibly still
-  // working instead of looking like an app that never appears.
-  const [setupClock, setSetupClock] = useState(Date.now());
 
   useEffect(() => {
     const timer = window.setTimeout(() => setBooting(false), 900);
@@ -33,7 +30,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.0";
+const APP_VERSION_FALLBACK = "0.8.1";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -44,6 +41,13 @@ function formatElapsed(ms) {
   if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
   return `${seconds}s`;
+}
+// How long a background setup has been running, or null when the start time cannot be
+// read: an unusable timestamp must leave the line out instead of printing "NaNs".
+function formatSetupElapsed(startedAt, now) {
+  const started = Date.parse(startedAt || '');
+  if (!Number.isFinite(started) || !Number.isFinite(now)) return null;
+  return formatElapsed(now - started);
 }
 // The only project links the app opens, all official and public.
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
@@ -109,6 +113,12 @@ export default function ContainerManager() {
   // The beginner introduction is offered once for this installation, never once per
   // version. Nothing is shown until the preference has been read, so it cannot flash.
   const [showBeginnerSetup, setShowBeginnerSetup] = useState(false);
+  // Ticks only while something is being set up, so a long setup is visibly still
+  // working instead of looking like an app that never appears. It is declared here,
+  // in the component that renders the app list and the setup line, because that is
+  // where it is read; declaring it inside the boot hook left the read undefined and
+  // threw once a second while an app was setting up, which blanked the whole window.
+  const [setupClock, setSetupClock] = useState(Date.now());
   const booting = useBootAnimation();
 
   useEffect(() => {
@@ -1060,9 +1070,9 @@ export default function ContainerManager() {
                           {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && (
                             <button className="settings-button ghost" onClick={() => handleSetupInBackground(container)}>Set up in the background</button>
                           )}
-                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && container.setupStartedAt && (
+                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && formatSetupElapsed(container.setupStartedAt, setupClock) && (
                             <span className="muted">
-                              Setup has been running for {formatElapsed(setupClock - new Date(container.setupStartedAt).getTime())} · it is still
+                              Setup has been running for {formatSetupElapsed(container.setupStartedAt, setupClock)} · it is still
                               working inside this environment, and Run starts the app it produces.
                             </span>
                           )}

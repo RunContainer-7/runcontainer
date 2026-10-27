@@ -1092,3 +1092,55 @@ details.advanced-settings[open] > summary::before {
     font-size: 11.5px;
     text-align: right;
 }
+
+/* Shown only when a panel threw and React would otherwise have left an empty
+   window: the error, and one button back to a working interface. */
+.crash-screen {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+}
+
+.crash-card {
+    width: min(100%, 620px);
+    background: linear-gradient(180deg, #0f172a 0%, #020617 100%);
+    border: 1px solid rgba(96, 165, 250, 0.35);
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.crash-card h1 {
+    margin: 0 0 12px;
+    font-size: 19px;
+    color: #f8fafc;
+}
+
+.crash-card p {
+    margin: 0 0 14px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: #cbd5f5;
+}
+
+.crash-detail {
+    margin: 0 0 16px;
+    padding: 12px;
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    color: #fecaca;
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    border-radius: 10px;
+}
+
+.crash-actions {
+    display: flex;
+    justify-content: flex-end;
+}
