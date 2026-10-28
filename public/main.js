@@ -398,13 +398,19 @@ const ICON_RETRY_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // old extractor also wrote .ico files, so those records kept a single stale image
 // forever and the list kept showing letters for apps whose executable carries six
 // frames. 2 = the executable's own resources, with the shell as a fallback.
-const ICON_EXTRACTOR_VERSION = 2;
+// 3 = the same resources, limited to the frames the interface can show: the 128 and
+// 256 pixel frames were most of a 150 KB data URL per app, sent with every list read.
+const ICON_EXTRACTOR_VERSION = 3;
+
+// The largest frame worth carrying: the app tile is 42 CSS pixels, and 64 covers it on
+// a high-DPI display without shipping a frame that is mostly thrown away.
+const ICON_MAX_FRAME_SIDE = 64;
 
 // The executable's own icon resources, read from the file. This is what Windows
-// Explorer shows, and it is the only source that carries every size the app
-// declares (including a 256x256 frame). It needs no helper process.
+// Explorer shows, and it is the only source that carries the sizes the app declares.
+// It needs no helper process.
 function extractResourceIcon(exePath, sandboxRoot) {
-  const extracted = extractIconToFile(exePath, path.join(sandboxRoot, 'icon.ico'));
+  const extracted = extractIconToFile(exePath, path.join(sandboxRoot, 'icon.ico'), { maxSide: ICON_MAX_FRAME_SIDE });
   if (!extracted) return null;
   return { path: extracted.path, sizes: extracted.sizes, source: 'resources', version: ICON_EXTRACTOR_VERSION };
 }
@@ -558,9 +564,33 @@ function executeFile(filePath, args, options = {}) {
   });
 }
 
+// Everything the interface is told about an app is derived here, once:
+//
+//   iconUrl        the app's real icon, inlined because the page's CSP allows data:
+//                  images and not file: ones.
+//   envDirPresent  whether this app's own folder still exists.
+//   sourcePresent  whether the installed executable still exists.
+//   diskPresent    whether a VM disk this app needs still exists.
+//
+// A bare stored record carries none of them. That is not cosmetic: the app card reads
+// a missing iconUrl as "no icon" and a missing envDirPresent as "folder missing", so an
+// app that had just been installed showed a letter and a warning about a folder that was
+// there all along. Every path that hands a record to the interface goes through this.
+function decorateAppRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  const root = record.sandboxRoot || (record.source ? path.dirname(record.source) : '');
+  return {
+    ...record,
+    iconUrl: iconDataUrl(record.iconPath),
+    envDirPresent: root ? fs.existsSync(root) : false,
+    sourcePresent: record.source ? fs.existsSync(record.source) : false,
+    diskPresent: record.hypervVhd ? fs.existsSync(record.hypervVhd) : null,
+  };
+}
+
 function broadcastContainerStatus(record) {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('container:status', record);
+    mainWindow.webContents.send('container:status', decorateAppRecord(record));
   }
 }
 
@@ -1913,6 +1943,24 @@ function windowHostCachePath() {
   return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.dll`);
 }
 
+// How long a Run waits for the host to prove it is watching before the app is started.
+//
+// The wait exists so the app's first window can be created hidden and hosted before it is
+// ever drawn on the desktop. A host whose assembly is already compiled answers in well
+// under a second, so a warm cache must not cost seconds before the app even starts. Only
+// a cold cache - the first Run after an install or update - can take longer, and that is
+// the one case where waiting is cheaper than a window that appears outside RunContainer.
+const WINDOW_HOST_WARM_WAIT_MS = 1200;
+const WINDOW_HOST_COLD_WAIT_MS = 6000;
+
+function windowHostReadyBudget() {
+  try {
+    return fs.existsSync(windowHostCachePath()) ? WINDOW_HOST_WARM_WAIT_MS : WINDOW_HOST_COLD_WAIT_MS;
+  } catch (error) {
+    return WINDOW_HOST_COLD_WAIT_MS;
+  }
+}
+
 // Compiles the host once per revision in the background, so the first Run after an
 // install or update is as fast as every later one.
 function prewarmWindowHost() {
@@ -2292,7 +2340,7 @@ function ensureGuestWindow(appRecord, note) {
 // is taken. It costs nothing when the host answers (the wait ends on the event) and
 // only takes this long when the host cannot start at all, where the alternative is
 // launching an app nobody can adopt.
-async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 6000 } = {}) {
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 2500 } = {}) {
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
   // A host that has just proved it cannot start is not retried on every early call:
@@ -3801,20 +3849,11 @@ ipcMain.handle('list-apps', async () => {
   }));
   let runtimeFilled = false;
   const reconciled = loadApps().map((entry) => {
-    const root = entry.sandboxRoot || (entry.source ? path.dirname(entry.source) : '');
     // Apps installed before runtime detection existed get classified once, then
     // the answer is stored with the record.
     const runtime = entry.runtime || (entry.source ? detectAppRuntime(entry.source) : null);
     if (!entry.runtime && runtime) runtimeFilled = true;
-    return {
-      ...entry,
-      runtime,
-      // Served inline because the page's CSP allows data: images, not file: ones.
-      iconUrl: iconDataUrl(entry.iconPath),
-      envDirPresent: root ? fs.existsSync(root) : false,
-      sourcePresent: entry.source ? fs.existsSync(entry.source) : false,
-      diskPresent: entry.hypervVhd ? fs.existsSync(entry.hypervVhd) : null,
-    };
+    return { ...decorateAppRecord(entry), runtime };
   });
   // An icon file can go missing (an interrupted delete, a repair, a copied record). Extracting
   // it again from the executable the app actually runs keeps the real icon in the list instead
@@ -3887,7 +3926,6 @@ async function installExe(exePath) {
     metadata,
     runtime: detectAppRuntime(destination),
     iconPath: extractedIcon?.path || null,
-    iconSource: extractedIcon?.source || null,
     iconVersion: extractedIcon?.version || null,
     iconFrom: extractedIcon?.from || null,
     iconSource: extractedIcon?.source || null,
@@ -3898,7 +3936,9 @@ async function installExe(exePath) {
     createdAt: new Date().toISOString(),
   };
   saveApps([...loadApps(), record]);
-  return record;
+  // The card for a freshly installed app is built from this answer, so it carries the
+  // same derived fields (its icon, its folder state) as the next app-list read.
+  return decorateAppRecord(record);
 }
 
 ipcMain.handle('install-exe', async (_event, exePath) => installExe(exePath));
@@ -3971,7 +4011,7 @@ ipcMain.handle('duplicate-container', async (_event, appRecord) => {
   };
   const cleanCopy = resetLaunchState(duplicate);
   saveApps([...loadApps(), cleanCopy]);
-  return cleanCopy;
+  return decorateAppRecord(cleanCopy);
 });
 
 ipcMain.handle('export-container', async (_event, appRecord) => {
@@ -4210,7 +4250,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
         ? 'Setup is completing in the background inside this environment. This window reports its progress, and the app starts here when setup finishes.'
         : 'This app runs in its own environment. Its window is hosted here.',
       timeoutMs: 0,
-      readyMs: 6000,
+      readyMs: windowHostReadyBudget(),
     }).catch((error) => {
       appendLog(logPath, `The window host could not be started: ${error.message}`);
       return null;

@@ -141,6 +141,23 @@ describe('executable icon extraction', () => {
     expect(extracted.bytes.subarray(directoryEnd + large.length).equals(small)).toBe(true);
   });
 
+  it('keeps only the frames an interface can show when a side limit is given', () => {
+    const image = buildPeWithIcon({
+      frames: [
+        { width: 16, height: 16, bitCount: 32, data: Buffer.from([1, 1]) },
+        { width: 32, height: 32, bitCount: 32, data: Buffer.from([2, 2, 2]) },
+        { width: 256, height: 256, bitCount: 32, data: Buffer.from([3, 3, 3, 3]) },
+      ],
+    });
+    const limited = extractIconFromBuffer(image, { maxSide: 64 });
+    expect(limited.entries.map((entry) => entry.width)).toEqual([32, 16]);
+    // The large frame is most of the file, so the limit is what keeps the icon small.
+    expect(limited.bytes.length).toBeLessThan(extractIconFromBuffer(image).bytes.length);
+    // An icon whose only frames are large still yields one, never none.
+    const onlyLarge = buildPeWithIcon({ frames: [{ width: 256, height: 256, bitCount: 32, data: Buffer.from([4, 4]) }] });
+    expect(extractIconFromBuffer(onlyLarge, { maxSide: 16 }).entries.map((entry) => entry.width)).toEqual([0]);
+  });
+
   it('gives up when a group entry references an icon frame that is not in the file', () => {
     const image = buildPeWithIcon({ frames: [{ width: 32, height: 32, bitCount: 32, data: Buffer.from([7, 7]) }] });
     expect(extractIconFromBuffer(image).entries).toHaveLength(1);

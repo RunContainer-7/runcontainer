@@ -31,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.7";
+const APP_VERSION_FALLBACK = "0.8.8";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -73,6 +73,40 @@ const DEVELOPER_ONLY_TABS = ["Virtualise"];
 // Only these actions have an executor in the main process. Advice and escalation
 // are shown with the diagnosis and never disguised as a repair button.
 const EXECUTABLE_AI_ACTIONS = ["restart_same_profile", "restart_engine", "repair_permissions", "restart_clean_profile"];
+
+// A status line reports what the last action did; it is not a permanent label. Leaving it
+// on screen meant an old "Installed …" or "Refreshing the app list…" read like the current
+// state of the app long after it stopped being true, so it now fades out and clears.
+const STATUS_MESSAGE_VISIBLE_MS = 6000;
+const STATUS_MESSAGE_FADE_MS = 450;
+
+function StatusLine({ message }) {
+  const [shown, setShown] = useState(message);
+  const [fading, setFading] = useState(false);
+
+  useEffect(() => {
+    if (!message) {
+      setShown("");
+      setFading(false);
+      return undefined;
+    }
+    setShown(message);
+    setFading(false);
+    const fade = setTimeout(() => setFading(true), STATUS_MESSAGE_VISIBLE_MS);
+    const clear = setTimeout(() => setShown(""), STATUS_MESSAGE_VISIBLE_MS + STATUS_MESSAGE_FADE_MS);
+    return () => {
+      clearTimeout(fade);
+      clearTimeout(clear);
+    };
+  }, [message]);
+
+  if (!shown) return null;
+  return (
+    <p className={`status-line${fading ? " fading" : ""}`} role="status" aria-live="polite">
+      {shown}
+    </p>
+  );
+}
 
 export default function ContainerManager() {
   const { containers, addContainer, removeContainer, updateContainerStatus, refreshContainers } = useContainers();
@@ -424,6 +458,9 @@ export default function ContainerManager() {
         setActiveTab("Apps");
         setInstallMessage(`Installed ${newContainer?.name || resolvedName}`);
         setShowInstallWizard(false);
+        // The card is rendered from the list, which is the one source that also carries
+        // the icon and the folder state; the install answer is only used for the name.
+        refreshContainers();
       }).catch((error) => {
         console.error("Install failed:", error);
         setShowInstallWizard(false);
@@ -472,6 +509,7 @@ export default function ContainerManager() {
         setInstallMessage(`Imported ${newContainer?.name || resolvedUrl}`);
         setSourceUrl("");
         setShowInstallWizard(false);
+        refreshContainers();
       })
       .catch((error) => {
         console.error("Import failed:", error);
@@ -1078,7 +1116,7 @@ export default function ContainerManager() {
           </div>
 
           {selectedExe && <p className="status-line">Selected: {selectedExe}</p>}
-          {installMessage && <p className="status-line">{installMessage}</p>}
+          <StatusLine message={installMessage} />
           <div className="container-list">
             {appContainers.length === 0 ? (
               <div className="empty-state">No apps installed yet. Use the + button to add your first EXE.</div>
@@ -1096,7 +1134,10 @@ export default function ContainerManager() {
                       <div className="container-status">
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
-                        {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • missing its files' : ''}
+                        {/* Only an explicit "the folder is gone" answer may say so. An older
+                            record, or one that came from an action rather than the app list,
+                            carries no flag at all, and undefined is not a missing folder. */}
+                        {container.envDirPresent === false ? ' • folder missing' : ''}{container.diskPresent === false ? ' • missing its files' : ''}
                         {container.windowHosting === false ? ' • opens in its own window' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
                       </div>

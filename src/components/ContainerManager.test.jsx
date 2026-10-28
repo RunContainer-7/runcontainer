@@ -147,6 +147,26 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("shows an app's icon and only reports a missing folder when the app list says so", async () => {
+    // The first record is what an action returns: no derived fields at all. A missing
+    // envDirPresent was read as "folder missing", so every freshly installed app carried
+    // a warning about a folder that was never gone. The second record really has none.
+    listContainers.mockResolvedValue([
+      { id: "a1", name: "Editor", source: "C:/apps/editor.exe", sandboxRoot: "C:/apps", status: "Installed", iconUrl: "data:image/x-icon;base64,AAAA" },
+      { id: "b2", name: "Gone", source: "C:/apps/gone.exe", sandboxRoot: "C:/apps", status: "Stopped", envDirPresent: false },
+    ]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    const items = Array.from(container.querySelectorAll(".container-item"));
+    expect(items).toHaveLength(2);
+    expect(items[0].querySelector(".app-icon img")).not.toBeNull();
+    expect(items[0].textContent).not.toContain("folder missing");
+    expect(items[1].textContent).toContain("folder missing");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("shows source-import controls in Sources", () => {
     const container = render();
     openTab(container, "Sources");

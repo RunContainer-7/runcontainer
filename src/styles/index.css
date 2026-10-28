@@ -185,6 +185,19 @@ body {
 .status-line {
     color: #cbd5e1;
     margin: 6px 0 12px;
+    /* A report on the last action, not a permanent label: the panel fades it out and
+       unmounts it after a few seconds (see StatusLine). */
+    transition: opacity 450ms ease;
+}
+
+.status-line.fading {
+    opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-line {
+        transition: none;
+    }
 }
 
 .container-list {

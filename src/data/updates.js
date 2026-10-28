@@ -4,6 +4,18 @@
 
 export const UPDATES = [
   {
+    version: '0.8.8',
+    date: '2026-10-28',
+    title: 'Real app icons, honest status, faster Run',
+    changes: [
+      'A newly installed app shows its own icon immediately. Every answer that carries an app to the interface now includes its icon and the state of its folder, instead of a bare stored record that the app card read as "no icon".',
+      'The app list no longer claims a folder is missing when nothing is known about it. The note appears only when RunContainer has actually looked and the folder is gone.',
+      'Run hands the app to the window host sooner: a host whose support code is already prepared no longer makes Run wait for the full cold-start budget before the app starts.',
+      'App icons are limited to the sizes the interface shows, so the app list refreshes with a fraction of the data it used to transfer.',
+      'Status messages fade out and clear after a few seconds instead of staying on the Apps tab as if they described the current state.',
+    ],
+  },
+  {
     version: '0.8.7',
     date: '2026-10-28',
     title: 'Run waits for the host, so the app opens inside RunContainer',

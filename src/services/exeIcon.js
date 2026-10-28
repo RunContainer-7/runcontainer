@@ -180,7 +180,7 @@ function buildIcoBytes(entries) {
   return Buffer.concat([header, directory, ...images]);
 }
 
-function extractIconFromBuffer(buffer, { maxImages = 6 } = {}) {
+function extractIconFromBuffer(buffer, { maxImages = 6, maxSide = 0 } = {}) {
   const headers = readPeHeaders(buffer);
   if (!headers) return null;
   const groups = collectResourceLeaves(buffer, headers, RT_GROUP_ICON);
@@ -206,10 +206,19 @@ function extractIconFromBuffer(buffer, { maxImages = 6 } = {}) {
     if (!best || entryScore(resolved[0]) > entryScore(best[0])) best = resolved;
   }
   if (!best) return null;
+  // Only frames the interface can actually use are written. A 256x256 frame is over
+  // 100 KB once base64-encoded, and every app-list read carries its icon inline, so a
+  // handful of apps meant megabytes of IPC traffic for 42-pixel tiles. A side limit
+  // keeps the real icon and drops the frames that only made the list slower. maxSide = 0
+  // keeps every declared size (the default, and what the tests exercise).
+  const side = (entry) => Math.max(entry.width === 0 ? 256 : entry.width, entry.height === 0 ? 256 : entry.height);
+  const withinLimit = maxSide > 0 ? best.filter((entry) => side(entry) <= maxSide) : best;
+  // An executable whose only frames are large still gets the smallest one, never none.
+  const frames = withinLimit.length > 0 ? withinLimit : [best[best.length - 1]];
   // Duplicate frames (identical payload) waste space and add nothing.
   const unique = [];
   const seen = new Set();
-  for (const entry of best) {
+  for (const entry of frames) {
     const key = `${entry.width}x${entry.height}@${entry.bitCount}:${entry.data.length}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -220,11 +229,11 @@ function extractIconFromBuffer(buffer, { maxImages = 6 } = {}) {
 }
 
 // Writes the executable's own icon next to the app and returns what it wrote.
-function extractIconToFile(exePath, outputPath) {
+function extractIconToFile(exePath, outputPath, options = {}) {
   try {
     if (!exePath || !fs.existsSync(exePath)) return null;
     const buffer = fs.readFileSync(exePath);
-    const extracted = extractIconFromBuffer(buffer);
+    const extracted = extractIconFromBuffer(buffer, options);
     if (!extracted) return null;
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, extracted.bytes);
