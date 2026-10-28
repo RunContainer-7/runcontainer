@@ -153,6 +153,8 @@ A signature identifies who built the file and proves it was not modified afterwa
 
 ## Support
 
+If you enjoy RunContainer, please [give the project a star on GitHub](https://github.com/RunContainer-7/runcontainer) to support us.
+
 If you have an issue with the app, report any bugs, need assistance or just want to ask any questions/feature request, you can either head over to the official documentation website: https://runcontainer-7.github.io/9-runcontainer/, or you can join our support discord server, which included priority support over GitHub Issue: https://discord.gg/UKTGRMMmC4.
 Prefer to watch step by step instead? Head over to the official RunContainer YouTube channel and watch some tutorials and showcase of it: https://m.youtube.com/@RunContainer?ra=m
 

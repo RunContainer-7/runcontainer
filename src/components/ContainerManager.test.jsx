@@ -241,6 +241,14 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("links to the project for users who want to star it", () => {
+    const container = render();
+    openTab(container, "Info");
+    const link = Array.from(container.querySelectorAll("a")).find((entry) => entry.textContent === "Star on GitHub");
+    expect(link?.getAttribute("href")).toBe("https://github.com/RunContainer-7/runcontainer");
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
   it("restores every app tab, including Tweaks, Profiles and Updates", () => {
     const container = render();
     for (const tab of ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"]) {

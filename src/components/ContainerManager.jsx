@@ -54,6 +54,7 @@ function formatSetupElapsed(startedAt, now) {
 const DOCS_URL = "https://runcontainer-7.github.io/9-runcontainer/";
 const DISCORD_URL = "https://discord.gg/rvMjMZJykE";
 const YOUTUBE_URL = "https://www.youtube.com/@RunContainer";
+const GITHUB_URL = "https://github.com/RunContainer-7/runcontainer";
 const tabs = ["Sources", "Apps", "Tweaks", "Settings", "Profiles", "Info", "Updates"];
 const tabIcons = {
   Sources: "◫",
@@ -1704,6 +1705,13 @@ export default function ContainerManager() {
                   </a>{" "}
                   for questions, bug reports and release announcements.
                 </span>
+              </div>
+              <div className="profile-card">
+                <strong>Support RunContainer</strong>
+                <span>If you enjoy RunContainer, please give the project a star on GitHub.</span>
+                <div className="detail-actions">
+                  <a className="settings-button info-link-button" href={GITHUB_URL} onClick={(event) => handleOpenProjectLink(event, GITHUB_URL)}>Star on GitHub</a>
+                </div>
               </div>
               <div className="profile-card">
                 <strong>Links open in your browser</strong>

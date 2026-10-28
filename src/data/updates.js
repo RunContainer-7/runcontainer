@@ -9,8 +9,9 @@ export const UPDATES = [
     title: 'Installer and app window hosting fixes',
     changes: [
       'Owned installer dialogs can now be detected by the window host, including in the administrator-approved host. Some Windows windows may still refuse hosting.',
-      'A slow-starting window host remains open and continues watching, and closing a host releases its app windows before the host is destroyed.',
+      'A slow-starting window host remains open and continues watching, and closing a host releases its app windows before the host is destroyed. When a splash closes, a remaining app window can fill the host; windows moved back to the desktop by their framework are watched for re-hosting.',
       'Run now attempts to show installer wizards by default. When background setup is chosen for a supported installer, it receives the unattended switches, restores the app’s launch arguments and starts the discovered app after setup finishes.',
+      'The Info tab links to the RunContainer GitHub project for anyone who would like to support it with a star.',
     ],
   },
   {

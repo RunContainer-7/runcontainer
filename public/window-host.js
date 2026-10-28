@@ -68,6 +68,9 @@ public static class RunContainerWindowHost
     [DllImport("user32.dll")]
     static extern IntPtr GetParent(IntPtr hwnd);
 
+    [DllImport("user32.dll")]
+    static extern IntPtr GetDesktopWindow();
+
     [DllImport("user32.dll", SetLastError = true)]
     static extern IntPtr SetParent(IntPtr child, IntPtr parent);
 
@@ -509,7 +512,9 @@ public static class RunContainerWindowHost
         }
         // GetParent returns an owner for top-level popups, not just a parent. An
         // installer dialog can therefore have an owner while still being top-level.
-        if ((GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0) return false;
+        // Some UI frameworks move an adopted window back under the desktop while
+        // leaving WS_CHILD set. EnumWindows can see it there; allow re-adoption.
+        if ((GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0 && GetParent(hwnd) != GetDesktopWindow()) return false;
         if (GetWindowTextLength(hwnd) == 0) return false;
         RECT rect;
         if (!GetWindowRect(hwnd, out rect)) return false;
@@ -562,6 +567,8 @@ public static class RunContainerWindowHost
     {
         IntPtr parent = new IntPtr(parentHandle);
         long mainWindow = 0;
+        List<IntPtr> hostedWindows = new List<IntPtr>();
+        HashSet<long> ownedDialogs = new HashSet<long>();
         int lastWidth = 0;
         int lastHeight = 0;
         HashSet<long> refused = new HashSet<long>();
@@ -589,10 +596,24 @@ public static class RunContainerWindowHost
                 continue;
             }
 
-            // Forget a closed splash before selecting the next main window, so the
-            // wizard replacing it fills the host rather than remaining a small dialog.
+            // A wizard or app may appear before its splash closes. Keep track of
+            // already-hosted windows so the surviving window can replace the splash.
+            hostedWindows.RemoveAll(delegate(IntPtr hwnd) { return !IsWindow(hwnd) || GetParent(hwnd) != parent; });
             if (mainWindow != 0 && (!IsWindow(new IntPtr(mainWindow)) || GetParent(new IntPtr(mainWindow)) != parent))
+            {
                 mainWindow = 0;
+                long largestArea = 0;
+                foreach (IntPtr hwnd in hostedWindows)
+                {
+                    RECT bounds;
+                    if (!IsWindowVisible(hwnd) || !GetWindowRect(hwnd, out bounds)) continue;
+                    if (ownedDialogs.Contains(hwnd.ToInt64()) && hostedWindows.Exists(delegate(IntPtr other) { return IsWindowVisible(other) && !ownedDialogs.Contains(other.ToInt64()); })) continue;
+                    long area = (long)(bounds.Right - bounds.Left) * (bounds.Bottom - bounds.Top);
+                    // Prefer the most recently adopted window if sizes are equal.
+                    if (area >= largestArea) { largestArea = area; mainWindow = hwnd.ToInt64(); }
+                }
+                if (mainWindow != 0) FitMainWindow(mainWindow, parentHandle, topInset);
+            }
 
             List<IntPtr> found = new List<IntPtr>();
             EnumWindows(delegate(IntPtr hwnd, IntPtr param)
@@ -607,11 +628,16 @@ public static class RunContainerWindowHost
                 uint processId;
                 GetWindowThreadProcessId(hwnd, out processId);
                 bool fills = mainWindow == 0;
+                bool wasOwnedDialog = GetWindow(hwnd, GwOwner) != IntPtr.Zero || ownedDialogs.Contains(hwnd.ToInt64());
                 bool embedded = fills
                     ? Embed(hwnd.ToInt64(), parentHandle, topInset)
                     : EmbedCentered(hwnd.ToInt64(), parentHandle, topInset);
                 if (embedded)
                 {
+                    // A framework may later reset the parent of its own window.
+                    // Avoid duplicates when the watcher adopts that window again.
+                    if (!hostedWindows.Contains(hwnd)) hostedWindows.Add(hwnd);
+                    if (wasOwnedDialog) ownedDialogs.Add(hwnd.ToInt64());
                     if (fills) mainWindow = hwnd.ToInt64();
                     Report("embedded", processId, hwnd.ToInt64());
                 }

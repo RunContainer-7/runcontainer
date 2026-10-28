@@ -57,9 +57,11 @@ describe("window host launcher", () => {
   it("includes visible owned installer dialogs without adopting child controls", () => {
     const csharp = buildWindowHostCSharp();
     const visibleCheck = csharp.slice(csharp.indexOf("static bool IsAppWindow("), csharp.indexOf("static int RevealHiddenWindows("));
-    expect(visibleCheck).toContain("(GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0");
+    expect(visibleCheck).toContain("(GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0 && GetParent(hwnd) != GetDesktopWindow()");
     expect(visibleCheck).not.toContain("if (GetParent(hwnd) != IntPtr.Zero) return false;");
     expect(csharp).toContain("if (mainWindow != 0 && (!IsWindow(new IntPtr(mainWindow)) || GetParent(new IntPtr(mainWindow)) != parent))");
+    expect(csharp).toContain("hostedWindows.RemoveAll");
+    expect(csharp).toContain("if (mainWindow != 0) FitMainWindow(mainWindow, parentHandle, topInset)");
   });
 
   it("reveals the app window if hosting never succeeds", () => {

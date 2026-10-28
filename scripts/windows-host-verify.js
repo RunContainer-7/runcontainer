@@ -90,9 +90,18 @@ function buildProbe(directory) {
     '      Form dialog = new Form(); dialog.Text = "RCHostProbeDialog";',
     '      dialog.Width = 320; dialog.Height = 200;',
     '      dialog.Show(form);',
+    '      Form next = new Form(); next.Text = "RCHostProbeMain";',
+    '      next.Width = 420; next.Height = 300; next.Show();',
+    '      Timer resetDialog = new Timer(); resetDialog.Interval = 5000;',
+    '      resetDialog.Tick += (s, e) => { resetDialog.Stop(); dialog.Owner = null; };',
+    '      resetDialog.Start();',
+    '      Timer closeSplash = new Timer(); closeSplash.Interval = 10000;',
+    '      closeSplash.Tick += (s, e) => { closeSplash.Stop(); form.Close(); };',
+    '      closeSplash.Start();',
     '    };',
     '    form.Shown += (sender, args) => timer.Start();',
-    '    Application.Run(form);',
+    '    form.Show();',
+    '    Application.Run(new ApplicationContext());',
     '  }',
     '}',
   ].join('\n'), 'utf8');
@@ -483,6 +492,24 @@ async function main() {
     }
     if (!dialog || desktopDialog) throw new Error('the owned installer-style dialog did not render inside the RunContainer window');
     notes.push('owned installer-style dialog hosted inside the same window');
+    const promotionDeadline = Date.now() + 25000;
+    let promoted = null;
+    while (Date.now() < promotionDeadline) {
+      const windows = dumpWindows(dumpScript, work);
+      const splash = windows.find((entry) => entry.kind === 'CHILD' && entry.title === probeTitle);
+      promoted = windows.find((entry) => entry.kind === 'CHILD' && entry.title === 'RCHostProbeMain' && entry.parent === hostWindow.handle && entry.visible && entry.width > 700 && entry.height > 300);
+      if (!splash && promoted) break;
+      await wait(1000);
+    }
+    if (!promoted) {
+      const relevant = dumpWindows(dumpScript, work).filter((entry) => /RCHostProbe|RunContainer —/.test(entry.title));
+      throw new Error(`the window remaining after the splash closed did not fill the host: ${JSON.stringify(relevant)}`);
+    }
+    const afterReset = dumpWindows(dumpScript, work);
+    const dialogAgain = afterReset.find((entry) => entry.kind === 'CHILD' && entry.title === 'RCHostProbeDialog' && entry.parent === hostWindow.handle && entry.visible);
+    const dialogOnDesktop = afterReset.find((entry) => entry.kind === 'TOP' && entry.title === 'RCHostProbeDialog');
+    if (!dialogAgain || dialogOnDesktop) throw new Error('the dialog was not re-hosted after its framework reset its parent');
+    notes.push('remaining window filled the host and the reset dialog was re-hosted');
     await evaluateWithRetry(`require('electron').ipcRenderer.invoke('kill-exe', ${JSON.stringify({ id: installed.id })})`);
     installed = null;
 
