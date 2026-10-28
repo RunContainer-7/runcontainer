@@ -1,6 +1,8 @@
 const {
   buildWindowHostCSharp,
+  buildWindowHostProgram,
   buildWindowHostScript,
+  buildWindowHostProgramArgs,
   buildWindowHostScriptArgs,
   launchShowState,
   parseWindowHostOutput,
@@ -43,15 +45,19 @@ describe("window host launcher", () => {
 
   it("hosts only top-level app windows, including a hidden first window", () => {
     const csharp = buildWindowHostCSharp();
-    expect(csharp).toContain("GetParent(hwnd) != IntPtr.Zero");
     expect(csharp).toContain("if (IsIconic(hwnd)) return false;");
     // A GUI app is launched with a hidden first window so it is hosted before it is ever
     // drawn on the desktop. Hidden windows are only matched when they look like the main
-    // window; helpers, tool palettes and owned windows must never be pulled on screen.
+    // window; tool palettes and helper windows must never be pulled on screen.
     expect(csharp).toContain("if (!IsWindowVisible(hwnd))");
     expect(csharp).toContain("if (!LooksLikeMain(hwnd)) return false;");
     expect(csharp).toContain("(GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0");
     expect(csharp).toContain("GetWindow(hwnd, GwOwner) != IntPtr.Zero");
+    // An OWNER is normal for an installer wizard. Only a real child control is excluded,
+    // otherwise a hidden owned wizard could never be adopted or revealed.
+    const looksLikeMain = csharp.slice(csharp.indexOf("static bool LooksLikeMain("), csharp.indexOf("static bool IsAppWindow("));
+    expect(looksLikeMain).toContain("(GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0 && GetParent(hwnd) != GetDesktopWindow()");
+    expect(looksLikeMain).not.toContain("if (GetParent(hwnd) != IntPtr.Zero) return false;");
   });
 
   it("includes visible owned installer dialogs without adopting child controls", () => {
@@ -136,6 +142,49 @@ describe("window host launcher", () => {
     expect(script).toContain("$Mode -eq 'prewarm'");
     const args = buildWindowHostScriptArgs("C:\\w.ps1", { mode: "prewarm", parentHandle: 0, cachePath: "C:\\c\\host.dll" });
     expect(args.join(" ")).toContain("-CachePath C:\\c\\host.dll");
+  });
+
+  it("builds a native helper that speaks the same protocol as the script", () => {
+    const program = buildWindowHostProgram();
+    // The helper is compiled as a console application, so it needs an entry point.
+    expect(program).toContain("public static class RunContainerWindowHostProgram");
+    expect(program).toContain("public static int Main(string[] args)");
+    // The watcher signals readiness itself, exactly like the script does, and only
+    // then starts the watch loop: a caller may not hide an app's first window before
+    // something is watching for it.
+    const watchBranch = program.slice(program.indexOf("mode == \"watch\""), program.indexOf("RunContainerWindowHost.Watch"));
+    expect(watchBranch).toContain("Quote(\"watching\")");
+    expect(program).toContain("Quote(\"ready\")");
+    expect(program).toContain("RunContainerWindowHost.ReleaseProcessWindows");
+    expect(program).toContain("RunContainerWindowHost.FindMainWindow");
+    // Results go out on the same machine-readable channel the parser reads.
+    expect(parseWindowHostEvents(`${RESULT_PREFIX}{"event":"watching"}`)).toEqual([{ event: "watching" }]);
+    // Quotes are built from character codes so the JSON stays valid without layers of
+    // escaping in the generated source.
+    expect(program).toContain("((char)34)");
+  });
+
+  it("gives the native helper the host arguments without the PowerShell preamble", () => {
+    const options = {
+      mode: "watch",
+      parentHandle: 1234,
+      insetTop: 56,
+      pidFile: "C:\\state\\app.pids",
+      sandboxRoot: "C:\\apps\\a1",
+      stopFile: "C:\\state\\app.stop",
+      revealAfterMs: 9000,
+    };
+    const programArgs = buildWindowHostProgramArgs(options);
+    expect(programArgs[0]).toBe("-Mode");
+    expect(programArgs).not.toContain("-NoProfile");
+    expect(programArgs).not.toContain("-File");
+    expect(programArgs.join(" ")).toContain("-PidFile C:\\state\\app.pids");
+    expect(programArgs.join(" ")).toContain("-RevealAfterMs 9000");
+    // The PowerShell wrapper is the same list with its own preamble in front, so the two
+    // hosts can never disagree about an argument.
+    const scriptArgs = buildWindowHostScriptArgs("C:\\w.ps1", options);
+    expect(scriptArgs.slice(5)).toEqual(programArgs);
+    expect(scriptArgs.slice(0, 5)).toEqual(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\w.ps1"]);
   });
 
   it("passes the process, the parent handle and a timeout", () => {

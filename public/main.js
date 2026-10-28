@@ -1,7 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
+const { execFile, spawn, spawnSync } = require('child_process');
 const net = require('net');
 const https = require('https');
 const crypto = require('crypto');
@@ -51,7 +51,9 @@ const {
 } = require('./isolated-launch');
 const {
   buildWindowHostCSharp,
+  buildWindowHostProgram,
   buildWindowHostScript,
+  buildWindowHostProgramArgs,
   buildWindowHostScriptArgs,
   launchShowState,
   parseWindowHostOutput,
@@ -1072,9 +1074,15 @@ function ensureWindowHostScript() {
   return scriptPath;
 }
 
-async function runWindowHostScript(args) {
+// Runs one host operation (embed, release, resize) with the fastest host available.
+async function runWindowHostScript(options) {
+  const exePath = await ensureWindowHostExe();
+  const command = exePath || 'powershell.exe';
+  const args = exePath
+    ? buildWindowHostProgramArgs(options)
+    : buildWindowHostScriptArgs(ensureWindowHostScript(), { ...options, cachePath: windowHostCachePath() });
   try {
-    return parseWindowHostOutput((await executeFile('powershell.exe', args, { timeout: 90000 })).stdout);
+    return parseWindowHostOutput((await executeFile(command, args, { timeout: 90000 })).stdout);
   } catch (error) {
     try {
       return parseWindowHostOutput(String(error.message));
@@ -1943,6 +1951,96 @@ function windowHostCachePath() {
   return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.dll`);
 }
 
+// The host as a small native executable, compiled once per revision.
+//
+// Every launch used to start Windows PowerShell and load the compiled assembly before the
+// watcher could adopt anything, which cost about half a second each time. The executable
+// starts in milliseconds, so the app's first window is adopted almost immediately instead
+// of appearing on the desktop while the host is still loading. PowerShell remains the
+// fallback whenever this file cannot be built or run.
+function windowHostProgramPath() {
+  const digest = crypto.createHash('sha1').update(buildWindowHostProgram()).digest('hex').slice(0, 12);
+  return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.exe`);
+}
+
+let windowHostExePromise = null;
+
+// Proves the helper can start at all. An antivirus or policy that blocks a newly written
+// executable must fall back to PowerShell rather than lose window hosting.
+function windowHostExeWorks(exePath) {
+  try {
+    const check = spawnSync(exePath, ['-Mode', 'prewarm', '-Parent', '0'], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+    return check.status === 0 && String(check.stdout || '').includes('ready');
+  } catch (error) {
+    return false;
+  }
+}
+
+function buildWindowHostExe(exePath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const sourcePath = `${exePath}.cs`;
+      fs.writeFileSync(sourcePath, buildWindowHostProgram(), 'utf8');
+      const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+      // Remove a half-written file first: the compiler refuses to overwrite one.
+      try { fs.rmSync(exePath, { force: true }); } catch (error) { /* absent is fine */ }
+      // Add-Type compiles with the .NET Framework compiler that ships with Windows, so
+      // this needs nothing installed. A console build launched with windowsHide has no
+      // console window.
+      const command = "$ErrorActionPreference = 'Stop'; "
+        + `Add-Type -TypeDefinition ([System.IO.File]::ReadAllText(${quote(sourcePath)})) `
+        + `-Language CSharp -OutputAssembly ${quote(exePath)} -OutputType ConsoleApplication`;
+      const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr = `${stderr}${String(chunk)}`.slice(-2000);
+      });
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch (error) { /* already gone */ }
+        finish(null);
+      }, 120000);
+      child.once('error', () => { clearTimeout(timer); finish(null); });
+      child.once('exit', () => {
+        clearTimeout(timer);
+        const built = fs.existsSync(exePath);
+        if (!built && stderr.trim()) {
+          // The reason a launch fell back to PowerShell is worth keeping: an offline
+          // compiler or a policy that blocks new executables is diagnosable here.
+          try {
+            appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `The native window host could not be built: ${stderr.trim()}`);
+          } catch (error) { /* logging is best-effort */ }
+        }
+        finish(built ? exePath : null);
+      });
+    } catch (error) {
+      finish(null);
+    }
+  });
+}
+
+function ensureWindowHostExe() {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  if (windowHostExePromise) return windowHostExePromise;
+  windowHostExePromise = (async () => {
+    const exePath = windowHostProgramPath();
+    if (fs.existsSync(exePath)) {
+      if (windowHostExeWorks(exePath)) return exePath;
+      try { fs.rmSync(exePath, { force: true }); } catch (error) { /* rebuild below */ }
+    }
+    const built = await buildWindowHostExe(exePath);
+    if (built && windowHostExeWorks(built)) return built;
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), 'The native window host did not start; using the PowerShell host instead.');
+    return null;
+  })();
+  return windowHostExePromise;
+}
+
 // How long a Run waits for the host to prove it is watching before the app is started.
 //
 // The wait exists so the app's first window can be created hidden and hosted before it is
@@ -1955,7 +2053,9 @@ const WINDOW_HOST_COLD_WAIT_MS = 6000;
 
 function windowHostReadyBudget() {
   try {
-    return fs.existsSync(windowHostCachePath()) ? WINDOW_HOST_WARM_WAIT_MS : WINDOW_HOST_COLD_WAIT_MS;
+    return fs.existsSync(windowHostProgramPath()) || fs.existsSync(windowHostCachePath())
+      ? WINDOW_HOST_WARM_WAIT_MS
+      : WINDOW_HOST_COLD_WAIT_MS;
   } catch (error) {
     return WINDOW_HOST_COLD_WAIT_MS;
   }
@@ -1965,19 +2065,24 @@ function windowHostReadyBudget() {
 // install or update is as fast as every later one.
 function prewarmWindowHost() {
   if (process.platform !== 'win32') return;
-  try {
-    const scriptPath = ensureWindowHostScript();
-    const child = spawn('powershell.exe', buildWindowHostScriptArgs(scriptPath, {
-      mode: 'prewarm',
-      parentHandle: 0,
-      cachePath: windowHostCachePath(),
-      timeoutMs: 60000,
-    }), { windowsHide: true, stdio: 'ignore' });
-    child.once('error', () => {});
-    if (child.unref) child.unref();
-  } catch (error) {
-    // Prewarming is an optimisation; hosting still compiles the host when it runs.
-  }
+  // Building the native helper is the prewarm: once it exists every launch starts it
+  // directly. The PowerShell cache is only prepared when the helper cannot be built.
+  ensureWindowHostExe().then((exePath) => {
+    if (exePath) return;
+    try {
+      const scriptPath = ensureWindowHostScript();
+      const child = spawn('powershell.exe', buildWindowHostScriptArgs(scriptPath, {
+        mode: 'prewarm',
+        parentHandle: 0,
+        cachePath: windowHostCachePath(),
+        timeoutMs: 60000,
+      }), { windowsHide: true, stdio: 'ignore' });
+      child.once('error', () => {});
+      if (child.unref) child.unref();
+    } catch (error) {
+      // Prewarming is an optimisation; hosting still compiles the host when it runs.
+    }
+  }).catch(() => {});
 }
 
 // The watcher re-reads this file while it runs, so PIDs discovered later (an installer's
@@ -2007,12 +2112,14 @@ function recordWindowHosted(appId, embedded, extra = {}) {
 function handleWindowHostEvent(appRecord, state, event, logPath) {
   if (!event) return;
   if (event.event === 'watching') {
-    // Proof from the host itself, not an assumption: the host assembly loaded and
-    // the watch loop is running, so a window this app opens from now on will be
-    // adopted. This is what a hidden launch is allowed to depend on.
+    // Proof from the host itself, not an assumption: the host loaded and the watch
+    // loop is running, so a window this app opens from now on will be adopted. This
+    // is what a hidden launch is allowed to depend on.
     state.ready = true;
     state.readyAt = Date.now();
     if (!state.watchStartedAt) state.watchStartedAt = Date.now();
+    // Measured, so "Run feels slow" can be answered with numbers instead of a guess.
+    if (state.createdAt) appendLog(logPath, `Window host ready in ${Date.now() - state.createdAt} ms.`);
     // A host that was slow to start (its assembly is compiled on first use, and the cache
     // is cold on a new install or after an update) must not cost the whole launch: the
     // wait before launching can time out and still leave the host watching a moment later.
@@ -2097,20 +2204,25 @@ async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop
     ready: false,
     readyAt: null,
     watchStartedAt: null,
+    createdAt: Date.now(),
   };
   if (process.platform !== 'win32' || !parentHandle) return state;
   try {
-    const child = spawn('powershell.exe', buildWindowHostScriptArgs(ensureWindowHostScript(), {
+    const hostOptions = {
       mode: 'watch',
       parentHandle,
       insetTop,
       pidFile,
       sandboxRoot: appRecord.sandboxRoot || (appRecord.source ? path.dirname(appRecord.source) : ''),
       stopFile,
-      cachePath: windowHostCachePath(),
       // A hidden launch must not leave an app invisible if Windows refuses to host it.
       revealAfterMs: 9000,
-    }), { windowsHide: true });
+    };
+    // The native helper starts in milliseconds; the PowerShell script is the fallback.
+    const exePath = await ensureWindowHostExe();
+    const child = exePath
+      ? spawn(exePath, buildWindowHostProgramArgs(hostOptions), { windowsHide: true })
+      : spawn('powershell.exe', buildWindowHostScriptArgs(ensureWindowHostScript(), { ...hostOptions, cachePath: windowHostCachePath() }), { windowsHide: true });
     state.child = child;
     appWindowHosts.set(appRecord.id, state);
     let buffer = '';
@@ -2277,7 +2389,7 @@ function ensureGuestWindow(appRecord, note) {
     title,
     // Shown on the first hosted window: an empty duplicate window would be a flash.
     show: false,
-    backgroundColor: '#020617',
+    backgroundColor: '#0e1116',
     icon: path.join(__dirname, 'runcontainer-icon.ico'),
     webPreferences: {
       nodeIntegration: true,
@@ -2340,7 +2452,7 @@ function ensureGuestWindow(appRecord, note) {
 // is taken. It costs nothing when the host answers (the wait ends on the event) and
 // only takes this long when the host cannot start at all, where the alternative is
 // launching an app nobody can adopt.
-async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 2500 } = {}) {
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 4000, readyMs = 2500 } = {}) {
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
   // A host that has just proved it cannot start is not retried on every early call:
@@ -2411,11 +2523,11 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
   let released = 0;
   for (const pid of candidates) {
     try {
-      const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+      const result = await runWindowHostScript({
         mode: 'release',
         processId: pid,
         parentHandle,
-      }));
+      });
       released += Number(result?.released) || 0;
     } catch (error) {
       if (logPath) appendLog(logPath, `Could not move the window out of the second RunContainer window: ${error.message}`);
@@ -2430,7 +2542,7 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
 // the main window, RunContainer's own controls are unreachable for as long as it
 // stays open. The watcher keeps running after this returns, so windows that appear
 // later (a splash, an installer's second process) are hosted too.
-async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000, readyMs } = {}) {
+async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 2500, readyMs } = {}) {
   if (appRecord?.windowHosting === false) return null;
   if (process.platform !== 'win32') return null;
   return hostInGuestWindow({ ...appRecord, pid }, pid, logPath, { note, timeoutMs, readyMs });
@@ -4142,9 +4254,12 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
         appendLog(logPath, `Unattended setup failed: ${error.message}`);
         announce({ status: 'Failed', error: error.message });
       });
+      // Run must not sit on "Starting" for the whole install. The window reports the
+      // setup's progress while it runs, so a short wait answers the button and the
+      // install continues in the environment.
       const started = await Promise.race([
         launchedPromise,
-        delay(25000).then(() => ({ status: 'SettingUp', detail: 'Setup is still starting inside its environment.' })),
+        delay(8000).then(() => ({ status: 'SettingUp', detail: 'Setup is still starting inside its environment.' })),
       ]);
       if (started?.status === 'Running') {
         return {

@@ -11,8 +11,8 @@
         html, body { height: 100%; }
         body {
             margin: 0;
-            background: #020617;
-            color: #e2e8f0;
+            background: #0e1116;
+            color: #e8eefc;
             font-family: "Segoe UI", system-ui, sans-serif;
             display: flex;
             flex-direction: column;
@@ -26,8 +26,8 @@
             align-items: center;
             gap: 12px;
             padding: 0 14px;
-            border-bottom: 1px solid rgba(96, 165, 250, 0.22);
-            background: linear-gradient(180deg, #101a2e, #0a1120);
+            border-bottom: 1px solid rgba(79, 216, 180, 0.22);
+            background: linear-gradient(180deg, #121821, #0a0d11);
             box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 20px -18px #000;
         }
         .mark {
@@ -36,10 +36,10 @@
             flex: none;
             display: grid;
             place-items: center;
-            border-radius: 9px;
-            background: linear-gradient(135deg, rgba(59, 130, 246, 0.42), rgba(37, 99, 235, 0.16));
-            box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.28) inset;
-            color: #dbeafe;
+            border-radius: 8px;
+            background: linear-gradient(135deg, rgba(63, 207, 170, 0.42), rgba(43, 179, 144, 0.16));
+            box-shadow: 0 0 0 1px rgba(140, 233, 208, 0.28) inset;
+            color: #d6fbf1;
             font-size: 16px;
         }
         .titles { min-width: 0; flex: 1; }
@@ -53,25 +53,25 @@
         .titles span {
             display: block;
             font-size: 11.5px;
-            color: #94a3b8;
+            color: #9fb0cc;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         .actions { flex: none; display: flex; gap: 8px; }
         button {
-            border: 1px solid rgba(96, 165, 250, 0.3);
-            border-radius: 8px;
+            border: 1px solid rgba(79, 216, 180, 0.3);
+            border-radius: 7px;
             background: transparent;
-            color: #e2e8f0;
+            color: #e8eefc;
             font: inherit;
             font-size: 12px;
             padding: 6px 10px;
             cursor: pointer;
         }
         button { transition: background 120ms ease, border-color 120ms ease; }
-        button:hover { background: rgba(96, 165, 250, 0.14); border-color: rgba(147, 197, 253, 0.55); }
-        button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+        button:hover { background: rgba(79, 216, 180, 0.14); border-color: rgba(140, 233, 208, 0.55); }
+        button:focus-visible { outline: 2px solid #8ce9d0; outline-offset: 2px; }
         main {
             flex: 1;
             display: grid;
@@ -81,8 +81,8 @@
         }
         .empty { max-width: 460px; }
         .empty h1 { font-size: 16px; margin: 0 0 8px; }
-        .empty p { margin: 0 0 6px; font-size: 13px; line-height: 1.55; color: #94a3b8; }
-        .status { font-size: 12px; color: #93c5fd; }
+        .empty p { margin: 0 0 6px; font-size: 13px; line-height: 1.55; color: #9fb0cc; }
+        .status { font-size: 12px; color: #8ce9d0; }
     </style>
 </head>
 <body>

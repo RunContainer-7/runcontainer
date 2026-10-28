@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.8.9',
+    date: '2026-10-28',
+    title: 'Apps open inside RunContainer faster, and a sharper look',
+    changes: [
+      'The window host is now a small native helper built once on this PC, instead of a fresh PowerShell process on every launch. It reports that it is watching in about 80 ms rather than about half a second, so the app’s first window is adopted almost immediately and Run no longer waits at the gate before the app starts.',
+      'Run returns as soon as the app process has started, rather than waiting up to 12 seconds for its window to be found. The RunContainer window stays open and fills with the app as soon as its window appears, so a slow app no longer makes the Run button look stuck.',
+      'A supported installer completed in the background no longer holds Run for up to 25 seconds. The window reports the setup’s progress while it works, and the app opens there when setup finishes.',
+      'The app’s log now records how long the window host took to become ready, so a slow launch can be attributed to the host or to the app itself.',
+      'The interface now uses the documentation’s graphite and teal palette, a faint geometric grid behind the panel, squarer cards and controls, and softer teal glow on the active tab.',
+      'README rewritten in plain language: what RunContainer is, how to start, what each tab does, and where to get help — with a single build snippet.',
+    ],
+  },
+  {
     version: '0.8.8',
     date: '2026-10-28',
     title: 'Real app icons, honest status, faster Run',
