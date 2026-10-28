@@ -50,10 +50,11 @@ describe('setup program detection and planning', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('plans unattended setup in the background when the installer supports it', () => {
+  it('shows the wizard by default and plans unattended setup only on request', () => {
     const dir = tempDir();
     const installer = writeExe(dir, 'AppSetup.exe', 'Inno Setup');
-    const plan = planSetupRun({ source: installer, name: 'AppSetup' });
+    expect(planSetupRun({ source: installer, name: 'AppSetup' }).mode).toBe('wizard');
+    const plan = planSetupRun({ source: installer, name: 'AppSetup', setupMode: 'silent' });
     expect(plan.isSetup).toBe(true);
     expect(plan.mode).toBe('silent');
     expect(plan.args).toContain('/VERYSILENT');
@@ -72,7 +73,7 @@ describe('setup program detection and planning', () => {
     const inno = writeExe(dir, 'Setup.exe', 'Inno Setup');
     const forced = planSetupRun({ source: inno, name: 'Setup', setupMode: 'wizard' });
     expect(forced.mode).toBe('wizard');
-    expect(forced.summary).toContain('complete the wizard');
+    expect(forced.summary).toContain('Complete it');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

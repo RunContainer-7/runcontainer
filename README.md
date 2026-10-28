@@ -9,7 +9,11 @@ It works like LiveContainer does on iOS: a launcher with a container per app, no
 - **New users:** download the latest `RunContainer-Setup-<version>.exe` from the [Releases page](../../releases) or from our website https://runcontainer-7.github.io/9-runcontainer/ and run it.
 - **Installed users:** you don't need to watch releases. When a new stable version is out, the app shows a notice with an **Update…** button, and the Updates tab lists what changed.
 
-Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed.
+Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed for RunContainer itself; some apps or installers request administrator approval.
+
+The 0.8.6 installer is named `RunContainer-Setup-0.8.6.exe`. Download it from the Releases page if available; otherwise use the latest published release. Installers are currently unsigned.
+
+When an app needs an installer, RunContainer attempts to show the wizard and its dialogs in a RunContainer window. For recognised installer types, close the wizard and choose **Set up in the background** to try unattended setup; its progress is reported while it runs. RunContainer then looks for an executable inside the environment and attempts to start it. Some installers do not honour unattended switches or install elsewhere. Window hosting is best-effort: Windows may refuse to host certain windows, and system prompts can appear outside RunContainer.
 
 ## What you can do
 
@@ -107,7 +111,7 @@ node scripts/windows-verify.js           # isolation, container tokens, deletion
 npx react-scripts test --testPathPattern vmConsoleLive --watchAll=false   # a guest's screen is really drawn
 ```
 
-`windows-host-verify.js` installs a real graphical program through the app's own IPC, presses Run, and asks Windows where that window is: it must be a child window of the RunContainer window, visible and sensibly sized, with no copy left on the desktop. It also checks that a virtual machine which outlived the app is stopped at startup rather than left holding its disk. It uses its own data directory, so nothing of yours is touched.
+`windows-host-verify.js` installs a test graphical program through the app's own IPC and checks its window and an owned installer-style dialog are visible inside RunContainer. It also exercises background setup with a controlled test installer, verifies its unattended arguments, and checks the installed test app's window is hosted. It checks that a virtual machine left over from a previous session is stopped at startup. The test does not prove every third-party installer is compatible.
 
 `src/services/vmConsoleLive.test.js` does the same for the Virtualise tab's own promise. It boots genuine QEMU with the exact arguments the app builds, connects to the guest with the same RFB client the window uses, and requires real non-blank pixels — a console that connects and draws nothing looks identical to one that works until you look at the pixels, which is how three separate bugs in this path shipped unnoticed. It reports what it measured (on the development PC: a 720x400 guest screen, one raw frame, 1679 lit pixels) and skips, never passes, where QEMU is not installed. All three checks run in CI (`.github/workflows/windows-verify.yml`); the workflow installs QEMU so the console check runs there too.
 
@@ -128,7 +132,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.8.3 && git push origin v0.8.3
+git tag v0.8.6 && git push origin v0.8.6
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

@@ -147,17 +147,16 @@ function planSetupRun({
     };
   }
 
-  // The user asked for the wizard, or the installer has no documented unattended
-  // mode. Either way the wizard is shown inside RunContainer and we say so.
-  if (setupMode === 'wizard' || !family) {
+  // Default to an interactive wizard; silent switches are only applied when explicitly requested.
+  if (setupMode !== 'silent' || !family) {
     return {
       isSetup: true,
       family,
       mode: 'wizard',
       args: [],
       summary: family
-        ? `${family.name} setup is shown in a RunContainer window: complete the wizard there and RunContainer will look for the app it installs.`
-        : 'This looks like a setup program, but its installer type is not recognised, so its wizard is shown in a RunContainer window instead of being run unattended.',
+        ? `${family.name} setup will attempt to show its wizard in a RunContainer window. Complete it there and RunContainer will look for the app it installs.`
+        : 'This looks like a setup program, but its installer type is not recognised. RunContainer will attempt to show its wizard rather than run it unattended.',
     };
   }
 

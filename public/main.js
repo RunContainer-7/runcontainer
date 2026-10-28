@@ -2178,7 +2178,6 @@ function closeGuestWindow(appId) {
   const win = guestWindows.get(appId);
   if (!win || win.isDestroyed()) return;
   win.__rcClosing = true;
-  guestWindows.delete(appId);
   // Windows destroys a child window together with its parent, and a hosted app window IS a
   // child of this one. So a window that is still hosting something releases it to the
   // desktop first: without that, closing this window would close the app's own window, and
@@ -2252,9 +2251,7 @@ function ensureGuestWindow(appRecord, note) {
   const pagePath = guestWindowPagePath();
   const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}`
     + `&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`
-    // The page offers to complete this setup unattended only when a documented
-    // unattended mode exists for this installer (see src/services/setupInstall.js).
-    + `&autosetup=${appRecord.setupProgram && appRecord.setupPlanMode === 'silent' && !appRecord.installedExePath ? 1 : 0}`;
+    + `&autosetup=0`;
   if (pagePath) {
     win.loadFile(pagePath, { search }).catch((error) => {
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load: ${error.message}`);
@@ -2272,7 +2269,6 @@ function ensureGuestWindow(appRecord, note) {
     if (win.__rcClosing) return;
     event.preventDefault();
     win.__rcClosing = true;
-    guestWindows.delete(appRecord.id);
     const record = getStoredApp(appRecord.id) || appRecord;
     releaseGuestWindowWindows(record, [...trackedPids(record), record.hostedWindowPid])
       .catch((error) => {
@@ -2283,7 +2279,7 @@ function ensureGuestWindow(appRecord, note) {
       });
   });
   win.on('closed', () => {
-    guestWindows.delete(appRecord.id);
+    if (guestWindows.get(appRecord.id) === win) guestWindows.delete(appRecord.id);
     win.__rcClosing = false;
   });
   return win;
@@ -2321,6 +2317,12 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
   // Whether the app may be started with a hidden first window depends on the host
   // actually watching. Ask it, and wait for its answer before anything is launched.
   await waitForWindowHostReady(state, readyMs);
+  if (!state.ready && !state.error && !state.exited && state.child) {
+    // A cold host can take longer to compile. Keep its window and watcher alive:
+    // destroying the parent here prevents the eventual watcher from hosting anything.
+    setGuestWindowStatus(win, 'Preparing the window host. RunContainer will keep watching for the app window.');
+    return { embedded: false, ready: false, reason: 'the window host is still starting' };
+  }
   if (!state.ready) {
     const reason = windowHostingRefusal(appRecord) || 'the window host did not start';
     windowHostBackoff.set(appRecord.id, Date.now() + 20000);
@@ -4079,7 +4081,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     name: appRecord.name,
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
-    setupMode: appRecord.setupMode,
+    setupMode: requestedAppRecord?.backgroundSetup === true ? 'silent' : 'wizard',
   });
   if (setupPlan.isSetup) {
     appendLog(logPath, `Setup program: ${setupPlan.summary}`);
@@ -4094,7 +4096,8 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
       // When this setup started, so a long one can be reported as still working
       // rather than as an app that is stuck. It is a timestamp, not a promise:
       // RunContainer never claims progress it has not observed.
-      setupStartedAt: stored.setupStartedAt || new Date().toISOString(),
+      setupStartedAt: new Date().toISOString(),
+      setupCancelledAt: null,
       setupSummary: setupPlan.summary,
       setupSilentArgs: setupPlan.mode === 'silent' ? setupPlan.args.join(' ') : null,
       installedExePath: setupPlan.installedExePath || stored.installedExePath || null,
@@ -4195,7 +4198,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     if (appRecord.setupPlanMode === 'silent' && !appRecord.installedExePath) {
       startSetupProgressReporting(appRecord, logPath);
     }
-    watchSetupCompletion(appRecord.id, logPath).catch(() => {});
+    if (requestedAppRecord?.backgroundSetup !== true) watchSetupCompletion(appRecord.id, logPath).catch((error) => appendLog(logPath, `Setup monitoring failed: ${error.message}`));
   }
   return result;
 }
@@ -4209,7 +4212,8 @@ async function waitForSetupExit(appId, { timeoutMs = 20 * 60 * 1000, pollMs = 30
     await new Promise((resolve) => setTimeout(resolve, pollMs));
     const record = getStoredApp(appId);
     if (!record) return { exited: true, reason: 'the app was removed while setup was running', waitedMs: Date.now() - startedAt };
-    const pids = record.status === 'Running' ? await listRunningPids(record).catch(() => []) : [];
+    if (record.setupCancelledAt && Date.parse(record.setupCancelledAt) >= (Date.parse(record.setupStartedAt || '') || startedAt)) return { exited: false, cancelled: true, waitedMs: Date.now() - startedAt };
+    const pids = record.status === 'Running' ? await listRunningPids(record) : [];
     if (pids.length === 0) {
       if (logPath) appendLog(logPath, `Setup finished after ${Math.round((Date.now() - startedAt) / 1000)}s (its process tree has exited).`);
       return { exited: true, waitedMs: Date.now() - startedAt };
@@ -4266,6 +4270,8 @@ async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
 async function watchSetupCompletion(appId, logPath) {
   const outcome = await waitForSetupExit(appId, { logPath });
   if (!outcome.exited) return null;
+  const current = getStoredApp(appId);
+  if (current?.status === 'Running') await checkAppProcesses(appId, logPath);
   const record = getStoredApp(appId);
   if (!record?.setupProgram || record.installedExePath) return null;
   const installed = await recordInstalledExecutable(appId, {
@@ -4383,6 +4389,7 @@ async function setupAppInBackground(requestedAppRecord) {
     name: appRecord.name,
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
+    setupMode: 'silent',
   });
   if (!plan.isSetup) {
     return { id: appRecord.id, status: 'Failed', error: `${plan.summary} Nothing was run.` };
@@ -4393,6 +4400,7 @@ async function setupAppInBackground(requestedAppRecord) {
   if (plan.mode !== 'silent') {
     return { id: appRecord.id, status: 'Failed', error: `${plan.summary} This installer has to be completed by hand.` };
   }
+  if (appRecord.status === 'Running') return { id: appRecord.id, status: 'Failed', error: 'Close the running installer before starting background setup.' };
   const logsRoot = appRecord.logsRoot || path.join(appRecord.sandboxRoot, 'logs');
   const logPath = path.join(logsRoot, `${sanitizeName(appRecord.name || 'app')}.log`);
   appendLog(logPath, plan.summary);
@@ -4401,20 +4409,33 @@ async function setupAppInBackground(requestedAppRecord) {
   // the ordinary contained launch path is reused rather than duplicated: same
   // engine, same Job Object, same per-app profile.
   const previousArgs = appRecord.launchArgs || '';
-  const silentRecord = { ...appRecord, launchArgs: plan.args.join(' '), setupProgram: true, setupStartedAt: new Date().toISOString() };
+  const silentRecord = { ...appRecord, launchArgs: plan.args.join(' '), setupProgram: true, setupCancelledAt: null, setupStartedAt: new Date().toISOString() };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? silentRecord : entry)));
-  const launched = await runApp(silentRecord, {}).catch((error) => ({ status: 'Failed', error: error.message }));
+  const launched = await runApp({ id: appRecord.id, backgroundSetup: true }, {}).catch((error) => ({ status: 'Failed', error: error.message }));
+  saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchArgs: previousArgs } : entry)));
   if (launched?.status !== 'Running') {
-    saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchArgs: previousArgs } : entry)));
     const error = launched?.error || 'The unattended setup did not start inside its environment.';
     emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'failed', detail: error });
     return { id: appRecord.id, status: 'Failed', error: `${error} Use the wizard instead: press Run and complete setup in the RunContainer window.` };
   }
   emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'running', detail: 'Setup is running inside this environment; this window stays empty until it finishes.' });
-  const outcome = await waitForSetupExit(appRecord.id, { logPath });
+  let outcome;
+  try {
+    outcome = await waitForSetupExit(appRecord.id, { logPath });
+  } catch (error) {
+    stopSetupProgressReporting(appRecord.id);
+    appendLog(logPath, `Could not monitor setup: ${error.message}`);
+    return { id: appRecord.id, status: 'Failed', error: `Could not monitor setup: ${error.message}` };
+  }
+  if (!outcome.exited) {
+    stopSetupProgressReporting(appRecord.id);
+    return { id: appRecord.id, status: outcome.timedOut ? 'SettingUp' : 'Failed', detail: outcome.timedOut ? 'Setup is still running; RunContainer stopped waiting after 20 minutes.' : 'Setup was stopped before it completed.' };
+  }
+  const latestSetup = getStoredApp(appRecord.id);
+  if (latestSetup?.status === 'Running') await checkAppProcesses(appRecord.id, logPath);
   const installedExePath = await recordInstalledExecutable(appRecord.id, {
     logPath,
-    since: Date.parse(appRecord.lastLaunchedAt || '') || 0,
+    since: Date.parse(getStoredApp(appRecord.id)?.lastLaunchedAt || '') || 0,
   });
   if (!installedExePath) {
     return {
@@ -5986,7 +6007,7 @@ ipcMain.handle('kill-exe', async (_event, requestedAppRecord) => {
     }
     // The app is confirmed stopped, so a previously blocked launch can be retried safely.
     const apps = loadApps().map((entry) => (entry.id === appRecord.id
-      ? { ...withTrackedPids(entry, []), status: 'Stopped', pid: null, sandboxPids: [], launchCleanupPending: false }
+      ? { ...withTrackedPids(entry, []), status: 'Stopped', pid: null, sandboxPids: [], launchCleanupPending: false, ...(entry.setupProgram ? { setupCancelledAt: new Date().toISOString() } : {}) }
       : entry));
     saveApps(apps);
     appendLog(appLog, `App ${appRecord.id} stopped.`);

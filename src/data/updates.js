@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.8.6',
+    date: '2026-10-28',
+    title: 'Installer and app window hosting fixes',
+    changes: [
+      'Owned installer dialogs can now be detected by the window host, including in the administrator-approved host. Some Windows windows may still refuse hosting.',
+      'A slow-starting window host remains open and continues watching, and closing a host releases its app windows before the host is destroyed.',
+      'Run now attempts to show installer wizards by default. When background setup is chosen for a supported installer, it receives the unattended switches, restores the app’s launch arguments and starts the discovered app after setup finishes.',
+    ],
+  },
+  {
     version: '0.8.5',
     date: '2026-10-28',
     title: 'Virtualise layout and console reliability',

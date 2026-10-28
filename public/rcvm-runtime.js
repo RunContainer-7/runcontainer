@@ -814,7 +814,9 @@ public static class RcvmWindowHost
     List<IntPtr> found = new List<IntPtr>();
     EnumWindows(delegate(IntPtr hwnd, IntPtr param)
     {
-      if (GetParent(hwnd) != IntPtr.Zero) return true;
+      // Top-level owned dialogs have an owner returned by GetParent; they are not
+      // child windows and must be considered for hosting too.
+      if ((GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0) return true;
       if (!IsWindowVisible(hwnd)) return true;
       if (GetWindowTextLength(hwnd) == 0) return true;
       HostRect rect;

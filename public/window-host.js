@@ -507,7 +507,9 @@ public static class RunContainerWindowHost
             if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return false;
             return true;
         }
-        if (GetParent(hwnd) != IntPtr.Zero) return false;
+        // GetParent returns an owner for top-level popups, not just a parent. An
+        // installer dialog can therefore have an owner while still being top-level.
+        if ((GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0) return false;
         if (GetWindowTextLength(hwnd) == 0) return false;
         RECT rect;
         if (!GetWindowRect(hwnd, out rect)) return false;
@@ -586,6 +588,11 @@ public static class RunContainerWindowHost
                 Thread.Sleep(tick);
                 continue;
             }
+
+            // Forget a closed splash before selecting the next main window, so the
+            // wizard replacing it fills the host rather than remaining a small dialog.
+            if (mainWindow != 0 && (!IsWindow(new IntPtr(mainWindow)) || GetParent(new IntPtr(mainWindow)) != parent))
+                mainWindow = 0;
 
             List<IntPtr> found = new List<IntPtr>();
             EnumWindows(delegate(IntPtr hwnd, IntPtr param)

@@ -84,6 +84,14 @@ function buildProbe(directory) {
     '    form.Width = 420;',
     '    form.Height = 300;',
     '    form.StartPosition = FormStartPosition.CenterScreen;',
+    '    Timer timer = new Timer(); timer.Interval = 2500;',
+    '    timer.Tick += (sender, args) => {',
+    '      timer.Stop();',
+    '      Form dialog = new Form(); dialog.Text = "RCHostProbeDialog";',
+    '      dialog.Width = 320; dialog.Height = 200;',
+    '      dialog.Show(form);',
+    '    };',
+    '    form.Shown += (sender, args) => timer.Start();',
     '    Application.Run(form);',
     '  }',
     '}',
@@ -99,6 +107,36 @@ function buildProbe(directory) {
   if (!String(result).includes('PROBE_BUILT') || !fs.existsSync(output)) {
     throw new Error(`the GUI probe could not be compiled: ${String(result).slice(0, 400)}`);
   }
+  return output;
+}
+
+// A controlled installer exercises the actual unattended launch path without touching
+// system locations. It identifies as Inno, records the arguments and installs the probe
+// into the environment's working directory.
+function buildSetupProbe(directory, probe) {
+  const source = path.join(directory, 'setup-probe.cs');
+  const output = path.join(directory, 'RCSetupProbe.exe');
+  const escaped = probe.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  fs.writeFileSync(source, [
+    'using System;',
+    'using System.IO;',
+    'using System.Threading;',
+    'public static class RCSetupProbe {',
+    '  public static void Main(string[] args) {',
+    '    string marker = "Inno Setup";',
+    '    File.WriteAllText("setup-args.txt", marker + " " + string.Join(" ", args));',
+    '    Thread.Sleep(18000);',
+    `    File.Copy("${escaped}", "InstalledProbe.exe", true);`,
+    '    File.SetLastWriteTimeUtc("InstalledProbe.exe", DateTime.UtcNow);',
+    '  }',
+    '}',
+  ].join('\n'), 'utf8');
+  const script = path.join(directory, 'build-setup-probe.ps1');
+  fs.writeFileSync(script, 'param([string]$Source, [string]$Out)\nAdd-Type -Path $Source -OutputAssembly $Out -OutputType WindowsApplication\n', 'utf8');
+  powershell(['-File', script, '-Source', source, '-Out', output]);
+  if (!fs.existsSync(output)) throw new Error('setup probe could not be compiled');
+  // The detector reads byte signatures; .NET string literals are UTF-16.
+  fs.appendFileSync(output, Buffer.from('Inno Setup', 'ascii'));
   return output;
 }
 
@@ -430,6 +468,43 @@ async function main() {
     }
 
     notes.push(`hosted inside "${hostWindow.title}" (window ${hostWindow.handle}), ${hosted.width}x${hosted.height}, visible`);
+
+    // Installer wizards commonly create owned dialogs; Windows GetParent reports their
+    // owner even though they are top-level. Check that one is actually adopted too.
+    const dialogDeadline = Date.now() + 20000;
+    let dialog = null;
+    let desktopDialog = null;
+    while (Date.now() < dialogDeadline) {
+      const windows = dumpWindows(dumpScript, work);
+      dialog = windows.find((entry) => entry.kind === 'CHILD' && entry.title === 'RCHostProbeDialog' && entry.parent === hostWindow.handle && entry.visible);
+      desktopDialog = windows.find((entry) => entry.kind === 'TOP' && entry.title === 'RCHostProbeDialog');
+      if (dialog && !desktopDialog) break;
+      await wait(1000);
+    }
+    if (!dialog || desktopDialog) throw new Error('the owned installer-style dialog did not render inside the RunContainer window');
+    notes.push('owned installer-style dialog hosted inside the same window');
+    await evaluateWithRetry(`require('electron').ipcRenderer.invoke('kill-exe', ${JSON.stringify({ id: installed.id })})`);
+    installed = null;
+
+    const setup = buildSetupProbe(work, probe);
+    installed = await evaluateWithRetry(`require('electron').ipcRenderer.invoke('install-exe', ${JSON.stringify(setup)})`);
+    if (!installed?.id) throw new Error('setup probe could not be added');
+    const setupResult = await evaluateWithRetry(`require('electron').ipcRenderer.invoke('setup-in-background', ${JSON.stringify({ id: installed.id })})`);
+    if (setupResult?.status !== 'Running') throw new Error(`background setup did not start the installed app: ${JSON.stringify(setupResult)}`);
+    const argsFile = path.join(installed.sandboxRoot, 'setup-args.txt');
+    const args = fs.existsSync(argsFile) ? fs.readFileSync(argsFile, 'utf8') : '';
+    if (!args.includes('/VERYSILENT') || !args.includes('/NORESTART')) throw new Error(`installer did not receive unattended arguments: ${args}`);
+    const setupDeadline = Date.now() + 30000;
+    let installedWindow = null;
+    while (Date.now() < setupDeadline) {
+      const windows = dumpWindows(dumpScript, work);
+      const host = windows.find((entry) => entry.kind === 'TOP' && entry.title.startsWith('RunContainer — RCSetupProbe'));
+      installedWindow = host && windows.find((entry) => entry.kind === 'CHILD' && entry.title === probeTitle && entry.parent === host.handle && entry.visible);
+      if (installedWindow) break;
+      await wait(1000);
+    }
+    if (!installedWindow) throw new Error('the app installed by background setup did not render inside RunContainer');
+    notes.push('background setup received silent arguments and its installed app was hosted');
     notes.push(await checkVmLeftover(work));
     passed = true;
   } catch (error) {

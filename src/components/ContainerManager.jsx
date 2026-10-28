@@ -31,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.5";
+const APP_VERSION_FALLBACK = "0.8.6";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -1096,10 +1096,10 @@ export default function ContainerManager() {
                               : 'Setup: '}
                             {container.setupSummary}
                           </span>
-                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && (
+                          {container.setupProgram && container.setupFamily && container.status !== 'Running' && !container.installedExePath && (
                             <button className="settings-button ghost" onClick={() => handleSetupInBackground(container)}>Set up in the background</button>
                           )}
-                          {container.setupProgram && container.setupPlanMode === 'silent' && !container.installedExePath && formatSetupElapsed(container.setupStartedAt, setupClock) && (
+                          {container.setupProgram && container.status === 'Running' && container.setupPlanMode === 'silent' && !container.installedExePath && formatSetupElapsed(container.setupStartedAt, setupClock) && (
                             <span className="muted">
                               Setup has been running for {formatSetupElapsed(container.setupStartedAt, setupClock)} · it is still
                               working inside this environment, and Run starts the app it produces.
