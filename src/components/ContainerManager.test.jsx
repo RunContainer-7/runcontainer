@@ -169,6 +169,42 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("chooses how installers run in Settings, not with a button on every app", async () => {
+    listContainers.mockResolvedValue([{
+      id: "setup-1",
+      name: "Demo Setup",
+      source: "C:\\apps\\DemoSetup.exe",
+      status: "Installed",
+      setupProgram: true,
+      setupFamily: "inno",
+      setupFamilyName: "Inno Setup",
+      setupSummary: "An Inno Setup installer: setup runs inside the app's environment.",
+      setupPlanMode: "wizard",
+    }]);
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Settings");
+    // Both answers are offered once, for the whole installation.
+    expect(container.textContent).toContain("Complete them automatically");
+    expect(container.textContent).toContain("Show the installer wizard");
+    const manual = Array.from(container.querySelectorAll("button"))
+      .find((entry) => entry.textContent === "Show the installer wizard");
+    expect(manual).not.toBeUndefined();
+    act(() => {
+      manual.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(setPreference).toHaveBeenCalledWith({ installerMode: "manual" });
+
+    // The app's own line explains what Run will do, and the old per-app button is gone.
+    openTab(container, "Apps");
+    expect(container.textContent).not.toContain("Set up in the background");
+    expect(container.textContent).toContain("Run opens the installer wizard inside a RunContainer window.");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("keeps ISO and provisioning clutter out of Settings", () => {
     const container = render();
     openTab(container, "Settings");

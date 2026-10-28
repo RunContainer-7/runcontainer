@@ -27,7 +27,8 @@
             gap: 12px;
             padding: 0 14px;
             border-bottom: 1px solid rgba(96, 165, 250, 0.22);
-            background: #0b1220;
+            background: linear-gradient(180deg, #101a2e, #0a1120);
+            box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 20px -18px #000;
         }
         .mark {
             width: 30px;
@@ -36,8 +37,9 @@
             display: grid;
             place-items: center;
             border-radius: 9px;
-            background: rgba(96, 165, 250, 0.16);
-            color: #93c5fd;
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.42), rgba(37, 99, 235, 0.16));
+            box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.28) inset;
+            color: #dbeafe;
             font-size: 16px;
         }
         .titles { min-width: 0; flex: 1; }
@@ -67,7 +69,9 @@
             padding: 6px 10px;
             cursor: pointer;
         }
-        button:hover { background: rgba(96, 165, 250, 0.12); }
+        button { transition: background 120ms ease, border-color 120ms ease; }
+        button:hover { background: rgba(96, 165, 250, 0.14); border-color: rgba(147, 197, 253, 0.55); }
+        button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
         main {
             flex: 1;
             display: grid;
@@ -89,7 +93,6 @@
             <span id="app-note">This window belongs to RunContainer.</span>
         </div>
         <div class="actions">
-            <button id="background-setup" hidden title="Complete this installer unattended, inside its environment">Set up in background</button>
             <button id="stop">Stop app</button>
             <button id="release">Release window</button>
             <button id="main">RunContainer</button>

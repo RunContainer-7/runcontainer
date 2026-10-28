@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.8.7',
+    date: '2026-10-28',
+    title: 'Run waits for the host, so the app opens inside RunContainer',
+    changes: [
+      'Fixed the window appearing on the desktop first. Run now waits until the window host has reported that it is watching before the app’s process is created, so the app’s first window is adopted the moment it exists instead of being created visible and adopted late. On a cold start this wait is at most a few seconds, and the host is prewarmed at launch so it is usually instant.',
+      'Fixed installer wizards that never appeared at all. A hidden window with an owner — the normal shape of an installer’s wizard, whose owner is a tiny message window — was excluded from hosting and from the safety net that reveals a hidden window, so a running setup could produce no visible window. Owned main windows are now hosted and revealed like any other; tool palettes and helper windows are still ignored.',
+      'Fixed a window that could be moved into RunContainer but never shown. The host now refuses to re-parent anything before it has a real client area, instead of making the app a child of a window that is minimized or mid-resize and then failing to position it.',
+      'An administrator-approved app no longer leaves an empty second RunContainer window behind: the elevated launcher’s own window hosts it, and the medium-integrity window is closed instead of sitting blank.',
+      'Background setup is now a Settings choice — “Complete them automatically” or “Show the installer wizard” — instead of a button on every app that supports it. The button is gone from the app list and from the app window.',
+      'A visual pass over the interface: a deeper background with a soft aurora, glassy app cards, a floating navigation bar, refreshed buttons with focus rings, a thin dark scrollbar, and matching chrome on the hosted app window. Same layout and same controls; the finish now matches the documentation site.',
+    ],
+  },
+  {
     version: '0.8.6',
     date: '2026-10-28',
     title: 'Installer and app window hosting fixes',

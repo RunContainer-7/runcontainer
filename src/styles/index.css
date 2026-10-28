@@ -1242,3 +1242,277 @@ details.advanced-settings[open] > summary::before {
     font-size: 11.5px;
     line-height: 1.55;
 }
+
+/* ---------------------------------------------------------------------------
+   Surface pass
+
+   The interface is the same one — same tabs, same controls, same copy — with a
+   finish that matches the documentation site: deeper background, a soft aurora
+   behind the panel, glassy cards, and controls that respond to the pointer.
+   Everything here is a refinement of an existing class, so no layout in the app
+   depends on it and nothing is restyled that the rest of the file has not
+   already defined.
+   --------------------------------------------------------------------------- */
+
+:root {
+    --rc-ink: #e8eefc;
+    --rc-ink-soft: #9fb0cc;
+    --rc-line: rgba(125, 165, 235, 0.18);
+    --rc-line-strong: rgba(125, 165, 235, 0.34);
+    --rc-surface: rgba(15, 23, 42, 0.72);
+    --rc-surface-raised: rgba(23, 34, 55, 0.9);
+    --rc-accent: #60a5fa;
+    --rc-accent-strong: #3b82f6;
+    --rc-glow: rgba(59, 130, 246, 0.22);
+    --rc-radius: 14px;
+}
+
+body {
+    font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+    color: var(--rc-ink);
+    background:
+        radial-gradient(1100px 620px at 12% -12%, rgba(37, 99, 235, 0.30), transparent 62%),
+        radial-gradient(900px 520px at 96% 4%, rgba(56, 189, 248, 0.14), transparent 60%),
+        radial-gradient(700px 700px at 50% 118%, rgba(99, 102, 241, 0.18), transparent 60%),
+        #04070f;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+.screen {
+    background:
+        linear-gradient(180deg, rgba(20, 31, 52, 0.96) 0%, rgba(6, 10, 20, 0.98) 62%, rgba(4, 7, 15, 1) 100%);
+    border: 1px solid var(--rc-line-strong);
+    box-shadow:
+        0 0 0 1px rgba(2, 6, 23, 0.9),
+        0 1px 0 rgba(255, 255, 255, 0.04) inset,
+        0 30px 80px -20px rgba(0, 0, 0, 0.85),
+        0 0 90px -30px var(--rc-glow);
+}
+
+/* A single soft highlight along the top edge: it reads as light falling on the
+   panel rather than as a border. */
+.screen::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(147, 197, 253, 0.55), transparent);
+    pointer-events: none;
+}
+
+.app-header {
+    border-bottom: 1px solid var(--rc-line);
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+}
+
+.eyebrow {
+    color: #7dd3fc;
+    font-size: 11px;
+    letter-spacing: 0.22em;
+}
+
+.header-title {
+    font-size: 26px;
+    font-weight: 720;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+}
+
+/* The mark and the one-line version give the header a focal point instead of a
+   wall of left-aligned text. */
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+}
+
+.brand-mark {
+    width: 46px;
+    height: 46px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 14px;
+    font-size: 22px;
+    color: #eaf2ff;
+    background: linear-gradient(145deg, #3b82f6 0%, #1d4ed8 55%, #1e3a8a 100%);
+    box-shadow:
+        0 10px 26px -14px rgba(37, 99, 235, 0.95),
+        0 1px 0 rgba(255, 255, 255, 0.28) inset,
+        0 0 0 1px rgba(147, 197, 253, 0.4);
+}
+
+.brand-version {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--rc-ink-soft);
+    letter-spacing: 0.01em;
+}
+
+.container-item {
+    position: relative;
+    padding: 14px;
+    border-radius: var(--rc-radius);
+    border: 1px solid var(--rc-line);
+    background: linear-gradient(180deg, var(--rc-surface-raised), var(--rc-surface));
+    box-shadow: 0 10px 24px -18px rgba(0, 0, 0, 0.9);
+    transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.container-item:hover {
+    border-color: var(--rc-line-strong);
+    transform: translateY(-1px);
+    box-shadow: 0 16px 32px -22px rgba(0, 0, 0, 0.95), 0 0 32px -18px var(--rc-glow);
+}
+
+.app-icon {
+    background: linear-gradient(150deg, #1e293b, #0f172a);
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.22) inset, 0 6px 14px -10px rgba(0, 0, 0, 0.9);
+}
+
+.container-name {
+    font-size: 15.5px;
+    letter-spacing: -0.01em;
+}
+
+.container-status {
+    color: var(--rc-ink-soft);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.settings-button {
+    border-radius: 10px;
+    padding: 8px 13px;
+    font-weight: 600;
+    font-size: 12.5px;
+    letter-spacing: 0.01em;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    box-shadow: 0 8px 18px -12px rgba(37, 99, 235, 0.95), 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+    transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.settings-button:hover {
+    background: linear-gradient(135deg, #4f8ff7, #2563eb);
+    box-shadow: 0 10px 22px -12px rgba(37, 99, 235, 1), 0 1px 0 rgba(255, 255, 255, 0.22) inset;
+}
+
+.settings-button:active {
+    transform: translateY(1px);
+}
+
+.settings-button.ghost {
+    background: rgba(148, 163, 184, 0.10);
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.18) inset;
+    color: #dbeafe;
+}
+
+.settings-button.ghost:hover {
+    background: rgba(148, 163, 184, 0.18);
+}
+
+.settings-button:focus-visible,
+.icon-button:focus-visible,
+.nav-button:focus-visible,
+.info-link:focus-visible {
+    outline: 2px solid #93c5fd;
+    outline-offset: 2px;
+}
+
+.bottom-nav {
+    gap: 8px;
+    padding: 8px;
+    border-radius: 20px;
+    background: rgba(9, 15, 28, 0.82);
+    border: 1px solid var(--rc-line);
+    box-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.95);
+    backdrop-filter: blur(14px);
+}
+
+.nav-button {
+    border-radius: 14px;
+    padding: 9px 4px;
+    color: #b9c7de;
+    transition: background 130ms ease, color 130ms ease, transform 130ms ease;
+}
+
+.nav-button:hover {
+    background: rgba(148, 163, 184, 0.14);
+    color: #eef2ff;
+}
+
+.nav-button.active {
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    color: #fff;
+    box-shadow: 0 10px 24px -14px rgba(59, 130, 246, 0.95);
+}
+
+.profile-card {
+    border-radius: var(--rc-radius);
+    transition: border-color 140ms ease, background 140ms ease;
+}
+
+.profile-card:hover {
+    border-color: var(--rc-line-strong);
+}
+
+.detail-panel,
+.dropdown-menu,
+.more-menu-panel {
+    border-radius: 16px;
+    border: 1px solid var(--rc-line-strong);
+    background: linear-gradient(180deg, #16223a, #0b1220);
+    box-shadow: 0 28px 60px -26px rgba(0, 0, 0, 0.95);
+}
+
+/* Overlay scrollbars on Windows are chunky and light; this is a thin dark one
+   that matches the panel instead of cutting a stripe out of it. */
+.apps-panel::-webkit-scrollbar,
+.placeholder-panel::-webkit-scrollbar,
+.panel-body::-webkit-scrollbar,
+.detail-panel::-webkit-scrollbar {
+    width: 10px;
+}
+
+.apps-panel::-webkit-scrollbar-thumb,
+.placeholder-panel::-webkit-scrollbar-thumb,
+.panel-body::-webkit-scrollbar-thumb,
+.detail-panel::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.28);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+}
+
+.apps-panel::-webkit-scrollbar-thumb:hover,
+.placeholder-panel::-webkit-scrollbar-thumb:hover,
+.panel-body::-webkit-scrollbar-thumb:hover,
+.detail-panel::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.45);
+    background-clip: padding-box;
+}
+
+.apps-panel::-webkit-scrollbar-track,
+.placeholder-panel::-webkit-scrollbar-track,
+.panel-body::-webkit-scrollbar-track,
+.detail-panel::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.update-banner,
+.behavioral-banner,
+.ai-banner {
+    border-radius: var(--rc-radius);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .container-item,
+    .settings-button,
+    .nav-button {
+        transition: none;
+    }
+}
+

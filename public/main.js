@@ -120,7 +120,7 @@ const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json'
 const preferencesPath = path.join(app.getPath('userData'), 'runcontainer-preferences.json');
 // Only these keys may be written: a preference write is not a general settings
 // back door, and an unknown key is dropped rather than stored.
-const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt']);
+const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt', 'installerMode']);
 
 function loadPreferences() {
   try {
@@ -2292,7 +2292,7 @@ function ensureGuestWindow(appRecord, note) {
 // is taken. It costs nothing when the host answers (the wait ends on the event) and
 // only takes this long when the host cannot start at all, where the alternative is
 // launching an app nobody can adopt.
-async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 4000 } = {}) {
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 6000 } = {}) {
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
   // A host that has just proved it cannot start is not retried on every early call:
@@ -2323,6 +2323,8 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
     setGuestWindowStatus(win, 'Preparing the window host. RunContainer will keep watching for the app window.');
     return { embedded: false, ready: false, reason: 'the window host is still starting' };
   }
+  // The launch that follows reads this: only a host that has said, itself, that it is
+  // watching may start an app with a hidden first window.
   if (!state.ready) {
     const reason = windowHostingRefusal(appRecord) || 'the window host did not start';
     windowHostBackoff.set(appRecord.id, Date.now() + 20000);
@@ -2336,7 +2338,7 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
   await waitForWindowHost(state, timeoutMs);
   if (state.embedded) {
     win.__rcHostPid = state.embeddedPid || pid;
-    return { embedded: true, pid: win.__rcHostPid, target: 'guest' };
+    return { embedded: true, pid: win.__rcHostPid, target: 'guest', ready: true };
   }
   setGuestWindowStatus(win, state.refused
     ? 'Windows refused to host the window RunContainer found, so it stays on your desktop. RunContainer keeps watching in case the app opens another one.'
@@ -2344,9 +2346,9 @@ async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30
   if (state.refused && !win.isVisible()) win.show();
   if (state.error || state.exited) {
     closeGuestWindow(appRecord.id);
-    return { embedded: false, reason: state.error || 'the window host stopped' };
+    return { embedded: false, ready: Boolean(state.ready), reason: state.error || 'the window host stopped' };
   }
-  return { embedded: false, reason: state.refused || 'the app has not opened a window yet' };
+  return { embedded: false, ready: Boolean(state.ready), reason: state.refused || 'the app has not opened a window yet' };
 }
 
 async function releaseGuestWindowWindows(appRecord, pids, logPath) {
@@ -2380,10 +2382,10 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
 // the main window, RunContainer's own controls are unreachable for as long as it
 // stays open. The watcher keeps running after this returns, so windows that appear
 // later (a splash, an installer's second process) are hosted too.
-async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000 } = {}) {
+async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000, readyMs } = {}) {
   if (appRecord?.windowHosting === false) return null;
   if (process.platform !== 'win32') return null;
-  return hostInGuestWindow({ ...appRecord, pid }, pid, logPath, { note, timeoutMs });
+  return hostInGuestWindow({ ...appRecord, pid }, pid, logPath, { note, timeoutMs, readyMs });
 }
 
 // Installers use the same surface: the wizard is the whole interaction, and it closes
@@ -2914,6 +2916,13 @@ async function runWithRcvm(appRecord, sandboxRoot, logPath, { elevated = false }
     // after the launch result is already decided. An elevated app's window is hosted by the
     // elevated launcher itself (Windows blocks this process from re-parenting it), so only
     // a normal launch needs the Electron host window here.
+    if (elevated) {
+      // The medium-integrity host window cannot adopt an elevated window, and leaving it
+      // open produced a second RunContainer window that stayed empty while the app was
+      // shown in the administrator host. Close it instead of showing an empty surface.
+      await stopAppWindowWatcher(appRecord.id);
+      closeGuestWindow(appRecord.id);
+    }
     if (!elevated) {
       const hosted = await hostAppWindowEverywhere(updatedApp, pid, logPath, {
         note: 'This app runs in its own environment. Its window is hosted here.',
@@ -4073,6 +4082,52 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     }
   }
 
+  // Settings decide how a supported installer is handled: completed unattended inside
+  // its environment (the default), or shown as its own wizard inside RunContainer. The
+  // choice is one preference, not a button on every app card.
+  if (requestedAppRecord?.backgroundSetup !== true && loadPreferences().installerMode !== 'manual') {
+    const automatic = planSetupRun({
+      source: appRecord.source,
+      name: appRecord.name,
+      metadata: appRecord.metadata,
+      installedExePath: appRecord.installedExePath,
+      setupMode: 'silent',
+    });
+    if (automatic.isSetup && automatic.mode === 'silent' && appRecord.status !== 'Running') {
+      appendLog(logPath, 'Settings complete supported installers unattended, so this setup runs in the background inside its environment.');
+      emitToRenderer('app:setup', { id: appRecord.id, name: appRecord.name, phase: 'planned', ...automatic });
+      let announce;
+      const launchedPromise = new Promise((resolve) => { announce = resolve; });
+      setupAppInBackground(appRecord, { onLaunched: (result) => announce(result) }).catch((error) => {
+        appendLog(logPath, `Unattended setup failed: ${error.message}`);
+        announce({ status: 'Failed', error: error.message });
+      });
+      const started = await Promise.race([
+        launchedPromise,
+        delay(25000).then(() => ({ status: 'SettingUp', detail: 'Setup is still starting inside its environment.' })),
+      ]);
+      if (started?.status === 'Running') {
+        return {
+          ...started,
+          backgroundSetup: true,
+          detail: automatic.summary,
+          reason: 'Setup is completing unattended inside its environment. The RunContainer window shows its progress, and the app starts in that same window when setup finishes.',
+        };
+      }
+      if (started?.status === 'SettingUp') {
+        // Never fall through to the wizard here: the unattended setup is already being
+        // started, and two installers in one environment is worse than an honest wait.
+        return {
+          id: appRecord.id,
+          status: 'SettingUp',
+          backgroundSetup: true,
+          reason: 'Setup is still starting inside its environment. The RunContainer window reports its progress, and the app starts there when setup finishes.',
+        };
+      }
+      appendLog(logPath, `The unattended setup did not start${started?.error ? ` (${started.error})` : ''}; opening the installer wizard instead.`);
+    }
+  }
+
   // An app that is really its own setup program must not look like a frozen app.
   // The plan says which of the two honest answers applies: set up unattended in
   // the background, or show the wizard in a RunContainer window and say so.
@@ -4143,16 +4198,26 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
   clearLiveLog(appRecord.id);
 
   appendLog(logPath, 'Launch requested; dispatching the selected engine under an operation lock.');
-  // Start the second RunContainer window and its window host now, not after the engine
-  // reports success. Launching containment takes a couple of seconds; that is time the
-  // host can spend starting, so the app's first window is hosted the moment it exists.
+  // Start the second RunContainer window AND WAIT until its host says it is watching,
+  // before the app's process exists. This is the difference between the app appearing
+  // inside RunContainer on the first press and appearing on the desktop first: a host
+  // that is still compiling cannot adopt anything, so the app was started visible and
+  // only adopted later (or not at all). The wait is bounded, and a host that is not
+  // ready only means the app starts visible instead of invisible.
   if (appRecord.windowHosting !== false && process.platform === 'win32') {
-    hostAppWindowEverywhere({ ...appRecord, pid: null }, null, logPath, {
+    const launchHost = await hostAppWindowEverywhere({ ...appRecord, pid: null }, null, logPath, {
       note: appRecord.setupProgram && appRecord.setupPlanMode === 'silent'
         ? 'Setup is completing in the background inside this environment. This window reports its progress, and the app starts here when setup finishes.'
         : 'This app runs in its own environment. Its window is hosted here.',
-      timeoutMs: 600,
-    }).catch(() => {});
+      timeoutMs: 0,
+      readyMs: 6000,
+    }).catch((error) => {
+      appendLog(logPath, `The window host could not be started: ${error.message}`);
+      return null;
+    });
+    appendLog(logPath, launchHost?.ready
+      ? 'Window host is watching; the app’s first window will be hosted the moment it exists.'
+      : `The app will start with its window visible: the window host is not watching yet${launchHost?.reason ? ` (${launchHost.reason})` : ''}. RunContainer keeps watching for it.`);
   }
 
   const performLaunch = async () => {
@@ -4381,7 +4446,7 @@ ipcMain.handle('run-exe', async (_event, requestedAppRecord) => runApp(requested
 // window, and this handler refuses rather than guessing at switches.
 ipcMain.handle('setup-in-background', async (_event, requestedAppRecord) => setupAppInBackground(requestedAppRecord));
 
-async function setupAppInBackground(requestedAppRecord) {
+async function setupAppInBackground(requestedAppRecord, { onLaunched } = {}) {
   const appRecord = getStoredApp(requestedAppRecord?.id);
   if (!appRecord?.id) return { id: requestedAppRecord?.id, status: 'Failed', error: 'App is not in RunContainer’s persistent app list.' };
   const plan = planSetupRun({
@@ -4412,6 +4477,11 @@ async function setupAppInBackground(requestedAppRecord) {
   const silentRecord = { ...appRecord, launchArgs: plan.args.join(' '), setupProgram: true, setupCancelledAt: null, setupStartedAt: new Date().toISOString() };
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? silentRecord : entry)));
   const launched = await runApp({ id: appRecord.id, backgroundSetup: true }, {}).catch((error) => ({ status: 'Failed', error: error.message }));
+  // A caller that asked for this from the Run button needs the launch result now, while
+  // the setup itself may run for minutes: it is told the moment the installer is running.
+  if (typeof onLaunched === 'function') {
+    try { onLaunched(launched); } catch (error) { /* the caller is only being informed */ }
+  }
   saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? { ...entry, launchArgs: previousArgs } : entry)));
   if (launched?.status !== 'Running') {
     const error = launched?.error || 'The unattended setup did not start inside its environment.';

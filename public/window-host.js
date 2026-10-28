@@ -240,6 +240,11 @@ public static class RunContainerWindowHost
     static bool EmbedWindow(IntPtr child, IntPtr parent, int topInset, bool fill)
     {
         if (!IsWindow(child) || !IsWindow(parent)) return false;
+        // The host must have a real client area before anything is re-parented. A window
+        // that is mid-resize or minimized has none, and making the app a child first and
+        // failing afterwards left it parented but never positioned or shown — the exact
+        // "its window is inside RunContainer but I cannot see it" failure.
+        if (InsetFor(parent, topInset) < 0) return false;
         // Hide first: re-parenting a visible window makes it jump across the screen.
         ShowWindow(child, SwHide);
         // A maximized window makes a poor child; restore it so it fits the host area.
@@ -507,7 +512,11 @@ public static class RunContainerWindowHost
             // a hidden 0x0 helper or a tool palette must never be pulled on screen.
             if (!LooksLikeMain(hwnd)) return false;
             if ((GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0) return false;
-            if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return false;
+            // An OWNER does not disqualify a hidden window: installers routinely create
+            // their wizard as an owned window of a tiny hidden message window. Requiring
+            // no owner meant those wizards were never adopted and never revealed, so the
+            // setup "never opened a window" while it was running perfectly well. The
+            // title and size test above is what keeps helper windows out.
             return true;
         }
         // GetParent returns an owner for top-level popups, not just a parent. An
@@ -533,7 +542,9 @@ public static class RunContainerWindowHost
             if (IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
             if (!LooksLikeMain(hwnd)) return true;
             if ((GetWindowLong32(hwnd, GwlExStyle) & WsExToolWindow) != 0) return true;
-            if (GetWindow(hwnd, GwOwner) != IntPtr.Zero) return true;
+            // An owned main window is revealed like any other (see IsAppWindow): an
+            // installer wizard normally has an owner, and leaving it out here is what
+            // made a running setup look like it had never opened a window.
             if (!OwnedByApp(hwnd, seeds, parents, sandboxRoot)) return true;
             ShowWindow(hwnd, SwShow);
             shown += 1;

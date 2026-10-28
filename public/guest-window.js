@@ -55,21 +55,6 @@ document.getElementById('main').addEventListener('click', () => {
   ask('focus-main');
 });
 
-// Offered only when this app is a setup program whose installer has a documented
-// unattended mode: completing it in the background is then a real option, not a guess.
-if (params.get('autosetup') === '1') {
-  const button = document.getElementById('background-setup');
-  button.hidden = false;
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    setStatus('Completing this setup in the background, inside its environment…');
-    ask('background-setup').then((result) => {
-      if (result?.ok) {
-        setStatus(result.result?.detail || 'Setup finished. The app starts in its own RunContainer window.');
-        return;
-      }
-      setStatus(result?.result?.error || result?.error || 'Setup could not be completed in the background.');
-      button.disabled = false;
-    });
-  });
-}
+// Background setup is a Settings choice now, not a button here: an installer that
+// supports it is completed unattended on Run. This window is its progress surface, so
+// it only ever reports status.

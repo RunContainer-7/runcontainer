@@ -11,7 +11,7 @@ It works like LiveContainer does on iOS: a launcher with a container per app, no
 
 Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed for RunContainer itself; some apps or installers request administrator approval.
 
-The 0.8.6 installer is named `RunContainer-Setup-0.8.6.exe`. Download it from the Releases page if available; otherwise use the latest published release. Installers are currently unsigned.
+The 0.8.7 installer is named `RunContainer-Setup-0.8.7.exe`. Download it from the Releases page if available; otherwise use the latest published release. Installers are currently unsigned.
 
 When an app needs an installer, RunContainer attempts to show the wizard and its dialogs in a RunContainer window. For recognised installer types, close the wizard and choose **Set up in the background** to try unattended setup; its progress is reported while it runs. RunContainer then looks for an executable inside the environment and attempts to start it. Some installers do not honour unattended switches or install elsewhere. Window hosting is best-effort: Windows may refuse to host certain windows, and system prompts can appear outside RunContainer.
 
@@ -132,7 +132,7 @@ runcontainer
 `package.json` is the single source of truth for the version. Cut a release by pushing a matching tag:
 
 ```bash
-git tag v0.8.6 && git push origin v0.8.6
+git tag v0.8.7 && git push origin v0.8.7
 ```
 
 The release workflow tests, builds, and attaches `RunContainer-Setup-<version>.exe` to the GitHub Release. Forks can point the in-app update check at their own releases with `RUNCONTAINER_UPDATE_REPO=owner/repo`.

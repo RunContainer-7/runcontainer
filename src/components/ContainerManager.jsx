@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, setUpInBackground, runContainerWithJit, getPreferences, setPreference } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
 import VirtualiseTab from "./VirtualiseTab";
@@ -31,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.6";
+const APP_VERSION_FALLBACK = "0.8.7";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -124,6 +124,10 @@ export default function ContainerManager() {
   // technical one. It reveals the audit detail behind RC-Brain, the launch timings, and
   // the Virtualise tab. It is one preference, recorded once for this installation.
   const [developerMode, setDeveloperMode] = useState(false);
+  // How a supported installer is handled when Run is pressed: completed unattended
+  // inside its environment (default), or shown as its own wizard inside RunContainer.
+  // It is one setting for the whole installation, not a button on every app card.
+  const [installerMode, setInstallerMode] = useState("auto");
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -137,6 +141,7 @@ export default function ContainerManager() {
       .then((preferences) => {
         if (preferences?.beginnerSetupSeen !== true) setShowBeginnerSetup(true);
         if (preferences?.developerMode === true) setDeveloperMode(true);
+        if (preferences?.installerMode === "manual") setInstallerMode("manual");
       })
       .catch(() => {});
   }, []);
@@ -152,6 +157,13 @@ export default function ContainerManager() {
       developerModeEnabledAt: next ? new Date().toISOString() : null,
     })).catch(() => {});
     if (!next) setActiveTab((current) => (DEVELOPER_ONLY_TABS.includes(current) ? "Settings" : current));
+  }
+
+  // The installer choice is one preference write; the app cards and the launch path
+  // both read it, so Run behaves the way Settings says without a per-app button.
+  function chooseInstallerMode(mode) {
+    setInstallerMode(mode);
+    Promise.resolve(setPreference({ installerMode: mode })).catch(() => {});
   }
 
   const visibleTabs = developerMode ? [...tabs, ...DEVELOPER_ONLY_TABS] : tabs;
@@ -468,17 +480,6 @@ export default function ContainerManager() {
       });
   }
 
-  function handleSetupInBackground(container) {
-    if (!container) return;
-    setInstallMessage(`Running ${container.name}'s unattended setup inside its environment…`);
-    setUpInBackground(container)
-      .then((result) => {
-        setInstallMessage(result?.detail || result?.error || 'The unattended setup returned no result.');
-        refreshContainers();
-      })
-      .catch((error) => setInstallMessage(`Setup could not be completed in the background: ${error?.message || 'unknown error'}`));
-  }
-
   function handleDuplicate(container) {
     duplicateContainer(container)
       .then((duplicateApp) => {
@@ -619,7 +620,12 @@ export default function ContainerManager() {
   }
 
   function handleRun(container) {
-    setInstallMessage(`Starting ${container.name} in its RunContainer container...`);
+    // An app whose display was switched to "its own window" is the one case where Run
+    // opens no RunContainer window at all. Saying so turns a mysterious standalone window
+    // into a setting with a stated place to change it.
+    setInstallMessage(container?.windowHosting === false
+      ? `Starting ${container.name}. This app is set to open in its own window; Manage → Display → “Show inside RunContainer” changes that.`
+      : `Starting ${container.name} in its RunContainer container...`);
     setActiveSession({ ...container, embedded: false, status: 'Launching' });
 
     runContainer(container)
@@ -877,9 +883,13 @@ export default function ContainerManager() {
         </div>
       )}
       <div className="app-header">
-        <div>
-          <div className="eyebrow">Per-app profile launcher</div>
-          <div className="header-title">RunContainer</div>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">◧</span>
+          <div>
+            <div className="eyebrow">Per-app profile launcher</div>
+            <div className="header-title">RunContainer</div>
+            <div className="brand-version">v{appVersion} · an app inside an app</div>
+          </div>
         </div>
         {activeTab === "Apps" && (
           <div className="header-actions">
@@ -1087,6 +1097,7 @@ export default function ContainerManager() {
                         {container.metadata?.company ? `${container.metadata.company} • ` : ''}
                         {container.metadata?.version ? `${container.metadata.version} • ` : ''}Status: {container.status}{container.statusNote ? ` (${container.statusNote})` : ''}
                         {!container.envDirPresent ? ' • folder missing' : ''}{container.diskPresent === false ? ' • missing its files' : ''}
+                        {container.windowHosting === false ? ' • opens in its own window' : ''}
                         {isolationLabel(container) ? ` • ${isolationLabel(container)}` : ''}
                       </div>
                       {container.setupSummary && (
@@ -1098,7 +1109,11 @@ export default function ContainerManager() {
                             {container.setupSummary}
                           </span>
                           {container.setupProgram && container.setupFamily && container.status !== 'Running' && !container.installedExePath && (
-                            <button className="settings-button ghost" onClick={() => handleSetupInBackground(container)}>Set up in the background</button>
+                            <span className="muted">
+                              {installerMode === 'manual'
+                                ? 'Run opens the installer wizard inside a RunContainer window.'
+                                : 'Run completes this setup unattended inside its environment, then starts the app it installs.'}
+                            </span>
                           )}
                           {container.setupProgram && container.status === 'Running' && container.setupPlanMode === 'silent' && !container.installedExePath && formatSetupElapsed(container.setupStartedAt, setupClock) && (
                             <span className="muted">
@@ -1314,6 +1329,32 @@ export default function ContainerManager() {
               <div className="detail-actions">
                 <button className={`settings-button ${developerMode ? '' : 'ghost'}`} onClick={toggleDeveloperMode}>
                   {developerMode ? 'Turn off developer mode' : 'Enable developer mode'}
+                </button>
+              </div>
+            </div>
+            <div className={`profile-card ${installerMode === 'auto' ? 'active' : ''}`}>
+              <strong>Installers</strong>
+              <span>
+                {installerMode === 'auto'
+                  ? 'Run completes a supported installer unattended, inside its own environment, and starts the app it installs. The RunContainer window shows the setup’s progress until then.'
+                  : 'Run opens the installer’s own wizard inside a RunContainer window, so you complete setup yourself. Nothing installs outside the app’s environment.'}
+              </span>
+              <span className="muted">
+                Only installers with documented unattended switches are completed automatically; every other
+                installer always shows its wizard. Changing this applies to the next Run — no restart needed.
+              </span>
+              <div className="detail-actions">
+                <button
+                  className={`settings-button ${installerMode === 'auto' ? '' : 'ghost'}`}
+                  onClick={() => chooseInstallerMode('auto')}
+                >
+                  Complete them automatically
+                </button>
+                <button
+                  className={`settings-button ${installerMode === 'manual' ? '' : 'ghost'}`}
+                  onClick={() => chooseInstallerMode('manual')}
+                >
+                  Show the installer wizard
                 </button>
               </div>
             </div>
