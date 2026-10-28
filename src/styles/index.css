@@ -1301,6 +1301,12 @@ body {
         linear-gradient(90deg, rgba(79, 216, 180, 0.035) 1px, transparent 1px) 0 0 / 44px 44px,
         radial-gradient(900px 420px at 50% -12%, rgba(43, 179, 144, 0.16), transparent 68%),
         linear-gradient(180deg, rgba(22, 29, 39, 0.96) 0%, rgba(10, 13, 17, 0.98) 62%, rgba(10, 13, 17, 1) 100%);
+    /* The panel is opaque, so a grid on the body behind it would never be seen. */
+    background-image:
+        linear-gradient(rgba(127, 240, 212, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(127, 240, 212, 0.045) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(22, 29, 39, 0.96) 0%, rgba(10, 13, 17, 0.98) 62%, rgba(10, 13, 17, 1) 100%);
+    background-size: 46px 46px, 46px 46px, auto;
     border: 1px solid var(--rc-line-strong);
     border-radius: 18px;
     box-shadow:
@@ -1536,3 +1542,183 @@ body {
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+   Light appearance
+
+   Dark is the identity; light is the same interface on paper, for daylight and
+   projectors. Every rule below overrides an existing class — no layout, no copy,
+   no behaviour — and all of it is scoped to body[data-theme="light"], so the
+   default theme is untouched.
+   --------------------------------------------------------------------------- */
+
+body[data-theme="light"] {
+    --rc-ink: #16202b;
+    --rc-ink-soft: #556377;
+    --rc-line: rgba(15, 92, 76, 0.16);
+    --rc-line-strong: rgba(15, 92, 76, 0.28);
+    --rc-surface: rgba(255, 255, 255, 0.88);
+    --rc-surface-raised: #ffffff;
+    --rc-accent: #0f8c6f;
+    --rc-accent-strong: #0b7a60;
+    --rc-glow: rgba(15, 140, 111, 0.16);
+    color: #16202b;
+    background:
+        linear-gradient(rgba(15, 92, 76, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 92, 76, 0.05) 1px, transparent 1px),
+        radial-gradient(1100px 620px at 12% -12%, rgba(63, 207, 170, 0.2), transparent 62%),
+        #eef2f6;
+    background-size: 44px 44px, 44px 44px, auto, auto;
+}
+
+body[data-theme="light"] .screen {
+    background:
+        linear-gradient(rgba(15, 92, 76, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 92, 76, 0.05) 1px, transparent 1px),
+        linear-gradient(180deg, #ffffff 0%, #f5f8fb 60%, #eef2f6 100%);
+    background-size: 46px 46px, 46px 46px, auto;
+    border-color: rgba(15, 92, 76, 0.22);
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.85),
+        0 1px 0 rgba(255, 255, 255, 0.9) inset,
+        0 30px 70px -28px rgba(15, 35, 30, 0.35),
+        0 0 70px -36px rgba(15, 140, 111, 0.45);
+}
+
+body[data-theme="light"] .screen::before {
+    background: linear-gradient(90deg, transparent, rgba(15, 140, 111, 0.5), transparent);
+}
+
+body[data-theme="light"] .header-title,
+body[data-theme="light"] .container-name,
+body[data-theme="light"] .update-title,
+body[data-theme="light"] h1,
+body[data-theme="light"] h2,
+body[data-theme="light"] h3,
+body[data-theme="light"] h4 {
+    color: #0f1a24;
+}
+
+body[data-theme="light"] .eyebrow { color: #0b7a60; }
+body[data-theme="light"] .brand-version,
+body[data-theme="light"] .muted,
+body[data-theme="light"] .container-status,
+body[data-theme="light"] .ai-history-row .muted { color: #556377; }
+body[data-theme="light"] .status-line { color: #33414f; }
+body[data-theme="light"] .app-header { border-bottom-color: rgba(15, 92, 76, 0.14); }
+
+body[data-theme="light"] .container-item,
+body[data-theme="light"] .profile-card {
+    background: #ffffff;
+    border-color: rgba(15, 92, 76, 0.16);
+    color: #16202b;
+    box-shadow: 0 12px 26px -22px rgba(15, 35, 30, 0.5);
+}
+
+body[data-theme="light"] .container-item:hover {
+    box-shadow: 0 18px 34px -24px rgba(15, 35, 30, 0.45), 0 0 30px -20px rgba(15, 140, 111, 0.5);
+}
+
+body[data-theme="light"] .profile-card.active {
+    background: rgba(15, 140, 111, 0.1);
+    border-color: rgba(15, 140, 111, 0.45);
+    color: #0f1a24;
+}
+
+body[data-theme="light"] .detail-panel,
+body[data-theme="light"] .dropdown-menu,
+body[data-theme="light"] .more-menu-panel {
+    background: #ffffff;
+    border-color: rgba(15, 92, 76, 0.2);
+    color: #16202b;
+    box-shadow: 0 28px 60px -30px rgba(15, 35, 30, 0.4);
+}
+
+body[data-theme="light"] .dropdown-menu button { color: #16202b; }
+body[data-theme="light"] .dropdown-menu button:hover { background: rgba(15, 92, 76, 0.08); }
+
+body[data-theme="light"] .bottom-nav {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: rgba(15, 92, 76, 0.14);
+    box-shadow: 0 18px 40px -28px rgba(15, 35, 30, 0.35);
+}
+
+body[data-theme="light"] .nav-button { color: #4b5a6b; }
+body[data-theme="light"] .nav-button:hover { background: rgba(15, 92, 76, 0.08); color: #0f1a24; }
+body[data-theme="light"] .nav-button.active { color: #ffffff; }
+
+body[data-theme="light"] .settings-button.ghost {
+    background: rgba(15, 92, 76, 0.07);
+    color: #0b5f4d;
+    box-shadow: 0 0 0 1px rgba(15, 92, 76, 0.18) inset;
+}
+
+body[data-theme="light"] .settings-button.ghost:hover { background: rgba(15, 92, 76, 0.13); }
+body[data-theme="light"] .icon-button { background: rgba(15, 92, 76, 0.08); color: #0f1a24; }
+
+body[data-theme="light"] .app-icon {
+    background: linear-gradient(150deg, #e8eff6, #d6e2ec);
+    box-shadow: 0 0 0 1px rgba(15, 92, 76, 0.16) inset, 0 6px 14px -12px rgba(15, 35, 30, 0.4);
+}
+
+body[data-theme="light"] .pill { background: rgba(15, 140, 111, 0.12); color: #0b5f4d; }
+
+body[data-theme="light"] .update-banner {
+    background: rgba(15, 140, 111, 0.1);
+    border-color: rgba(15, 140, 111, 0.4);
+    color: #0b5f4d;
+}
+
+body[data-theme="light"] .behavioral-banner {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: #d97706;
+    color: #7a4a02;
+}
+
+body[data-theme="light"] .behavioral-banner .behavioral-snippet {
+    background: rgba(255, 255, 255, 0.75);
+    color: #7a4a02;
+}
+
+body[data-theme="light"] .behavioral-banner .behavioral-repair-status { color: #7a4a02; }
+
+body[data-theme="light"] .ai-banner {
+    background: rgba(139, 92, 246, 0.1);
+    border-color: #7c3aed;
+    color: #4c1d95;
+}
+
+body[data-theme="light"] .ai-evidence { color: #5b21b6; }
+body[data-theme="light"] .ai-evidence.ai-agent-facts li { color: #0b5f4d; }
+
+body[data-theme="light"] .boot-overlay {
+    background: radial-gradient(circle at top, rgba(63, 207, 170, 0.22), rgba(244, 247, 250, 0.97));
+}
+
+body[data-theme="light"] .boot-copy { color: #0b5f4d; }
+body[data-theme="light"] .boot-ring { border-color: rgba(15, 92, 76, 0.18); border-top-color: #0f8c6f; }
+
+body[data-theme="light"] .log-viewer {
+    background: #f4f7fa;
+    border-color: rgba(15, 92, 76, 0.18);
+}
+
+body[data-theme="light"] .log-viewer p { color: #33414f; }
+
+body[data-theme="light"] input,
+body[data-theme="light"] select,
+body[data-theme="light"] textarea {
+    background: #ffffff;
+    color: #16202b;
+    border-color: rgba(15, 92, 76, 0.22);
+}
+
+body[data-theme="light"] .vm-canvas { border-color: rgba(15, 92, 76, 0.3); }
+
+body[data-theme="light"] .apps-panel::-webkit-scrollbar-thumb,
+body[data-theme="light"] .placeholder-panel::-webkit-scrollbar-thumb,
+body[data-theme="light"] .panel-body::-webkit-scrollbar-thumb,
+body[data-theme="light"] .detail-panel::-webkit-scrollbar-thumb {
+    background: rgba(15, 92, 76, 0.26);
+    background-clip: padding-box;
+}

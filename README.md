@@ -78,7 +78,7 @@ npm run build
 npm start
 ```
 
-On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; releases are cut by pushing a matching tag such as `v0.8.9`.
+On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; releases are cut by pushing a matching tag such as `v0.9.0`.
 
 ## License
 

@@ -4,6 +4,19 @@
 
 export const UPDATES = [
   {
+    version: '0.9.0',
+    date: '2026-10-28',
+    title: 'A finished installer now always finds its app, and a light theme',
+    changes: [
+      'Fixed “Setup finished, but no executable was found”. An unattended install is now given the installer’s own documented destination switch, so an NSIS or Inno Setup program installs inside the app’s environment instead of into your real Windows profile. Windows’ known-folder API ignores the environment’s folder variables, which is why a successful install could look like an empty one.',
+      'Finding the installed app no longer depends on file timestamps. RunContainer records which executables exist before setup runs and treats anything new afterwards as the app, so an installer that copies files with their original (older) dates is still recognised.',
+      'If an installer still writes outside its environment — for example a wizard you completed by hand — RunContainer reads Windows’ own uninstall record for the app, brings the installed folder into the app’s environment, and starts that copy. If the folder is too large to copy, the app still starts and the log says where it lives.',
+      'A successful setup now always ends with a named result: the app it installed, started in a RunContainer window, or a clear next step if the installer genuinely installed nothing.',
+      'Settings has an Appearance choice: Dark (the default graphite and teal interface) or Light, a high-contrast pale surface for daylight and projectors. It changes colour only, and it is remembered.',
+      'A few interface refinements in the same palette: softer card depth, a brighter active tab, and a cleaner app icon plate.',
+    ],
+  },
+  {
     version: '0.8.9',
     date: '2026-10-28',
     title: 'Apps open inside RunContainer faster, and a sharper look',

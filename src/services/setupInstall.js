@@ -18,17 +18,26 @@ const fs = require('fs');
 
 // Detection by the bytes an installer carries. These strings are part of each
 // installer's own format, so they are evidence, not guesses.
+// `installDirFlag` is the installer family's own documented destination switch. It is
+// what keeps an unattended install inside the app's environment: a Windows installer
+// that asks Windows for the user's program folder gets the REAL one, because the
+// known-folder API does not read the environment variables RunContainer sets. Without
+// the switch the app was installed correctly and then looked missing, since nothing had
+// appeared in the environment.
 const FAMILIES = [
   {
     id: 'inno',
     name: 'Inno Setup',
     args: ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'],
+    installDirFlag: (dir) => `/DIR="${dir}"`,
     detect: (buffer) => buffer.includes('Inno Setup') || buffer.includes('InnoSetupVersion'),
   },
   {
     id: 'nsis',
     name: 'NSIS',
     args: ['/S'],
+    // NSIS requires /D last and unquoted; everything after /D= is the path.
+    installDirFlag: (dir) => `/D=${dir}`,
     detect: (buffer) => buffer.includes('Nullsoft') || buffer.includes('NSIS Error'),
   },
   {
@@ -83,7 +92,9 @@ function detectInstallerFamily(exePath, options = {}) {
   if (!text) return null;
   for (const family of FAMILIES) {
     try {
-      if (family.detect(text)) return { id: family.id, name: family.name, args: family.args };
+      if (family.detect(text)) {
+        return { id: family.id, name: family.name, args: family.args, installDirFlag: family.installDirFlag };
+      }
     } catch (error) {
       // A detector that fails simply does not match.
     }
@@ -109,6 +120,7 @@ function planSetupRun({
   metadata = {},
   installedExePath = null,
   setupMode = 'auto',
+  installDir = null,
   detectFamily = detectInstallerFamily,
   existsSync = fs.existsSync,
 } = {}) {
@@ -160,27 +172,42 @@ function planSetupRun({
     };
   }
 
+  const args = [...family.args];
+  if (installDir && typeof family.installDirFlag === 'function') {
+    args.push(family.installDirFlag(installDir));
+  }
   return {
     isSetup: true,
     family,
     mode: 'silent',
-    args: family.args,
-    summary: `${family.name} setup supports unattended mode (${family.args.join(' ')}), so setup runs in the background inside this environment and the app is started when it finishes.`,
+    args,
+    installDir: installDir || null,
+    summary: `${family.name} setup supports unattended mode (${args.join(' ')}), so setup runs in the background inside this environment and the app is started when it finishes.`,
   };
 }
 
 // Which executables did setup produce? Used to answer "what should Run start now
 // that setup has finished?", without assuming where the installer put its files.
+//
+// `knownPaths` is a snapshot taken before setup started. Comparing against it is what
+// makes this reliable: an installer that copies files out of its archive keeps the
+// archive's timestamps, so a freshly installed app can have an OLD modification time.
+// "This file was not here before setup ran" does not depend on any clock.
 function findInstalledCandidates(root, {
   since = 0,
   exclude = [],
+  knownPaths = null,
   maxDepth = 6,
-  maxEntries = 4000,
+  maxEntries = 6000,
   fsModule = fs,
   pathModule = require('path'),
 } = {}) {
   const found = [];
   const skip = new Set(exclude.filter(Boolean).map((entry) => String(entry).toLowerCase()));
+  // An empty snapshot is still a snapshot: it says the environment was empty before
+  // setup ran. Only `null` means "no snapshot was taken".
+  const hasBaseline = Array.isArray(knownPaths);
+  const known = new Set((knownPaths || []).filter(Boolean).map((entry) => String(entry).toLowerCase()));
   let visited = 0;
   const walk = (directory, depth) => {
     if (depth > maxDepth || visited >= maxEntries) return;
@@ -202,7 +229,11 @@ function findInstalledCandidates(root, {
       if (!entry.name.toLowerCase().endsWith('.exe')) continue;
       try {
         const stats = fsModule.statSync(child);
-        if (!since || stats.mtimeMs >= since) {
+        const unseen = hasBaseline && !known.has(child.toLowerCase());
+        const fresh = !since || stats.mtimeMs >= since;
+        // With a snapshot, "not here before" is the stronger evidence and is accepted
+        // even when the file's own timestamp is old.
+        if (hasBaseline ? (unseen || fresh) : fresh) {
           found.push({ path: child, sizeBytes: Number(stats.size) || 0, modifiedMs: stats.mtimeMs });
         }
       } catch (error) {

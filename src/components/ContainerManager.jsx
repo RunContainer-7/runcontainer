@@ -31,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.9";
+const APP_VERSION_FALLBACK = "0.9.0";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -162,6 +162,9 @@ export default function ContainerManager() {
   // inside its environment (default), or shown as its own wizard inside RunContainer.
   // It is one setting for the whole installation, not a button on every app card.
   const [installerMode, setInstallerMode] = useState("auto");
+  // Appearance. Dark is the default and the app's identity; light is for daylight and
+  // projectors. One preference, applied to <body>, so every surface follows it.
+  const [theme, setTheme] = useState("dark");
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -176,9 +179,21 @@ export default function ContainerManager() {
         if (preferences?.beginnerSetupSeen !== true) setShowBeginnerSetup(true);
         if (preferences?.developerMode === true) setDeveloperMode(true);
         if (preferences?.installerMode === "manual") setInstallerMode("manual");
+        if (preferences?.theme === "light") setTheme("light");
       })
       .catch(() => {});
   }, []);
+
+  // The theme is a property of the document, not of each panel: one attribute repaints
+  // every surface, including panels that have not been opened yet.
+  useEffect(() => {
+    if (typeof document !== "undefined") document.body.dataset.theme = theme;
+  }, [theme]);
+
+  function chooseTheme(next) {
+    setTheme(next);
+    Promise.resolve(setPreference({ theme: next })).catch(() => {});
+  }
 
   // Switching developer mode on or off is one preference write. Nothing is hidden that
   // existed before it: the plain interface is the same either way, and leaving the
@@ -1356,6 +1371,21 @@ export default function ContainerManager() {
           <h3>Settings</h3>
           <p>Nothing to set up. RunContainer decides how to keep each app apart from the rest of your PC.</p>
           <div className="profile-list">
+            <div className={`profile-card ${theme === 'dark' ? 'active' : ''}`}>
+              <strong>Appearance</strong>
+              <span>
+                {theme === 'dark'
+                  ? 'Dark. The graphite and teal interface RunContainer ships with.'
+                  : 'Light. The same interface on a pale, high-contrast surface for daylight and projectors.'}
+              </span>
+              <span className="muted">
+                This changes colour only. No app, environment or file is affected, and the choice is remembered.
+              </span>
+              <div className="detail-actions">
+                <button className={`settings-button ${theme === 'dark' ? '' : 'ghost'}`} onClick={() => chooseTheme('dark')}>Dark</button>
+                <button className={`settings-button ${theme === 'light' ? '' : 'ghost'}`} onClick={() => chooseTheme('light')}>Light</button>
+              </div>
+            </div>
             <div className={`profile-card ${developerMode ? 'active' : ''}`}>
               <strong>Developer mode</strong>
               <span>

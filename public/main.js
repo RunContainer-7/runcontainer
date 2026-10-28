@@ -122,7 +122,7 @@ const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json'
 const preferencesPath = path.join(app.getPath('userData'), 'runcontainer-preferences.json');
 // Only these keys may be written: a preference write is not a general settings
 // back door, and an unknown key is dropped rather than stored.
-const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt', 'installerMode']);
+const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt', 'installerMode', 'theme']);
 
 function loadPreferences() {
   try {
@@ -4244,6 +4244,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
       metadata: appRecord.metadata,
       installedExePath: appRecord.installedExePath,
       setupMode: 'silent',
+      installDir: setupInstallDir(sandboxRoot),
     });
     if (automatic.isSetup && automatic.mode === 'silent' && appRecord.status !== 'Running') {
       appendLog(logPath, 'Settings complete supported installers unattended, so this setup runs in the background inside its environment.');
@@ -4292,6 +4293,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
     setupMode: requestedAppRecord?.backgroundSetup === true ? 'silent' : 'wizard',
+    installDir: setupInstallDir(sandboxRoot),
   });
   if (setupPlan.isSetup) {
     appendLog(logPath, `Setup program: ${setupPlan.summary}`);
@@ -4317,6 +4319,9 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? withSetup : entry)));
     appRecord = withSetup;
+    // What exists in the environment right now. Whatever setup adds after this point is
+    // the app it installed, whatever timestamp the installer copied with it.
+    if (withSetup.setupProgram) captureSetupBaseline(withSetup);
   }
 
   const existingPids = appRecord.status === 'Running'
@@ -4446,6 +4451,213 @@ async function waitForSetupExit(appId, { timeoutMs = 20 * 60 * 1000, pollMs = 30
   return { exited: false, timedOut: true, waitedMs: Date.now() - startedAt };
 }
 
+// --- Setup: where did the app actually land? -------------------------------
+//
+// An installer is a black box: it chooses its own destination, and a Windows installer
+// that asks Windows for "the user's program folder" gets the REAL one -- the known-folder
+// API does not read the environment variables RunContainer sets for the app. The install
+// was therefore correct and still looked like a failure: "setup finished, but no
+// executable was found in this environment", because the files were placed in
+// C:\Users\<you>\AppData. Three things fix that:
+//
+//   1. a documented destination switch is passed to supported silent installers;
+//   2. discovery compares against a snapshot, so an installer that copies files with
+//      their original (old) timestamps is still seen as having installed something;
+//   3. when a silent or wizard install genuinely escaped, the installer's own record of
+//      where it put the app is read, and the app is brought into its environment.
+
+function setupInstallDir(sandboxRoot) {
+  const dir = path.join(sandboxRoot, 'installed');
+  ensureDirectory(dir);
+  return dir;
+}
+
+function setupBaselineRoot() {
+  const root = path.join(app.getPath('userData'), 'setup-baselines');
+  ensureDirectory(root);
+  return root;
+}
+
+// A snapshot of the executables that exist in the app's environment BEFORE setup runs.
+// Only its paths matter; it is deliberately not read as a promise about the install.
+function captureSetupBaseline(appRecord) {
+  if (!appRecord?.id || !appRecord.sandboxRoot) return null;
+  try {
+    const files = findExecutablesIn(appRecord.sandboxRoot, { maxDepth: 8, maxEntries: 20000 });
+    fs.writeFileSync(
+      path.join(setupBaselineRoot(), `${appRecord.id}.json`),
+      JSON.stringify({ capturedAt: new Date().toISOString(), files }),
+      'utf8',
+    );
+    return files;
+  } catch (error) {
+    return null;
+  }
+}
+
+function loadSetupBaseline(appId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(setupBaselineRoot(), `${appId}.json`), 'utf8'));
+    return Array.isArray(raw.files) ? raw.files : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// One uninstall record per line group from `reg query`.
+function parseUninstallEntries(text) {
+  const entries = [];
+  let current = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^HKEY_/i.test(line)) {
+      current = { key: line };
+      entries.push(current);
+      continue;
+    }
+    if (!current) continue;
+    const match = /^(DisplayIcon|InstallLocation|DisplayName)\s+REG_\w+\s+(.*)$/i.exec(line);
+    if (match) current[match[1].toLowerCase()] = match[2].trim();
+  }
+  return entries;
+}
+
+function exeFromDisplayIcon(value) {
+  if (!value) return null;
+  const cleaned = String(value).replace(/^"|"$/g, '').replace(/,\s*-?\d+$/, '').trim();
+  return cleaned.toLowerCase().endsWith('.exe') ? cleaned : null;
+}
+
+async function recentInstallEntries() {
+  const keys = [
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ];
+  const entries = [];
+  for (const key of keys) {
+    try {
+      const { stdout } = await executeFile('reg.exe', ['query', key, '/s'], { maxBuffer: 8 * 1024 * 1024 });
+      entries.push(...parseUninstallEntries(stdout));
+    } catch (error) {
+      // A missing key or a key this user may not read is not a failure.
+    }
+  }
+  return entries;
+}
+
+// A copied tree is bounded: an app that installs a whole game engine should not turn
+// one press of Run into a gigabyte copy with no way to stop it.
+function copyTreeBounded(sourceDir, destDir, { maxFiles = 20000, maxBytes = 2 * 1024 * 1024 * 1024 } = {}) {
+  let files = 0;
+  let bytes = 0;
+  let truncated = false;
+  const copyDir = (from, to) => {
+    if (truncated) return;
+    fs.mkdirSync(to, { recursive: true });
+    let children = [];
+    try {
+      children = fs.readdirSync(from, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    for (const entry of children) {
+      if (truncated) return;
+      const source = path.join(from, entry.name);
+      const target = path.join(to, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          copyDir(source, target);
+        } else if (entry.isFile()) {
+          bytes += Number(fs.statSync(source).size) || 0;
+          files += 1;
+          if (files > maxFiles || bytes > maxBytes) {
+            truncated = true;
+            return;
+          }
+          fs.copyFileSync(source, target);
+        }
+      } catch (error) {
+        // A file held open by another process is skipped; the rest still copies.
+      }
+    }
+  };
+  copyDir(sourceDir, destDir);
+  return { files, bytes, truncated };
+}
+
+function isInsideSandbox(record, filePath) {
+  const roots = [record.sandboxRoot, path.join(record.sandboxRoot || '', 'profile')]
+    .filter(Boolean)
+    .map((root) => `${root.toLowerCase()}${path.sep}`);
+  const lowered = String(filePath).toLowerCase();
+  return roots.some((root) => lowered.startsWith(root));
+}
+
+// The name of a helper is not an app. Uninstallers, updaters and crashed-process
+// reporters live beside the real executable and must never become "the app".
+function looksLikeMainExecutable(filePath) {
+  const base = path.basename(String(filePath)).toLowerCase();
+  if (!base.endsWith('.exe')) return false;
+  if (/^(unins|uninstall|setup|install(er)?|update|updater|helper|crash|report|elevate|createdump|vcredist|vc_redist|dotnet|msiexec)/.test(base)) return false;
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch (error) {
+    return false;
+  }
+}
+
+// Read where Windows says the app was installed, and if that is outside this app's
+// environment, copy it in. Copying (not referencing) is what keeps "running in an
+// environment" true: the executable Run starts really lives inside the environment.
+// If the tree is too large to copy, the installed path is used and that is logged
+// rather than hidden.
+async function adoptEscapedInstall(record, { since = 0, logPath = null } = {}) {
+  const entries = await recentInstallEntries();
+  const found = [];
+  for (const entry of entries) {
+    const location = entry.installlocation ? entry.installlocation.replace(/^"|"$/g, '') : '';
+    const candidates = [];
+    const icon = exeFromDisplayIcon(entry.displayicon);
+    if (icon) candidates.push(icon);
+    if (location && entry.displayname) candidates.push(path.join(location, `${entry.displayname}.exe`));
+    for (const candidate of candidates) {
+      if (!candidate || isInsideSandbox(record, candidate) || !looksLikeMainExecutable(candidate)) continue;
+      try {
+        const stats = fs.statSync(candidate);
+        if (since && stats.mtimeMs < since) continue;
+        found.push({ path: candidate, sizeBytes: Number(stats.size) || 0, modifiedMs: stats.mtimeMs, location: location || path.dirname(candidate) });
+      } catch (error) {
+        // Gone between the registry read and now: not a candidate.
+      }
+      break;
+    }
+  }
+  if (found.length === 0) return null;
+  found.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  const chosen = found[0];
+  const sourceDir = chosen.location && fs.existsSync(chosen.location) ? chosen.location : path.dirname(chosen.path);
+  const folderName = sanitizeName(path.basename(sourceDir) || record.name || 'app');
+  const destDir = path.join(setupInstallDir(record.sandboxRoot), folderName);
+  if (logPath) {
+    appendLog(logPath, `Setup installed ${chosen.path}, outside this app's environment (${path.dirname(chosen.path)}). The installer used Windows' known folders, which ignore the environment's profile variables.`);
+  }
+  try {
+    const copy = copyTreeBounded(sourceDir, destDir);
+    const relative = path.relative(sourceDir, chosen.path);
+    const copiedExe = path.join(destDir, relative);
+    if (!copy.truncated && fs.existsSync(copiedExe)) {
+      if (logPath) appendLog(logPath, `Copied ${copy.files} file(s) into the environment; Run starts ${copiedExe}.`);
+      return { path: copiedExe, sizeBytes: Number(fs.statSync(copiedExe).size) || chosen.sizeBytes, outside: false };
+    }
+  } catch (error) {
+    if (logPath) appendLog(logPath, `The installed app could not be copied into the environment: ${error.message}`);
+  }
+  if (logPath) appendLog(logPath, `Run starts the installed copy at ${chosen.path}; its files stayed where the installer put them because the folder was too large to copy.`);
+  return { path: chosen.path, sizeBytes: chosen.sizeBytes, outside: true };
+}
+
 async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
   const record = getStoredApp(appId);
   if (!record?.sandboxRoot) return null;
@@ -4453,16 +4665,28 @@ async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
   const staged = fs.existsSync(installerDir)
     ? fs.readdirSync(installerDir).map((name) => path.join(installerDir, name))
     : [];
+  const baseline = loadSetupBaseline(appId);
   const candidates = findInstalledCandidates(record.sandboxRoot, {
     since,
     exclude: [record.source, ...staged],
+    knownPaths: baseline,
   });
-  if (candidates.length === 0) {
-    if (logPath) appendLog(logPath, 'Setup finished but no executable was produced inside this environment, so there is nothing new to run.');
-    emitToRenderer('app:setup-complete', { id: appId, name: record.name, installed: false, detail: 'Setup finished, but no executable was found in this environment.' });
+  const escaped = candidates.length === 0
+    ? await adoptEscapedInstall(record, { since, logPath })
+    : null;
+  const chosen = candidates[0] || escaped;
+  if (!chosen) {
+    if (logPath) {
+      appendLog(logPath, 'Setup finished but produced no executable inside this environment, and Windows has no new uninstall record pointing at an app it installed. There is nothing new to run.');
+    }
+    emitToRenderer('app:setup-complete', {
+      id: appId,
+      name: record.name,
+      installed: false,
+      detail: 'Setup finished, but no new app was found. If this installer needs a wizard, set Settings → Installers to “Show the installer wizard”, then press Run and complete it in the RunContainer window.',
+    });
     return null;
   }
-  const chosen = candidates[0];
   saveApps(loadApps().map((entry) => (entry.id === appId ? {
     ...entry,
     installedExePath: chosen.path,
@@ -4496,7 +4720,9 @@ async function watchSetupCompletion(appId, logPath) {
   if (!record?.setupProgram || record.installedExePath) return null;
   const installed = await recordInstalledExecutable(appId, {
     logPath,
-    since: Date.parse(record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
+    // The whole of setup, not just its last launch: an installer can install its app
+    // before it exits, and an app installed a second ago is still new.
+    since: Date.parse(record.setupStartedAt || record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
   });
   stopSetupProgressReporting(appId);
   // Setup finished with nobody waiting at a wizard: start what it installed, so pressing
@@ -4610,6 +4836,7 @@ async function setupAppInBackground(requestedAppRecord, { onLaunched } = {}) {
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
     setupMode: 'silent',
+    installDir: setupInstallDir(appRecord.sandboxRoot),
   });
   if (!plan.isSetup) {
     return { id: appRecord.id, status: 'Failed', error: `${plan.summary} Nothing was run.` };
@@ -4660,7 +4887,7 @@ async function setupAppInBackground(requestedAppRecord, { onLaunched } = {}) {
   if (latestSetup?.status === 'Running') await checkAppProcesses(appRecord.id, logPath);
   const installedExePath = await recordInstalledExecutable(appRecord.id, {
     logPath,
-    since: Date.parse(getStoredApp(appRecord.id)?.lastLaunchedAt || '') || 0,
+    since: Date.parse(getStoredApp(appRecord.id)?.setupStartedAt || '') || 0,
   });
   if (!installedExePath) {
     return {

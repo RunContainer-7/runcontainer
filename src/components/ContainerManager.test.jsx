@@ -225,6 +225,35 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("offers a dark default and a light appearance as one remembered preference", async () => {
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, "Settings");
+    // Dark is the identity and therefore the default, even with no saved choice.
+    expect(document.body.dataset.theme).toBe("dark");
+    const light = Array.from(container.querySelectorAll("button"))
+      .find((entry) => entry.textContent === "Light");
+    expect(light).not.toBeUndefined();
+    act(() => {
+      light.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    // One attribute on the document repaints every surface, including panels not open.
+    expect(document.body.dataset.theme).toBe("light");
+    expect(setPreference).toHaveBeenCalledWith({ theme: "light" });
+    const dark = Array.from(container.querySelectorAll("button"))
+      .find((entry) => entry.textContent === "Dark");
+    act(() => {
+      dark.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.dataset.theme).toBe("dark");
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+    delete document.body.dataset.theme;
+  });
+
   it("keeps ISO and provisioning clutter out of Settings", () => {
     const container = render();
     openTab(container, "Settings");
