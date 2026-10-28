@@ -36,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       # Same pin as the verification workflow: the lock file is written by npm 11,
       # and npm 10 refuses it outright (it reports missing peer entries).
@@ -45,6 +45,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
+
+      - name: Install Electron runtime
+        run: node node_modules/electron/install.js
 
       - name: Check tag matches package.json
         shell: pwsh

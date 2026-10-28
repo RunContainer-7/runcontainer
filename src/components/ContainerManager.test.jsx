@@ -5,7 +5,7 @@ import ReactDOM from "react-dom";
 import { act } from "react-dom/test-utils";
 import ContainerManager from "./ContainerManager";
 import AppErrorBoundary from "./AppErrorBoundary";
-import { onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig, listVms } from "../services/containerService";
+import { runContainer, onContainerStatus, getAppVersion, checkAppUpdates, downloadUpdate, listContainers, repairAppEnvironment, onAiDiagnosis, setAiMonitoring, getAiStatus, getPreferences, setPreference, runContainerWithJit, setAppConfig, listVms } from "../services/containerService";
 
 jest.mock("../services/containerService", () => ({
   installContainer: jest.fn(),
@@ -746,6 +746,24 @@ describe("ContainerManager", () => {
     act(() => {
       ReactDOM.unmountComponentAtNode(container);
     });
+  });
+
+  it("does not render the app session alongside another tab", async () => {
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true });
+    listContainers.mockResolvedValue([{ id: "app-1", name: "Demo app", source: "C:\\apps\\demo.exe", status: "Installed" }]);
+    runContainer.mockResolvedValue({ id: "app-1", status: "Running", pid: 4242 });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    const run = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Run");
+    await act(async () => { run.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.querySelector(".session-shell")).not.toBeNull();
+    openTab(container, "Virtualise");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.querySelector(".session-shell")).toBeNull();
+    expect(container.querySelector(".vm-form")).not.toBeNull();
+    openTab(container, "Apps");
+    expect(container.querySelector(".session-shell")).not.toBeNull();
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
   });
 
   it("runs a virtual machine from the Virtualise tab, with the media the user supplies", async () => {

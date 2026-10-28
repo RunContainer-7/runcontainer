@@ -4,6 +4,15 @@
 
 export const UPDATES = [
   {
+    version: '0.8.5',
+    date: '2026-10-28',
+    title: 'Virtualise layout and console reliability',
+    changes: [
+      'Fixed app sessions continuing to occupy space when switching to another tab, including Virtualise.',
+      'Fixed VM console initialization when the desktop name arrives in separate network packets and process already-buffered updates without waiting for another packet.',
+    ],
+  },
+  {
     version: '0.8.4',
     date: '2026-10-27',
     title: 'A virtual machine really draws inside RunContainer now — and the Virtualise panel is no longer drawn under the tab bar',

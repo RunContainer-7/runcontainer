@@ -175,6 +175,23 @@ describe('RFB handshake', () => {
     expect(errors.join(' ')).toContain('nope!!');
   });
 
+  it('handles a ServerInit desktop name split across multiple packets', () => {
+    const ready = [];
+    const session = new RfbSession({ onReady: (info) => ready.push(info) });
+    session.receive(ascii('RFB 003.008\n'));
+    session.takeOutbox();
+    session.receive(bytes(1, 1));
+    session.takeOutbox();
+    const init = serverInit({ width: 720, height: 400, name: 'QEMU console' });
+    session.receive(bytes(...u32(0), ...init.slice(0, 26)));
+    expect(ready).toHaveLength(0);
+    session.receive(init.slice(26, 29));
+    expect(ready).toHaveLength(0);
+    session.receive(init.slice(29));
+    expect(ready[0]).toMatchObject({ width: 720, height: 400, name: 'QEMU console' });
+    expect(session.phase).toBe('message');
+  });
+
   it('still reports a handshake that is not RFB at all', () => {
     const errors = [];
     const session = new RfbSession({ onError: (message) => errors.push(message) });
@@ -229,6 +246,18 @@ describe('RFB screen updates', () => {
     // Channel order is honoured: first byte is blue, last is red.
     expect(Array.from(rects[0].rgba.slice(0, 4))).toEqual([3, 2, 1, 255]);
     expect(Array.from(rects[0].rgba.slice(12, 16))).toEqual([12, 11, 10, 255]);
+  });
+
+  it('processes consecutive updates received in the same packet', () => {
+    const rects = [];
+    const session = new RfbSession({ onRect: (rect) => rects.push(rect) });
+    connect(session);
+    session.takeOutbox();
+    const first = framebufferUpdate([rawRect({ pixels: bytes(0, 0, 255, 0) })]);
+    const second = framebufferUpdate([rawRect({ pixels: bytes(0, 255, 0, 0) })]);
+    session.receive(bytes(...first, ...second));
+    expect(rects).toHaveLength(2);
+    expect(Array.from(rects[1].rgba)).toEqual([0, 255, 0, 255]);
   });
 
   it('handles several rectangles in one update, including a scroll', () => {

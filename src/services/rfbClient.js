@@ -371,7 +371,10 @@ export class RfbSession {
   readServerInit() {
     // ServerInit is width (2), height (2) and the pixel format (16) — twenty bytes —
     // followed by the length-prefixed desktop name.
-    if (this.buffered < 20) return false;
+    if (this.buffered < 24) return false;
+    const nameLength = readU32(this.peek(24), 20);
+    if (nameLength > 4096) throw new Error('The VM console sent an invalid desktop name.');
+    if (this.buffered < 24 + nameLength) return false;
     const header = this.take(20);
     this.width = readU16(header, 0);
     this.height = readU16(header, 2);
@@ -391,16 +394,7 @@ export class RfbSession {
     // asked for below, whatever the server said it prefers.
     this.serverPixelFormat = this.pixelFormat;
     this.pixelFormat = CLIENT_PIXEL_FORMAT;
-    if (this.nameLength === null) {
-      if (this.buffered < 4) {
-        this.restore(header);
-        return false;
-      }
-      this.nameLength = readU32(this.take(4), 0);
-    }
-    if (this.buffered < this.nameLength) {
-      return false;
-    }
+    this.nameLength = readU32(this.take(4), 0);
     this.name = this.nameLength > 0 ? String.fromCharCode(...this.take(this.nameLength)) : '';
     this.onName(this.name);
 
@@ -510,7 +504,7 @@ export class RfbSession {
     const full = this.needsFullRepaint;
     this.needsFullRepaint = false;
     this.outbox.push(this.framebufferUpdateRequest(!full));
-    return false;
+    return true;
   }
 
   framebufferUpdateRequest(incremental) {

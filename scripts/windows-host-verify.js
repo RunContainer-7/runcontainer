@@ -326,6 +326,7 @@ async function main() {
   fs.mkdirSync(userDataDir, { recursive: true });
   const port = await freePort();
   let appProcess = null;
+  let installed = null;
   let client = null;
   let passed = false;
   let failure = null;
@@ -384,7 +385,7 @@ async function main() {
     notes.push('app started and its renderer connected');
 
     // Install the probe exactly the way the interface does, then Run it.
-    const installed = await evaluateWithRetry(`require('electron').ipcRenderer.invoke('install-exe', ${JSON.stringify(probe)})`);
+    installed = await evaluateWithRetry(`require('electron').ipcRenderer.invoke('install-exe', ${JSON.stringify(probe)})`);
     if (!installed || !installed.id) throw new Error(`install-exe did not return an app record: ${JSON.stringify(installed).slice(0, 300)}`);
     notes.push(`installed as "${installed.name}" (${installed.id})`);
 
@@ -436,7 +437,7 @@ async function main() {
   } finally {
     if (client) {
       try {
-        await evaluate(client, "require('electron').ipcRenderer.invoke('kill-exe', require('electron').ipcRenderer.invoke('list-apps'))").catch(() => {});
+        if (installed?.id) await evaluate(client, `require('electron').ipcRenderer.invoke('kill-exe', ${JSON.stringify({ id: installed.id })})`).catch(() => {});
       } catch (error) {
         // Best effort: the app is being closed anyway.
       }
@@ -445,8 +446,6 @@ async function main() {
     if (appProcess && appProcess.pid) {
       try { execFileSync('taskkill.exe', ['/PID', String(appProcess.pid), '/T', '/F'], { windowsHide: true }); } catch (error) { /* already gone */ }
     }
-    // The probe is a separate process tree; stop anything it left behind.
-    try { execFileSync('taskkill.exe', ['/IM', `${probeTitle}.exe`, '/F'], { windowsHide: true }); } catch (error) { /* not running */ }
     if (!passed && appProcess) {
       // What the desktop actually looked like, so a failure can be read rather than
       // guessed at: every window the app process owns, and every window that mentions
