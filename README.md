@@ -11,7 +11,7 @@ It works like LiveContainer does on iOS: a launcher with a container per app, no
 
 Requirements: Windows 10 or 11 (Home works), 64-bit. No admin rights needed for RunContainer itself; some apps or installers request administrator approval.
 
-The 0.8.8 installer is named `RunContainer-Setup-0.8.8.exe`. Download it from the Releases page if available; otherwise use the latest published release. Installers are currently unsigned.
+The 0.8.8 installer is named `RunContainer-Setup-0.8.8.exe`. Download it from the Releases page if available; otherwise use the latest published release. Installers are currently on the process of being signed but is currently unsigned.
 
 When an app needs an installer, RunContainer attempts to show the wizard and its dialogs in a RunContainer window. **Settings → Installers** decides what happens for recognised installer types: complete them automatically (their progress is reported while they run) or show the wizard. RunContainer then looks for an executable inside the environment and attempts to start it. Some installers do not honour unattended switches or install elsewhere. Window hosting is best-effort: Windows may refuse to host certain windows, and system prompts can appear outside RunContainer.
 
