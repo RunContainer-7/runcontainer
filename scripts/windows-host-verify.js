@@ -35,9 +35,8 @@ const notes = [];
 // depends on the channel: a Nightly build calls itself "RunContainer Nightly". Deriving
 // that name from this build's own version keeps the check honest on both channels;
 // hard-coding the Stable title made every Nightly run fail although hosting worked.
-const productName = /-nightly\.\d+$/.test(require('../package.json').version)
-  ? 'RunContainer Nightly'
-  : 'RunContainer';
+const isNightly = /-nightly\.\d+$/.test(require('../package.json').version);
+const productName = isNightly ? 'RunContainer Nightly' : 'RunContainer';
 const hostTitlePrefix = `${productName} — `;
 
 function log(message) {

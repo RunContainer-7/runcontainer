@@ -11,7 +11,11 @@ const IS_NIGHTLY = /-nightly\.\d+$/.test(app.getVersion());
 const PRODUCT_NAME = IS_NIGHTLY ? 'RunContainer Nightly' : 'RunContainer';
 const PRODUCT_ICON = IS_NIGHTLY ? 'runcontainer-nightly-icon.ico' : 'runcontainer-icon.ico';
 // Set before any userData path is resolved; stable and nightly never share stores.
-if (IS_NIGHTLY) app.setPath('userData', path.join(app.getPath('appData'), 'RunContainer Nightly'));
+// An explicit --user-data-dir (Chromium's own switch, used by the Windows verification
+// check and by portable launches) wins, so a test run can never touch real user data.
+const explicitUserData = app.commandLine.getSwitchValue('user-data-dir');
+if (explicitUserData) app.setPath('userData', path.resolve(explicitUserData));
+else if (IS_NIGHTLY) app.setPath('userData', path.join(app.getPath('appData'), 'RunContainer Nightly'));
 // No Sandboxie backend: RunContainer's only isolation engines are Hyper-V VMs
 // (arbitrary software) and AppContainer (compatible apps, explicit opt-in).
 // isWithinDirectory comes from isolated-launch (pure path validation).
