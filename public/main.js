@@ -1,11 +1,17 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn } = require('child_process');
+const { execFile, spawn, spawnSync } = require('child_process');
 const net = require('net');
 const https = require('https');
 const crypto = require('crypto');
 const os = require('os');
+// Derive the channel from packaged metadata, not a renderer or user-controlled switch.
+const IS_NIGHTLY = /-nightly\.\d+$/.test(app.getVersion());
+const PRODUCT_NAME = IS_NIGHTLY ? 'RunContainer Nightly' : 'RunContainer';
+const PRODUCT_ICON = IS_NIGHTLY ? 'runcontainer-nightly-icon.ico' : 'runcontainer-icon.ico';
+// Set before any userData path is resolved; stable and nightly never share stores.
+if (IS_NIGHTLY) app.setPath('userData', path.join(app.getPath('appData'), 'RunContainer Nightly'));
 // No Sandboxie backend: RunContainer's only isolation engines are Hyper-V VMs
 // (arbitrary software) and AppContainer (compatible apps, explicit opt-in).
 // isWithinDirectory comes from isolated-launch (pure path validation).
@@ -51,7 +57,9 @@ const {
 } = require('./isolated-launch');
 const {
   buildWindowHostCSharp,
+  buildWindowHostProgram,
   buildWindowHostScript,
+  buildWindowHostProgramArgs,
   buildWindowHostScriptArgs,
   launchShowState,
   parseWindowHostOutput,
@@ -120,7 +128,7 @@ const appStorePath = path.join(app.getPath('userData'), 'runcontainer-apps.json'
 const preferencesPath = path.join(app.getPath('userData'), 'runcontainer-preferences.json');
 // Only these keys may be written: a preference write is not a general settings
 // back door, and an unknown key is dropped rather than stored.
-const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt', 'installerMode']);
+const PREFERENCE_KEYS = new Set(['beginnerSetupSeen', 'beginnerSetupSeenAt', 'beginnerSetupSeenVersion', 'developerMode', 'developerModeEnabledAt', 'installerMode', 'theme']);
 
 function loadPreferences() {
   try {
@@ -161,8 +169,8 @@ async function withOpLock(appId, op, fn) {
 const sandboxRootBase = path.join(app.getPath('userData'), 'sandboxes');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-app.setName('RunContainer');
-app.setAppUserModelId('RunContainer');
+app.setName(PRODUCT_NAME);
+app.setAppUserModelId(IS_NIGHTLY ? 'com.runcontainer.nightly' : 'RunContainer');
 
 // Reads only the PE header area of the copied executable: no launching, no disk
 // scan. The result is what the Tweaks panel reports, so the claim about JIT
@@ -1072,9 +1080,15 @@ function ensureWindowHostScript() {
   return scriptPath;
 }
 
-async function runWindowHostScript(args) {
+// Runs one host operation (embed, release, resize) with the fastest host available.
+async function runWindowHostScript(options) {
+  const exePath = await ensureWindowHostExe();
+  const command = exePath || 'powershell.exe';
+  const args = exePath
+    ? buildWindowHostProgramArgs(options)
+    : buildWindowHostScriptArgs(ensureWindowHostScript(), { ...options, cachePath: windowHostCachePath() });
   try {
-    return parseWindowHostOutput((await executeFile('powershell.exe', args, { timeout: 90000 })).stdout);
+    return parseWindowHostOutput((await executeFile(command, args, { timeout: 90000 })).stdout);
   } catch (error) {
     try {
       return parseWindowHostOutput(String(error.message));
@@ -1943,6 +1957,96 @@ function windowHostCachePath() {
   return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.dll`);
 }
 
+// The host as a small native executable, compiled once per revision.
+//
+// Every launch used to start Windows PowerShell and load the compiled assembly before the
+// watcher could adopt anything, which cost about half a second each time. The executable
+// starts in milliseconds, so the app's first window is adopted almost immediately instead
+// of appearing on the desktop while the host is still loading. PowerShell remains the
+// fallback whenever this file cannot be built or run.
+function windowHostProgramPath() {
+  const digest = crypto.createHash('sha1').update(buildWindowHostProgram()).digest('hex').slice(0, 12);
+  return path.join(windowHostStateDir(), `RunContainerWindowHost-${digest}.exe`);
+}
+
+let windowHostExePromise = null;
+
+// Proves the helper can start at all. An antivirus or policy that blocks a newly written
+// executable must fall back to PowerShell rather than lose window hosting.
+function windowHostExeWorks(exePath) {
+  try {
+    const check = spawnSync(exePath, ['-Mode', 'prewarm', '-Parent', '0'], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+    return check.status === 0 && String(check.stdout || '').includes('ready');
+  } catch (error) {
+    return false;
+  }
+}
+
+function buildWindowHostExe(exePath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const sourcePath = `${exePath}.cs`;
+      fs.writeFileSync(sourcePath, buildWindowHostProgram(), 'utf8');
+      const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+      // Remove a half-written file first: the compiler refuses to overwrite one.
+      try { fs.rmSync(exePath, { force: true }); } catch (error) { /* absent is fine */ }
+      // Add-Type compiles with the .NET Framework compiler that ships with Windows, so
+      // this needs nothing installed. A console build launched with windowsHide has no
+      // console window.
+      const command = "$ErrorActionPreference = 'Stop'; "
+        + `Add-Type -TypeDefinition ([System.IO.File]::ReadAllText(${quote(sourcePath)})) `
+        + `-Language CSharp -OutputAssembly ${quote(exePath)} -OutputType ConsoleApplication`;
+      const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr = `${stderr}${String(chunk)}`.slice(-2000);
+      });
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch (error) { /* already gone */ }
+        finish(null);
+      }, 120000);
+      child.once('error', () => { clearTimeout(timer); finish(null); });
+      child.once('exit', () => {
+        clearTimeout(timer);
+        const built = fs.existsSync(exePath);
+        if (!built && stderr.trim()) {
+          // The reason a launch fell back to PowerShell is worth keeping: an offline
+          // compiler or a policy that blocks new executables is diagnosable here.
+          try {
+            appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `The native window host could not be built: ${stderr.trim()}`);
+          } catch (error) { /* logging is best-effort */ }
+        }
+        finish(built ? exePath : null);
+      });
+    } catch (error) {
+      finish(null);
+    }
+  });
+}
+
+function ensureWindowHostExe() {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  if (windowHostExePromise) return windowHostExePromise;
+  windowHostExePromise = (async () => {
+    const exePath = windowHostProgramPath();
+    if (fs.existsSync(exePath)) {
+      if (windowHostExeWorks(exePath)) return exePath;
+      try { fs.rmSync(exePath, { force: true }); } catch (error) { /* rebuild below */ }
+    }
+    const built = await buildWindowHostExe(exePath);
+    if (built && windowHostExeWorks(built)) return built;
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), 'The native window host did not start; using the PowerShell host instead.');
+    return null;
+  })();
+  return windowHostExePromise;
+}
+
 // How long a Run waits for the host to prove it is watching before the app is started.
 //
 // The wait exists so the app's first window can be created hidden and hosted before it is
@@ -1955,7 +2059,9 @@ const WINDOW_HOST_COLD_WAIT_MS = 6000;
 
 function windowHostReadyBudget() {
   try {
-    return fs.existsSync(windowHostCachePath()) ? WINDOW_HOST_WARM_WAIT_MS : WINDOW_HOST_COLD_WAIT_MS;
+    return fs.existsSync(windowHostProgramPath()) || fs.existsSync(windowHostCachePath())
+      ? WINDOW_HOST_WARM_WAIT_MS
+      : WINDOW_HOST_COLD_WAIT_MS;
   } catch (error) {
     return WINDOW_HOST_COLD_WAIT_MS;
   }
@@ -1965,19 +2071,24 @@ function windowHostReadyBudget() {
 // install or update is as fast as every later one.
 function prewarmWindowHost() {
   if (process.platform !== 'win32') return;
-  try {
-    const scriptPath = ensureWindowHostScript();
-    const child = spawn('powershell.exe', buildWindowHostScriptArgs(scriptPath, {
-      mode: 'prewarm',
-      parentHandle: 0,
-      cachePath: windowHostCachePath(),
-      timeoutMs: 60000,
-    }), { windowsHide: true, stdio: 'ignore' });
-    child.once('error', () => {});
-    if (child.unref) child.unref();
-  } catch (error) {
-    // Prewarming is an optimisation; hosting still compiles the host when it runs.
-  }
+  // Building the native helper is the prewarm: once it exists every launch starts it
+  // directly. The PowerShell cache is only prepared when the helper cannot be built.
+  ensureWindowHostExe().then((exePath) => {
+    if (exePath) return;
+    try {
+      const scriptPath = ensureWindowHostScript();
+      const child = spawn('powershell.exe', buildWindowHostScriptArgs(scriptPath, {
+        mode: 'prewarm',
+        parentHandle: 0,
+        cachePath: windowHostCachePath(),
+        timeoutMs: 60000,
+      }), { windowsHide: true, stdio: 'ignore' });
+      child.once('error', () => {});
+      if (child.unref) child.unref();
+    } catch (error) {
+      // Prewarming is an optimisation; hosting still compiles the host when it runs.
+    }
+  }).catch(() => {});
 }
 
 // The watcher re-reads this file while it runs, so PIDs discovered later (an installer's
@@ -2007,12 +2118,14 @@ function recordWindowHosted(appId, embedded, extra = {}) {
 function handleWindowHostEvent(appRecord, state, event, logPath) {
   if (!event) return;
   if (event.event === 'watching') {
-    // Proof from the host itself, not an assumption: the host assembly loaded and
-    // the watch loop is running, so a window this app opens from now on will be
-    // adopted. This is what a hidden launch is allowed to depend on.
+    // Proof from the host itself, not an assumption: the host loaded and the watch
+    // loop is running, so a window this app opens from now on will be adopted. This
+    // is what a hidden launch is allowed to depend on.
     state.ready = true;
     state.readyAt = Date.now();
     if (!state.watchStartedAt) state.watchStartedAt = Date.now();
+    // Measured, so "Run feels slow" can be answered with numbers instead of a guess.
+    if (state.createdAt) appendLog(logPath, `Window host ready in ${Date.now() - state.createdAt} ms.`);
     // A host that was slow to start (its assembly is compiled on first use, and the cache
     // is cold on a new install or after an update) must not cost the whole launch: the
     // wait before launching can time out and still leave the host watching a moment later.
@@ -2097,20 +2210,25 @@ async function startAppWindowWatcher(appRecord, { parentHandle, target, insetTop
     ready: false,
     readyAt: null,
     watchStartedAt: null,
+    createdAt: Date.now(),
   };
   if (process.platform !== 'win32' || !parentHandle) return state;
   try {
-    const child = spawn('powershell.exe', buildWindowHostScriptArgs(ensureWindowHostScript(), {
+    const hostOptions = {
       mode: 'watch',
       parentHandle,
       insetTop,
       pidFile,
       sandboxRoot: appRecord.sandboxRoot || (appRecord.source ? path.dirname(appRecord.source) : ''),
       stopFile,
-      cachePath: windowHostCachePath(),
       // A hidden launch must not leave an app invisible if Windows refuses to host it.
       revealAfterMs: 9000,
-    }), { windowsHide: true });
+    };
+    // The native helper starts in milliseconds; the PowerShell script is the fallback.
+    const exePath = await ensureWindowHostExe();
+    const child = exePath
+      ? spawn(exePath, buildWindowHostProgramArgs(hostOptions), { windowsHide: true })
+      : spawn('powershell.exe', buildWindowHostScriptArgs(ensureWindowHostScript(), { ...hostOptions, cachePath: windowHostCachePath() }), { windowsHide: true });
     state.child = child;
     appWindowHosts.set(appRecord.id, state);
     let buffer = '';
@@ -2268,7 +2386,7 @@ function ensureGuestWindow(appRecord, note) {
     if (note) setGuestWindowStatus(existing, note);
     return existing;
   }
-  const title = `RunContainer — ${appRecord.name || 'App window'}`;
+  const title = `${PRODUCT_NAME} — ${appRecord.name || 'App window'}`;
   const win = new BrowserWindow({
     width: 1180,
     height: 840,
@@ -2277,8 +2395,8 @@ function ensureGuestWindow(appRecord, note) {
     title,
     // Shown on the first hosted window: an empty duplicate window would be a flash.
     show: false,
-    backgroundColor: '#020617',
-    icon: path.join(__dirname, 'runcontainer-icon.ico'),
+    backgroundColor: '#0e1116',
+    icon: path.join(__dirname, PRODUCT_ICON),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -2299,7 +2417,7 @@ function ensureGuestWindow(appRecord, note) {
   const pagePath = guestWindowPagePath();
   const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}`
     + `&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`
-    + `&autosetup=0`;
+    + `&autosetup=0&channel=${IS_NIGHTLY ? 'nightly' : 'stable'}`;
   if (pagePath) {
     win.loadFile(pagePath, { search }).catch((error) => {
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load: ${error.message}`);
@@ -2340,7 +2458,7 @@ function ensureGuestWindow(appRecord, note) {
 // is taken. It costs nothing when the host answers (the wait ends on the event) and
 // only takes this long when the host cannot start at all, where the alternative is
 // launching an app nobody can adopt.
-async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 30000, readyMs = 2500 } = {}) {
+async function hostInGuestWindow(appRecord, pid, logPath, { note, timeoutMs = 4000, readyMs = 2500 } = {}) {
   if (process.platform !== 'win32') return null;
   if (appRecord?.windowHosting === false) return null;
   // A host that has just proved it cannot start is not retried on every early call:
@@ -2411,11 +2529,11 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
   let released = 0;
   for (const pid of candidates) {
     try {
-      const result = await runWindowHostScript(buildWindowHostScriptArgs(ensureWindowHostScript(), {
+      const result = await runWindowHostScript({
         mode: 'release',
         processId: pid,
         parentHandle,
-      }));
+      });
       released += Number(result?.released) || 0;
     } catch (error) {
       if (logPath) appendLog(logPath, `Could not move the window out of the second RunContainer window: ${error.message}`);
@@ -2430,7 +2548,7 @@ async function releaseGuestWindowWindows(appRecord, pids, logPath) {
 // the main window, RunContainer's own controls are unreachable for as long as it
 // stays open. The watcher keeps running after this returns, so windows that appear
 // later (a splash, an installer's second process) are hosted too.
-async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 12000, readyMs } = {}) {
+async function hostAppWindowEverywhere(appRecord, pid, logPath, { note, timeoutMs = 2500, readyMs } = {}) {
   if (appRecord?.windowHosting === false) return null;
   if (process.platform !== 'win32') return null;
   return hostInGuestWindow({ ...appRecord, pid }, pid, logPath, { note, timeoutMs, readyMs });
@@ -3694,12 +3812,12 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 800,
-    title: 'RunContainer',
+    title: PRODUCT_NAME,
     show: false,
     titleBarStyle: 'hiddenInset',
     // Windows only renders .ico/.png window icons; an SVG path silently falls
     // back to the stock Electron icon in the taskbar and Alt-Tab switcher.
-    icon: path.join(__dirname, 'runcontainer-icon.ico'),
+    icon: path.join(__dirname, PRODUCT_ICON),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -3707,7 +3825,7 @@ function createWindow() {
     },
   });
 
-  mainWindow.setTitle('RunContainer');
+  mainWindow.setTitle(PRODUCT_NAME);
   // Links open in the default browser, never in a new RunContainer window. Only https is passed on.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) shell.openExternal(url);
@@ -4132,6 +4250,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
       metadata: appRecord.metadata,
       installedExePath: appRecord.installedExePath,
       setupMode: 'silent',
+      installDir: setupInstallDir(sandboxRoot),
     });
     if (automatic.isSetup && automatic.mode === 'silent' && appRecord.status !== 'Running') {
       appendLog(logPath, 'Settings complete supported installers unattended, so this setup runs in the background inside its environment.');
@@ -4142,9 +4261,12 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
         appendLog(logPath, `Unattended setup failed: ${error.message}`);
         announce({ status: 'Failed', error: error.message });
       });
+      // Run must not sit on "Starting" for the whole install. The window reports the
+      // setup's progress while it runs, so a short wait answers the button and the
+      // install continues in the environment.
       const started = await Promise.race([
         launchedPromise,
-        delay(25000).then(() => ({ status: 'SettingUp', detail: 'Setup is still starting inside its environment.' })),
+        delay(8000).then(() => ({ status: 'SettingUp', detail: 'Setup is still starting inside its environment.' })),
       ]);
       if (started?.status === 'Running') {
         return {
@@ -4177,6 +4299,7 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
     setupMode: requestedAppRecord?.backgroundSetup === true ? 'silent' : 'wizard',
+    installDir: setupInstallDir(sandboxRoot),
   });
   if (setupPlan.isSetup) {
     appendLog(logPath, `Setup program: ${setupPlan.summary}`);
@@ -4202,6 +4325,9 @@ async function runApp(requestedAppRecord, { lockHeld = false } = {}) {
     };
     saveApps(loadApps().map((entry) => (entry.id === appRecord.id ? withSetup : entry)));
     appRecord = withSetup;
+    // What exists in the environment right now. Whatever setup adds after this point is
+    // the app it installed, whatever timestamp the installer copied with it.
+    if (withSetup.setupProgram) captureSetupBaseline(withSetup);
   }
 
   const existingPids = appRecord.status === 'Running'
@@ -4331,6 +4457,213 @@ async function waitForSetupExit(appId, { timeoutMs = 20 * 60 * 1000, pollMs = 30
   return { exited: false, timedOut: true, waitedMs: Date.now() - startedAt };
 }
 
+// --- Setup: where did the app actually land? -------------------------------
+//
+// An installer is a black box: it chooses its own destination, and a Windows installer
+// that asks Windows for "the user's program folder" gets the REAL one -- the known-folder
+// API does not read the environment variables RunContainer sets for the app. The install
+// was therefore correct and still looked like a failure: "setup finished, but no
+// executable was found in this environment", because the files were placed in
+// C:\Users\<you>\AppData. Three things fix that:
+//
+//   1. a documented destination switch is passed to supported silent installers;
+//   2. discovery compares against a snapshot, so an installer that copies files with
+//      their original (old) timestamps is still seen as having installed something;
+//   3. when a silent or wizard install genuinely escaped, the installer's own record of
+//      where it put the app is read, and the app is brought into its environment.
+
+function setupInstallDir(sandboxRoot) {
+  const dir = path.join(sandboxRoot, 'installed');
+  ensureDirectory(dir);
+  return dir;
+}
+
+function setupBaselineRoot() {
+  const root = path.join(app.getPath('userData'), 'setup-baselines');
+  ensureDirectory(root);
+  return root;
+}
+
+// A snapshot of the executables that exist in the app's environment BEFORE setup runs.
+// Only its paths matter; it is deliberately not read as a promise about the install.
+function captureSetupBaseline(appRecord) {
+  if (!appRecord?.id || !appRecord.sandboxRoot) return null;
+  try {
+    const files = findExecutablesIn(appRecord.sandboxRoot, { maxDepth: 8, maxEntries: 20000 });
+    fs.writeFileSync(
+      path.join(setupBaselineRoot(), `${appRecord.id}.json`),
+      JSON.stringify({ capturedAt: new Date().toISOString(), files }),
+      'utf8',
+    );
+    return files;
+  } catch (error) {
+    return null;
+  }
+}
+
+function loadSetupBaseline(appId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(setupBaselineRoot(), `${appId}.json`), 'utf8'));
+    return Array.isArray(raw.files) ? raw.files : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// One uninstall record per line group from `reg query`.
+function parseUninstallEntries(text) {
+  const entries = [];
+  let current = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^HKEY_/i.test(line)) {
+      current = { key: line };
+      entries.push(current);
+      continue;
+    }
+    if (!current) continue;
+    const match = /^(DisplayIcon|InstallLocation|DisplayName)\s+REG_\w+\s+(.*)$/i.exec(line);
+    if (match) current[match[1].toLowerCase()] = match[2].trim();
+  }
+  return entries;
+}
+
+function exeFromDisplayIcon(value) {
+  if (!value) return null;
+  const cleaned = String(value).replace(/^"|"$/g, '').replace(/,\s*-?\d+$/, '').trim();
+  return cleaned.toLowerCase().endsWith('.exe') ? cleaned : null;
+}
+
+async function recentInstallEntries() {
+  const keys = [
+    'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ];
+  const entries = [];
+  for (const key of keys) {
+    try {
+      const { stdout } = await executeFile('reg.exe', ['query', key, '/s'], { maxBuffer: 8 * 1024 * 1024 });
+      entries.push(...parseUninstallEntries(stdout));
+    } catch (error) {
+      // A missing key or a key this user may not read is not a failure.
+    }
+  }
+  return entries;
+}
+
+// A copied tree is bounded: an app that installs a whole game engine should not turn
+// one press of Run into a gigabyte copy with no way to stop it.
+function copyTreeBounded(sourceDir, destDir, { maxFiles = 20000, maxBytes = 2 * 1024 * 1024 * 1024 } = {}) {
+  let files = 0;
+  let bytes = 0;
+  let truncated = false;
+  const copyDir = (from, to) => {
+    if (truncated) return;
+    fs.mkdirSync(to, { recursive: true });
+    let children = [];
+    try {
+      children = fs.readdirSync(from, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    for (const entry of children) {
+      if (truncated) return;
+      const source = path.join(from, entry.name);
+      const target = path.join(to, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          copyDir(source, target);
+        } else if (entry.isFile()) {
+          bytes += Number(fs.statSync(source).size) || 0;
+          files += 1;
+          if (files > maxFiles || bytes > maxBytes) {
+            truncated = true;
+            return;
+          }
+          fs.copyFileSync(source, target);
+        }
+      } catch (error) {
+        // A file held open by another process is skipped; the rest still copies.
+      }
+    }
+  };
+  copyDir(sourceDir, destDir);
+  return { files, bytes, truncated };
+}
+
+function isInsideSandbox(record, filePath) {
+  const roots = [record.sandboxRoot, path.join(record.sandboxRoot || '', 'profile')]
+    .filter(Boolean)
+    .map((root) => `${root.toLowerCase()}${path.sep}`);
+  const lowered = String(filePath).toLowerCase();
+  return roots.some((root) => lowered.startsWith(root));
+}
+
+// The name of a helper is not an app. Uninstallers, updaters and crashed-process
+// reporters live beside the real executable and must never become "the app".
+function looksLikeMainExecutable(filePath) {
+  const base = path.basename(String(filePath)).toLowerCase();
+  if (!base.endsWith('.exe')) return false;
+  if (/^(unins|uninstall|setup|install(er)?|update|updater|helper|crash|report|elevate|createdump|vcredist|vc_redist|dotnet|msiexec)/.test(base)) return false;
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch (error) {
+    return false;
+  }
+}
+
+// Read where Windows says the app was installed, and if that is outside this app's
+// environment, copy it in. Copying (not referencing) is what keeps "running in an
+// environment" true: the executable Run starts really lives inside the environment.
+// If the tree is too large to copy, the installed path is used and that is logged
+// rather than hidden.
+async function adoptEscapedInstall(record, { since = 0, logPath = null } = {}) {
+  const entries = await recentInstallEntries();
+  const found = [];
+  for (const entry of entries) {
+    const location = entry.installlocation ? entry.installlocation.replace(/^"|"$/g, '') : '';
+    const candidates = [];
+    const icon = exeFromDisplayIcon(entry.displayicon);
+    if (icon) candidates.push(icon);
+    if (location && entry.displayname) candidates.push(path.join(location, `${entry.displayname}.exe`));
+    for (const candidate of candidates) {
+      if (!candidate || isInsideSandbox(record, candidate) || !looksLikeMainExecutable(candidate)) continue;
+      try {
+        const stats = fs.statSync(candidate);
+        if (since && stats.mtimeMs < since) continue;
+        found.push({ path: candidate, sizeBytes: Number(stats.size) || 0, modifiedMs: stats.mtimeMs, location: location || path.dirname(candidate) });
+      } catch (error) {
+        // Gone between the registry read and now: not a candidate.
+      }
+      break;
+    }
+  }
+  if (found.length === 0) return null;
+  found.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  const chosen = found[0];
+  const sourceDir = chosen.location && fs.existsSync(chosen.location) ? chosen.location : path.dirname(chosen.path);
+  const folderName = sanitizeName(path.basename(sourceDir) || record.name || 'app');
+  const destDir = path.join(setupInstallDir(record.sandboxRoot), folderName);
+  if (logPath) {
+    appendLog(logPath, `Setup installed ${chosen.path}, outside this app's environment (${path.dirname(chosen.path)}). The installer used Windows' known folders, which ignore the environment's profile variables.`);
+  }
+  try {
+    const copy = copyTreeBounded(sourceDir, destDir);
+    const relative = path.relative(sourceDir, chosen.path);
+    const copiedExe = path.join(destDir, relative);
+    if (!copy.truncated && fs.existsSync(copiedExe)) {
+      if (logPath) appendLog(logPath, `Copied ${copy.files} file(s) into the environment; Run starts ${copiedExe}.`);
+      return { path: copiedExe, sizeBytes: Number(fs.statSync(copiedExe).size) || chosen.sizeBytes, outside: false };
+    }
+  } catch (error) {
+    if (logPath) appendLog(logPath, `The installed app could not be copied into the environment: ${error.message}`);
+  }
+  if (logPath) appendLog(logPath, `Run starts the installed copy at ${chosen.path}; its files stayed where the installer put them because the folder was too large to copy.`);
+  return { path: chosen.path, sizeBytes: chosen.sizeBytes, outside: true };
+}
+
 async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
   const record = getStoredApp(appId);
   if (!record?.sandboxRoot) return null;
@@ -4338,16 +4671,28 @@ async function recordInstalledExecutable(appId, { logPath, since = 0 } = {}) {
   const staged = fs.existsSync(installerDir)
     ? fs.readdirSync(installerDir).map((name) => path.join(installerDir, name))
     : [];
+  const baseline = loadSetupBaseline(appId);
   const candidates = findInstalledCandidates(record.sandboxRoot, {
     since,
     exclude: [record.source, ...staged],
+    knownPaths: baseline,
   });
-  if (candidates.length === 0) {
-    if (logPath) appendLog(logPath, 'Setup finished but no executable was produced inside this environment, so there is nothing new to run.');
-    emitToRenderer('app:setup-complete', { id: appId, name: record.name, installed: false, detail: 'Setup finished, but no executable was found in this environment.' });
+  const escaped = candidates.length === 0
+    ? await adoptEscapedInstall(record, { since, logPath })
+    : null;
+  const chosen = candidates[0] || escaped;
+  if (!chosen) {
+    if (logPath) {
+      appendLog(logPath, 'Setup finished but produced no executable inside this environment, and Windows has no new uninstall record pointing at an app it installed. There is nothing new to run.');
+    }
+    emitToRenderer('app:setup-complete', {
+      id: appId,
+      name: record.name,
+      installed: false,
+      detail: 'Setup finished, but no new app was found. If this installer needs a wizard, set Settings → Installers to “Show the installer wizard”, then press Run and complete it in the RunContainer window.',
+    });
     return null;
   }
-  const chosen = candidates[0];
   saveApps(loadApps().map((entry) => (entry.id === appId ? {
     ...entry,
     installedExePath: chosen.path,
@@ -4381,7 +4726,9 @@ async function watchSetupCompletion(appId, logPath) {
   if (!record?.setupProgram || record.installedExePath) return null;
   const installed = await recordInstalledExecutable(appId, {
     logPath,
-    since: Date.parse(record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
+    // The whole of setup, not just its last launch: an installer can install its app
+    // before it exits, and an app installed a second ago is still new.
+    since: Date.parse(record.setupStartedAt || record.lastInstallerAt || record.lastLaunchedAt || '') || 0,
   });
   stopSetupProgressReporting(appId);
   // Setup finished with nobody waiting at a wizard: start what it installed, so pressing
@@ -4495,6 +4842,7 @@ async function setupAppInBackground(requestedAppRecord, { onLaunched } = {}) {
     metadata: appRecord.metadata,
     installedExePath: appRecord.installedExePath,
     setupMode: 'silent',
+    installDir: setupInstallDir(appRecord.sandboxRoot),
   });
   if (!plan.isSetup) {
     return { id: appRecord.id, status: 'Failed', error: `${plan.summary} Nothing was run.` };
@@ -4545,7 +4893,7 @@ async function setupAppInBackground(requestedAppRecord, { onLaunched } = {}) {
   if (latestSetup?.status === 'Running') await checkAppProcesses(appRecord.id, logPath);
   const installedExePath = await recordInstalledExecutable(appRecord.id, {
     logPath,
-    since: Date.parse(getStoredApp(appRecord.id)?.lastLaunchedAt || '') || 0,
+    since: Date.parse(getStoredApp(appRecord.id)?.setupStartedAt || '') || 0,
   });
   if (!installedExePath) {
     return {
@@ -5168,7 +5516,7 @@ ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
 // The beginner introduction is shown once for this installation and never again —
 // not once per version. The answer therefore lives in an app-wide file, not on an
 // app record, and it outlives every app being deleted.
-ipcMain.handle('get-preferences', async () => loadPreferences());
+ipcMain.handle('get-preferences', async () => ({ ...loadPreferences(), channel: IS_NIGHTLY ? 'nightly' : 'stable' }));
 ipcMain.handle('set-preference', async (_event, payload = {}) => {
   const updated = savePreferences(payload);
   emitToRenderer('app:preferences', updated);
@@ -5219,7 +5567,7 @@ ipcMain.handle('check-app-updates', async (_event, options = {}) => {
     return applySnooze(lastUpdateCheck.result);
   }
   const updateCheck = require('./update-check');
-  const result = await updateCheck.checkForUpdates({ currentVersion: app.getVersion() });
+  const result = await updateCheck.checkForUpdates({ currentVersion: app.getVersion(), channel: IS_NIGHTLY ? 'nightly' : 'stable' });
   lastUpdateCheck = { at: now, result };
   saveUpdateState({ ...loadUpdateState(), lastCheck: lastUpdateCheck });
   appendLog(
@@ -5341,7 +5689,7 @@ ipcMain.handle('download-update', async () => {
   if (result?.status !== 'update-available' || !url || !UPDATE_LINK_PREFIXES.some((prefix) => url.startsWith(prefix))) {
     return { downloaded: false, error: 'No verified installer is available. Check for updates first.' };
   }
-  const destPath = path.join(app.getPath('temp'), `RunContainer-Setup-${result.latestVersion}.exe`);
+  const destPath = path.join(app.getPath('temp'), result.installerName);
   downloadedUpdatePath = null;
   try {
     // A size/digest check over HTTPS catches corruption, not a hostile mirror;

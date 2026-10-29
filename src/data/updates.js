@@ -4,6 +4,42 @@
 
 export const UPDATES = [
   {
+    version: '0.9.1-nightly.1',
+    date: '2026-10-29',
+    title: 'Introducing RunContainer Nightly',
+    changes: [
+      'The experimental blue Nightly edition installs alongside Stable with its own apps and settings.',
+      'Developer mode, Virtualise and RC-Brain technical details are available in Nightly.',
+      'Nightly receives its own prerelease updates; this first build is based on Stable 0.9.0.',
+    ],
+  },
+  {
+    version: '0.9.0',
+    date: '2026-10-28',
+    title: 'A finished installer now always finds its app, and a light theme',
+    changes: [
+      'Fixed “Setup finished, but no executable was found”. An unattended install is now given the installer’s own documented destination switch, so an NSIS or Inno Setup program installs inside the app’s environment instead of into your real Windows profile. Windows’ known-folder API ignores the environment’s folder variables, which is why a successful install could look like an empty one.',
+      'Finding the installed app no longer depends on file timestamps. RunContainer records which executables exist before setup runs and treats anything new afterwards as the app, so an installer that copies files with their original (older) dates is still recognised.',
+      'If an installer still writes outside its environment — for example a wizard you completed by hand — RunContainer reads Windows’ own uninstall record for the app, brings the installed folder into the app’s environment, and starts that copy. If the folder is too large to copy, the app still starts and the log says where it lives.',
+      'A successful setup now always ends with a named result: the app it installed, started in a RunContainer window, or a clear next step if the installer genuinely installed nothing.',
+      'Settings has an Appearance choice: Dark (the default graphite and teal interface) or Light, a high-contrast pale surface for daylight and projectors. It changes colour only, and it is remembered.',
+      'A few interface refinements in the same palette: softer card depth, a brighter active tab, and a cleaner app icon plate.',
+    ],
+  },
+  {
+    version: '0.8.9',
+    date: '2026-10-28',
+    title: 'Apps open inside RunContainer faster, and a sharper look',
+    changes: [
+      'The window host is now a small native helper built once on this PC, instead of a fresh PowerShell process on every launch. It reports that it is watching in about 80 ms rather than about half a second, so the app’s first window is adopted almost immediately and Run no longer waits at the gate before the app starts.',
+      'Run returns as soon as the app process has started, rather than waiting up to 12 seconds for its window to be found. The RunContainer window stays open and fills with the app as soon as its window appears, so a slow app no longer makes the Run button look stuck.',
+      'A supported installer completed in the background no longer holds Run for up to 25 seconds. The window reports the setup’s progress while it works, and the app opens there when setup finishes.',
+      'The app’s log now records how long the window host took to become ready, so a slow launch can be attributed to the host or to the app itself.',
+      'The interface now uses the documentation’s graphite and teal palette, a faint geometric grid behind the panel, squarer cards and controls, and softer teal glow on the active tab.',
+      'README rewritten in plain language: what RunContainer is, how to start, what each tab does, and where to get help — with a single build snippet.',
+    ],
+  },
+  {
     version: '0.8.8',
     date: '2026-10-28',
     title: 'Real app icons, honest status, faster Run',

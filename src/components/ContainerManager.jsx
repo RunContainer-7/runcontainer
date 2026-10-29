@@ -31,7 +31,7 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.8.8";
+const APP_VERSION_FALLBACK = "0.9.1-nightly.1";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -158,10 +158,15 @@ export default function ContainerManager() {
   // technical one. It reveals the audit detail behind RC-Brain, the launch timings, and
   // the Virtualise tab. It is one preference, recorded once for this installation.
   const [developerMode, setDeveloperMode] = useState(false);
+  const [channel, setChannel] = useState('stable');
+  const isNightly = channel === 'nightly';
   // How a supported installer is handled when Run is pressed: completed unattended
   // inside its environment (default), or shown as its own wizard inside RunContainer.
   // It is one setting for the whole installation, not a button on every app card.
   const [installerMode, setInstallerMode] = useState("auto");
+  // Appearance. Dark is the default and the app's identity; light is for daylight and
+  // projectors. One preference, applied to <body>, so every surface follows it.
+  const [theme, setTheme] = useState("dark");
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -174,11 +179,32 @@ export default function ContainerManager() {
     Promise.resolve(getPreferences())
       .then((preferences) => {
         if (preferences?.beginnerSetupSeen !== true) setShowBeginnerSetup(true);
-        if (preferences?.developerMode === true) setDeveloperMode(true);
+        if (preferences?.channel === 'nightly') {
+          setChannel('nightly');
+          if (preferences?.developerMode === true) setDeveloperMode(true);
+        }
         if (preferences?.installerMode === "manual") setInstallerMode("manual");
+        if (preferences?.theme === "light") setTheme("light");
       })
       .catch(() => {});
   }, []);
+
+  // The theme is a property of the document, not of each panel: one attribute repaints
+  // every surface, including panels that have not been opened yet.
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.body.dataset.theme = theme;
+      document.body.dataset.channel = channel;
+      document.title = isNightly ? 'RunContainer Nightly' : 'RunContainer';
+      const icon = isNightly ? './runcontainer-nightly-icon.png' : './runcontainer-icon.png';
+      document.querySelectorAll('link[rel="icon"]').forEach((link) => { link.href = icon; link.type = 'image/png'; });
+    }
+  }, [theme, channel, isNightly]);
+
+  function chooseTheme(next) {
+    setTheme(next);
+    Promise.resolve(setPreference({ theme: next })).catch(() => {});
+  }
 
   // Switching developer mode on or off is one preference write. Nothing is hidden that
   // existed before it: the plain interface is the same either way, and leaving the
@@ -925,8 +951,8 @@ export default function ContainerManager() {
           <span className="brand-mark" aria-hidden="true">◧</span>
           <div>
             <div className="eyebrow">Per-app profile launcher</div>
-            <div className="header-title">RunContainer</div>
-            <div className="brand-version">v{appVersion} · an app inside an app</div>
+            <div className="header-title">RunContainer{isNightly ? ' Nightly' : ''}</div>
+            <div className="brand-version">v{appVersion} · {isNightly ? 'experimental early access' : 'an app inside an app'}</div>
           </div>
         </div>
         {activeTab === "Apps" && (
@@ -1356,7 +1382,22 @@ export default function ContainerManager() {
           <h3>Settings</h3>
           <p>Nothing to set up. RunContainer decides how to keep each app apart from the rest of your PC.</p>
           <div className="profile-list">
-            <div className={`profile-card ${developerMode ? 'active' : ''}`}>
+            <div className={`profile-card ${theme === 'dark' ? 'active' : ''}`}>
+              <strong>Appearance</strong>
+              <span>
+                {theme === 'dark'
+                  ? `Dark. The graphite and ${isNightly ? 'blue' : 'teal'} interface.`
+                  : 'Light. The same interface on a pale, high-contrast surface for daylight and projectors.'}
+              </span>
+              <span className="muted">
+                This changes colour only. No app, environment or file is affected, and the choice is remembered.
+              </span>
+              <div className="detail-actions">
+                <button className={`settings-button ${theme === 'dark' ? '' : 'ghost'}`} onClick={() => chooseTheme('dark')}>Dark</button>
+                <button className={`settings-button ${theme === 'light' ? '' : 'ghost'}`} onClick={() => chooseTheme('light')}>Light</button>
+              </div>
+            </div>
+            {isNightly && <div className={`profile-card ${developerMode ? 'active' : ''}`}>
               <strong>Developer mode</strong>
               <span>
                 {developerMode
@@ -1364,15 +1405,14 @@ export default function ContainerManager() {
                   : 'Off. This is the normal interface. Turn it on for the technical detail behind RC-Brain, the launch timings, and a Virtualise tab that runs a whole operating system inside its own window, separate from your PC. Nothing else about the app changes.'}
               </span>
               <span className="muted">
-                A development switch, not a different product: the app behaves identically either way, and this stays on
-                until you turn it off.
+                Experimental features can be buggy. This choice stays on until you turn it off.
               </span>
               <div className="detail-actions">
                 <button className={`settings-button ${developerMode ? '' : 'ghost'}`} onClick={toggleDeveloperMode}>
                   {developerMode ? 'Turn off developer mode' : 'Enable developer mode'}
                 </button>
               </div>
-            </div>
+            </div>}
             <div className={`profile-card ${installerMode === 'auto' ? 'active' : ''}`}>
               <strong>Installers</strong>
               <span>
@@ -1825,13 +1865,13 @@ export default function ContainerManager() {
               <strong>Update check diagnostics</strong>
               <span>Installed: v{appVersion} • Status: {updateInfo.status}{updateInfo.latestVersion ? ` • Latest seen: v${updateInfo.latestVersion}` : ''}</span>
               {updateInfo.reason && <span className="muted">{updateInfo.reason}</span>}
-              <span className="muted">New installers are attached to each stable GitHub Release; this check only reads the release feed and never installs anything by itself.</span>
+              <span className="muted">New installers are attached to each {isNightly ? 'Nightly prerelease' : 'stable release'} on GitHub; this check never installs anything by itself.</span>
             </div>
           )}
           {updateInfo?.status === 'update-available' && (
             <div className="profile-card active update-available">
               <strong>v{updateInfo.latestVersion} available — you have v{appVersion}</strong>
-              <span>{updateInfo.releaseName || 'A new stable release is out.'} Get the installer from the GitHub release.</span>
+              <span>{updateInfo.releaseName || `A new ${isNightly ? 'nightly' : 'stable'} release is out.`} Get the installer from the GitHub release.</span>
               <div className="detail-actions">
                 {updateInfo.installerUrl && <button className="settings-button" onClick={() => handleOpenUpdateLink('installer')}>Download installer</button>}
                 {updateInfo.releaseUrl && <button className="settings-button ghost" onClick={() => handleOpenUpdateLink('release')}>View release</button>}
@@ -1842,7 +1882,7 @@ export default function ContainerManager() {
             <p className="muted">You are on the latest release.</p>
           )}
           <div className="updates-list">
-            {UPDATES.map((entry) => {
+            {UPDATES.filter((entry) => isNightly || !entry.version.includes('-nightly.')).map((entry) => {
               const isCurrent = entry.version === appVersion;
               return (
                 <div key={`${entry.version}-${entry.date}`} className={`update-card ${isCurrent ? 'current' : ''}`}>

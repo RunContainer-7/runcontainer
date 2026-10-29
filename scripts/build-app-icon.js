@@ -15,8 +15,10 @@ const zlib = require('zlib');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
-const ICO_PATH = path.join(PUBLIC, 'runcontainer-icon.ico');
-const PNG_PATH = path.join(PUBLIC, 'runcontainer-icon.png');
+const nightly = process.argv.includes('--nightly');
+const iconName = nightly ? 'runcontainer-nightly-icon' : 'runcontainer-icon';
+const ICO_PATH = path.join(PUBLIC, `${iconName}.ico`);
+const PNG_PATH = path.join(PUBLIC, `${iconName}.png`);
 
 // Every size Windows asks for: shell lists, taskbar, alt-tab, jumbo icons.
 // 256 is required by electron-builder/Inno Setup; 16 and 32 are the ones people
@@ -25,7 +27,7 @@ const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
 const PNG_SIZE = 256;
 
 const BACKGROUND = [0x0e, 0x11, 0x16];
-const ACCENT = [0x3f, 0xcf, 0xaa];
+const ACCENT = nightly ? [0x4a, 0xa3, 0xff] : [0x3f, 0xcf, 0xaa];
 
 // Design space is the SVG's viewBox: 32 x 32 units.
 const UNIT = 32;
@@ -234,8 +236,8 @@ function main() {
   const check = process.argv.includes('--check');
   const { ico, png } = build();
   const targets = [
-    { path: ICO_PATH, data: ico, label: 'public/runcontainer-icon.ico' },
-    { path: PNG_PATH, data: png, label: 'public/runcontainer-icon.png' },
+    { path: ICO_PATH, data: ico, label: `public/${iconName}.ico` },
+    { path: PNG_PATH, data: png, label: `public/${iconName}.png` },
   ];
 
   if (check) {

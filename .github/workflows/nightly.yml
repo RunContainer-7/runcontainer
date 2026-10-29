@@ -1,0 +1,61 @@
+name: Nightly prerelease
+
+on:
+  push:
+    tags:
+      - 'v*-nightly.*'
+
+permissions:
+  contents: write
+
+jobs:
+  nightly:
+    runs-on: windows-latest
+    env:
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Match lockfile npm version
+        run: npm install -g npm@11
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Install Electron runtime
+        run: node node_modules/electron/install.js
+      - name: Check nightly tag and version
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          if ($ver -notmatch '^\d+\.\d+\.\d+-nightly\.\d+$' -or "v$ver" -ne '${{ github.ref_name }}') { throw 'Nightly tag and package version must match.' }
+      - name: Tests
+        run: npm test -- --watchAll=false --runInBand
+      - name: Verify nightly icon
+        run: node scripts/build-app-icon.js --nightly --check
+      - name: Verify RC-Brain model
+        run: node scripts/promote-model.js --verify
+      - name: Build and package
+        run: npm run package
+      - name: Verify packaged update repository
+        run: node scripts/verify-packaged-update-repo.js 'out/RunContainer Nightly-win32-x64/resources/app.asar'
+      - name: Build nightly installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          $src = Join-Path (Get-Location) 'out\RunContainer Nightly-win32-x64'
+          $out = Join-Path (Get-Location) 'out'
+          if (-not (Test-Path "$src\RunContainerNightly.exe")) { throw 'Nightly executable missing.' }
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /DNightly /DMyAppVersion=$ver "/DMyAppSource=$src" "/DMyOutDir=$out" installer\RunContainer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
+          if (-not (Test-Path "$out\RunContainer-Nightly-Setup-$ver.exe")) { throw 'Nightly installer missing.' }
+      - name: Publish nightly prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 'RunContainer Nightly ${{ github.ref_name }}'
+          body: 'Experimental early-access build. Bugs are expected. Installs separately from stable, with separate apps and settings. This installer is unsigned.'
+          prerelease: true
+          make_latest: false
+          files: out/RunContainer-Nightly-Setup-*.exe
+          fail_on_unmatched_files: true

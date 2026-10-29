@@ -491,7 +491,11 @@ public static class RunContainerWindowHost
     // A window the user would recognise as the app: titled, top-level, and not a helper.
     static bool LooksLikeMain(IntPtr hwnd)
     {
-        if (GetParent(hwnd) != IntPtr.Zero) return false;
+        // GetParent returns a top-level window's OWNER, and an installer wizard is
+        // routinely owned by a tiny hidden message window. An owner therefore does not
+        // disqualify a window; being a real child control does. Rejecting every owned
+        // window here is what kept a hidden wizard invisible even though it was running.
+        if ((GetWindowLong32(hwnd, GwlStyle) & WsChild) != 0 && GetParent(hwnd) != GetDesktopWindow()) return false;
         if (GetWindowTextLength(hwnd) == 0) return false;
         RECT rect;
         if (!GetWindowRect(hwnd, out rect)) return false;
@@ -694,6 +698,123 @@ public static class RunContainerWindowHost
 `;
 }
 
+// The same host, compiled once into a small executable.
+//
+// Starting PowerShell and loading the compiled assembly cost roughly half a second on
+// every launch, which is the window between pressing Run and the app's first window
+// being adopted. A native helper starts in tens of milliseconds and speaks exactly the
+// same arguments and result lines, so the launch path does not change. The PowerShell
+// script above remains the fallback when the helper cannot be built or run.
+function buildWindowHostProgram() {
+  return buildWindowHostCSharp() + `
+
+public static class RunContainerWindowHostProgram
+{
+    static string Option(string[] args, string name, string fallback)
+    {
+        for (int index = 0; index < args.Length - 1; index += 1)
+        {
+            if (string.Equals(args[index], name, StringComparison.OrdinalIgnoreCase)) return args[index + 1];
+        }
+        return fallback;
+    }
+
+    static int Number(string[] args, string name, int fallback)
+    {
+        int parsed;
+        return int.TryParse(Option(args, name, ""), out parsed) ? parsed : fallback;
+    }
+
+    static void Emit(string json)
+    {
+        Console.WriteLine("${RESULT_PREFIX}" + json);
+        Console.Out.Flush();
+    }
+
+    // A quote, built from its character code so this source needs no escaping layers.
+    static string Quote(string text)
+    {
+        return ((char)34).ToString() + text + ((char)34).ToString();
+    }
+
+    // The result lines are parsed as JSON, so a message from Windows has to be escaped
+    // rather than pasted in. Character codes keep this readable next to the C# above.
+    static string Json(string text)
+    {
+        StringBuilder builder = new StringBuilder();
+        foreach (char c in text)
+        {
+            if (c == '"') builder.Append((char)92).Append('"');
+            else if (c == (char)92) builder.Append((char)92).Append((char)92);
+            else if (c == (char)10 || c == (char)13) builder.Append(' ');
+            else builder.Append(c);
+        }
+        return builder.ToString();
+    }
+
+    public static int Main(string[] args)
+    {
+        string mode = Option(args, "-Mode", "embed");
+        long parent = 0;
+        long.TryParse(Option(args, "-Parent", "0"), out parent);
+        int insetTop = Number(args, "-InsetTop", 0);
+        uint processId = 0;
+        uint.TryParse(Option(args, "-ProcessId", "0"), out processId);
+        try
+        {
+            if (mode == "prewarm")
+            {
+                Emit("{" + Quote("event") + ":" + Quote("ready") + "}");
+                return 0;
+            }
+            if (mode == "watch")
+            {
+                Emit("{" + Quote("event") + ":" + Quote("watching") + "}");
+                RunContainerWindowHost.Watch(parent, insetTop, Option(args, "-PidFile", ""), Option(args, "-SandboxRoot", ""), Option(args, "-StopFile", ""), Number(args, "-RevealAfterMs", 9000));
+                return 0;
+            }
+            if (mode == "release")
+            {
+                Emit("{" + Quote("released") + ":" + RunContainerWindowHost.ReleaseProcessWindows(processId, parent) + "}");
+                return 0;
+            }
+            if (mode == "resize")
+            {
+                Emit("{" + Quote("resized") + ":" + RunContainerWindowHost.ResizeProcessWindows(processId, parent, insetTop) + "}");
+                return 0;
+            }
+            if (mode == "embeddebug")
+            {
+                Console.WriteLine(RunContainerWindowHost.EmbedSteps(processId, parent));
+                Console.Out.Flush();
+                return 0;
+            }
+            long child = RunContainerWindowHost.FindMainWindow(processId, Number(args, "-TimeoutMs", 12000));
+            if (child == 0)
+            {
+                Emit("{" + Quote("embedded") + ":false," + Quote("reason") + ":" + Quote("the app did not open a window RunContainer could host") + "}");
+                return 0;
+            }
+            bool embedded = RunContainerWindowHost.Embed(child, parent, insetTop);
+            Emit("{" + Quote("embedded") + ":" + (embedded ? "true" : "false")
+                + "," + Quote("child") + ":" + child
+                + "," + Quote("parentAfter") + ":" + RunContainerWindowHost.ParentOf(child)
+                + "," + Quote("win32Error") + ":" + RunContainerWindowHost.LastError()
+                + "," + Quote("reason") + ":" + Quote(embedded ? "hosted" : "Windows refused to re-parent the app window")
+                + "}");
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Emit("{" + Quote("embedded") + ":false," + Quote("released") + ":0," + Quote("event") + ":" + Quote("error")
+                + "," + Quote("error") + ":" + Quote(Json(error.Message)) + "}");
+            return 0;
+        }
+    }
+}
+`;
+}
+
 function buildWindowHostScript() {
   return [
     "param([string]$Mode, [int]$ProcessId, [string]$Parent, [int]$TimeoutMs = 12000, [int]$InsetTop = 0, [string]$PidFile = '', [string]$SandboxRoot = '', [string]$StopFile = '', [string]$CachePath = '', [int]$RevealAfterMs = 9000)",
@@ -752,7 +873,9 @@ function buildWindowHostScript() {
   ].join('\n');
 }
 
-function buildWindowHostScriptArgs(scriptPath, {
+// The arguments the host itself understands, shared by the native helper and the
+// PowerShell script so the two can never drift apart.
+function buildWindowHostProgramArgs({
   mode,
   processId,
   parentHandle,
@@ -761,21 +884,25 @@ function buildWindowHostScriptArgs(scriptPath, {
   pidFile,
   sandboxRoot,
   stopFile,
-  cachePath,
   revealAfterMs = 0,
 } = {}) {
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Mode', mode];
+  const args = ['-Mode', mode];
   if (Number.isSafeInteger(processId) && processId > 0) args.push('-ProcessId', String(processId));
   args.push('-Parent', String(parentHandle));
   // Watch mode has no timeout of its own: it lives as long as the host window.
   if (mode !== 'watch') args.push('-TimeoutMs', String(timeoutMs));
   // Only sent when a caller asks for a header strip, so existing calls stay identical.
   if (insetTop > 0) args.push('-InsetTop', String(insetTop));
-  if (cachePath) args.push('-CachePath', cachePath);
   if (revealAfterMs > 0) args.push('-RevealAfterMs', String(revealAfterMs));
   if (pidFile) args.push('-PidFile', pidFile);
   if (sandboxRoot) args.push('-SandboxRoot', sandboxRoot);
   if (stopFile) args.push('-StopFile', stopFile);
+  return args;
+}
+
+function buildWindowHostScriptArgs(scriptPath, options = {}) {
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...buildWindowHostProgramArgs(options)];
+  if (options.cachePath) args.push('-CachePath', options.cachePath);
   return args;
 }
 
@@ -838,7 +965,9 @@ function nativeHandleToInt(handle) {
 module.exports = {
   RESULT_PREFIX,
   buildWindowHostCSharp,
+  buildWindowHostProgram,
   buildWindowHostScript,
+  buildWindowHostProgramArgs,
   buildWindowHostScriptArgs,
   launchShowState,
   parseWindowHostOutput,

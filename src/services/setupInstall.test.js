@@ -95,6 +95,45 @@ describe('setup program detection and planning', () => {
     expect(looksLikeSetupByName({ name: 'update-manager' })).toBe(true);
   });
 
+  it('sends an unattended install into the app\u2019s own environment', () => {
+    const dir = tempDir();
+    const installDir = path.join(dir, 'installed');
+    // Windows' known-folder API does not read the environment's folder variables, so
+    // an unattended installer must be told where to install or it lands in the real
+    // user profile and looks like it installed nothing.
+    const nsis = planSetupRun({ source: writeExe(dir, 'nsis-setup.exe', 'Nullsoft'), name: 'Setup', setupMode: 'silent', installDir });
+    expect(nsis.args[nsis.args.length - 1]).toBe(`/D=${installDir}`);
+
+    const inno = planSetupRun({ source: writeExe(dir, 'inno-setup.exe', 'Inno Setup'), name: 'Setup', setupMode: 'silent', installDir });
+    expect(inno.args).toContain(`/DIR="${installDir}"`);
+
+    // A wizard is the user's own; no destination is invented for it.
+    const wizard = planSetupRun({ source: path.join(dir, 'inno-setup.exe'), name: 'Setup', setupMode: 'wizard', installDir });
+    expect(wizard.args).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('recognises an installed app whose files kept their original timestamps', () => {
+    const dir = tempDir();
+    const installedDir = path.join(dir, 'installed', 'Vendor');
+    fs.mkdirSync(installedDir, { recursive: true });
+    const before = findInstalledCandidates(dir);
+    const app = path.join(installedDir, 'App.exe');
+    fs.writeFileSync(app, Buffer.alloc(2048));
+    // An installer that copies out of its archive keeps the archive's dates.
+    const old = new Date('2019-01-01T00:00:00Z');
+    fs.utimesSync(app, old, old);
+    // A timestamp filter alone misses it...
+    expect(findInstalledCandidates(dir, { since: Date.now() - 60000 })).toEqual([]);
+    // ...but "this file was not here before setup ran" does not.
+    const found = findInstalledCandidates(dir, {
+      since: Date.now() - 60000,
+      knownPaths: before.map((entry) => entry.path),
+    });
+    expect(found.map((entry) => entry.path)).toContain(app);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('finds what setup installed, newest and largest first, without following links', () => {
     const dir = tempDir();
     const nested = path.join(dir, 'program files', 'Vendor', 'App');
