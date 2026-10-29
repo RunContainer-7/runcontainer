@@ -2818,7 +2818,8 @@ function rcvmStatePaths(appId) {
 // approval.
 function rcvmAdminHostTitle(appRecord) {
   const name = String(appRecord?.name || 'App').slice(0, 80);
-  return `RunContainer — ${name} (administrator approved)`;
+  // PRODUCT_NAME, not a literal, so a Nightly window is identified as Nightly.
+  return `${PRODUCT_NAME} — ${name} (administrator approved)`;
 }
 
 function powerShellLiteral(value) {
