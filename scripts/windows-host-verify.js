@@ -31,6 +31,15 @@ const repoRoot = path.join(__dirname, '..');
 const probeTitle = 'RCHostProbe';
 const notes = [];
 
+// The host window is titled `${PRODUCT_NAME} — <app>` by main.js, and the product name
+// depends on the channel: a Nightly build calls itself "RunContainer Nightly". Deriving
+// that name from this build's own version keeps the check honest on both channels;
+// hard-coding the Stable title made every Nightly run fail although hosting worked.
+const productName = /-nightly\.\d+$/.test(require('../package.json').version)
+  ? 'RunContainer Nightly'
+  : 'RunContainer';
+const hostTitlePrefix = `${productName} — `;
+
 function log(message) {
   process.stdout.write(`${message}\n`);
 }
@@ -448,7 +457,7 @@ async function main() {
     let hostWindow = null;
     while (Date.now() < deadline) {
       dump = dumpWindows(dumpScript, work);
-      hostWindow = dump.find((entry) => entry.kind === 'TOP' && entry.title.startsWith('RunContainer — ')) || null;
+      hostWindow = dump.find((entry) => entry.kind === 'TOP' && entry.title.startsWith(hostTitlePrefix)) || null;
       standalone = dump.find((entry) => entry.kind === 'TOP' && entry.title === probeTitle) || null;
       hosted = dump.find((entry) => entry.kind === 'CHILD' && entry.title === probeTitle) || null;
       if (hosted && hostWindow) break;
@@ -502,7 +511,7 @@ async function main() {
       await wait(1000);
     }
     if (!promoted) {
-      const relevant = dumpWindows(dumpScript, work).filter((entry) => /RCHostProbe|RunContainer —/.test(entry.title));
+      const relevant = dumpWindows(dumpScript, work).filter((entry) => /RCHostProbe/.test(entry.title) || entry.title.startsWith(hostTitlePrefix));
       throw new Error(`the window remaining after the splash closed did not fill the host: ${JSON.stringify(relevant)}`);
     }
     const afterReset = dumpWindows(dumpScript, work);
@@ -525,7 +534,7 @@ async function main() {
     let installedWindow = null;
     while (Date.now() < setupDeadline) {
       const windows = dumpWindows(dumpScript, work);
-      const host = windows.find((entry) => entry.kind === 'TOP' && entry.title.startsWith('RunContainer — RCSetupProbe'));
+      const host = windows.find((entry) => entry.kind === 'TOP' && entry.title.startsWith(`${hostTitlePrefix}RCSetupProbe`));
       installedWindow = host && windows.find((entry) => entry.kind === 'CHILD' && entry.title === probeTitle && entry.parent === host.handle && entry.visible);
       if (installedWindow) break;
       await wait(1000);
