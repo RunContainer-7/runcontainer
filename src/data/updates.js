@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.1-nightly.1',
+    date: '2026-10-29',
+    title: 'Introducing RunContainer Nightly',
+    changes: [
+      'The experimental blue Nightly edition installs alongside Stable with its own apps and settings.',
+      'Developer mode, Virtualise and RC-Brain technical details are available in Nightly.',
+      'Nightly receives its own prerelease updates; this first build is based on Stable 0.9.0.',
+    ],
+  },
+  {
     version: '0.9.0',
     date: '2026-10-28',
     title: 'A finished installer now always finds its app, and a light theme',

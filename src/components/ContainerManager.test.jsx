@@ -137,6 +137,17 @@ describe("ContainerManager", () => {
     document.body.innerHTML = "";
   });
 
+  it("keeps developer mode hidden in stable even if an old preference enabled it", async () => {
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true, channel: 'stable' });
+    const container = render();
+    await act(async () => { await Promise.resolve(); });
+    openTab(container, 'Settings');
+    expect(container.textContent).not.toContain('Enable developer mode');
+    expect(navLabels(container)).not.toContain('Virtualise');
+    expect(document.body.dataset.channel).toBe('stable');
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+  });
+
   it("renders the main tabs and header", () => {
     const container = render();
     expect(container.textContent).toContain("Apps");
@@ -764,6 +775,7 @@ describe("ContainerManager", () => {
   });
 
   it("shows a plain RC-Brain summary, and its audit detail only in developer mode", async () => {
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, channel: 'nightly' });
     getAiStatus.mockResolvedValue({
       available: true,
       enabled: true,
@@ -808,6 +820,8 @@ describe("ContainerManager", () => {
     expect(container.textContent).not.toContain("Model file:");
     expect(container.textContent).not.toContain("Verified outcomes and experience");
     expect(navLabels(container)).not.toContain("Virtualise");
+    expect(container.textContent).toContain('RunContainer Nightly');
+    expect(document.body.dataset.channel).toBe('nightly');
 
     // Developer mode: the same app, plus the detail and one extra tab.
     const enable = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Enable developer mode");
@@ -842,7 +856,7 @@ describe("ContainerManager", () => {
   });
 
   it("does not render the app session alongside another tab", async () => {
-    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true });
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true, channel: 'nightly' });
     listContainers.mockResolvedValue([{ id: "app-1", name: "Demo app", source: "C:\\apps\\demo.exe", status: "Installed" }]);
     runContainer.mockResolvedValue({ id: "app-1", status: "Running", pid: 4242 });
     const container = render();
@@ -860,7 +874,7 @@ describe("ContainerManager", () => {
   });
 
   it("runs a virtual machine from the Virtualise tab, with the media the user supplies", async () => {
-    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true });
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, developerMode: true, channel: 'nightly' });
     listVms.mockResolvedValue({
       vms: [
         {

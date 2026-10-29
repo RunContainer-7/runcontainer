@@ -69,13 +69,13 @@ function isNewerVersion(current, latest) {
 // workflow produces (RunContainer-Setup-<version>.exe), then looser patterns.
 // Never the first .exe returned: a wrong asset would install the wrong thing.
 // The asset size + digest travel with the pick so the downloader can verify.
-function pickReleaseLink({ assets, htmlUrl, version }) {
+function pickReleaseLink({ assets, htmlUrl, version, channel = 'stable' }) {
   const list = Array.isArray(assets) ? assets : [];
   const hasUrl = (asset) => asset && typeof asset.name === 'string' && typeof asset.browser_download_url === 'string';
-  const exactName = version ? `RunContainer-Setup-${version}.exe`.toLowerCase() : null;
-  const installer = (exactName && list.find((asset) => hasUrl(asset) && asset.name.toLowerCase() === exactName))
-    || list.find((asset) => hasUrl(asset) && /runcontainer.*setup.*\.exe$/i.test(asset.name))
-    || list.find((asset) => hasUrl(asset) && /setup.*\.exe$/i.test(asset.name));
+  // Never fall back to a different channel's installer: the two are separate products.
+  const prefix = channel === 'nightly' ? 'RunContainer-Nightly-Setup-' : 'RunContainer-Setup-';
+  const exactName = version ? `${prefix}${version}.exe`.toLowerCase() : null;
+  const installer = exactName && list.find((asset) => hasUrl(asset) && asset.name.toLowerCase() === exactName);
   return {
     installerUrl: installer ? installer.browser_download_url : null,
     installerName: installer ? installer.name : null,
@@ -105,8 +105,9 @@ function updateApiBase() {
   return override || 'https://api.github.com';
 }
 
-function fetchLatestRelease({ repo, timeoutMs = UPDATE_CHECK_TIMEOUT_MS } = {}) {
-  const url = `${updateApiBase()}/repos/${repo}/releases/latest`;
+function fetchLatestRelease({ repo, channel = 'stable', timeoutMs = UPDATE_CHECK_TIMEOUT_MS } = {}) {
+  const endpoint = channel === 'nightly' ? '/releases?per_page=100' : '/releases/latest';
+  const url = `${updateApiBase()}/repos/${repo}${endpoint}`;
   // Plain http is allowed ONLY for the loopback test override; production is https.
   const transport = url.startsWith('http://127.0.0.1') ? require('http') : https;
   if (!url.startsWith('https://') && !url.startsWith('http://127.0.0.1')) {
@@ -142,34 +143,59 @@ function fetchLatestRelease({ repo, timeoutMs = UPDATE_CHECK_TIMEOUT_MS } = {}) 
   });
 }
 
-async function checkForUpdates({ currentVersion, repo = resolveUpdateRepo() } = {}) {
+// Nightly tags are semver prereleases, for example v0.9.1-nightly.2.
+// Comparing only the numeric core would silently miss every later nightly build.
+function parseNightly(version) {
+  if (typeof version !== 'string') return null;
+  const match = version.trim().match(/^[vV]?(\d+\.\d+\.\d+)-nightly\.(\d+)$/);
+  return match ? { core: match[1], build: Number(match[2]), version: `${match[1]}-nightly.${match[2]}` } : null;
+}
+
+function selectNightlyRelease(releases) {
+  if (!Array.isArray(releases)) return null;
+  return releases.filter((release) => !release?.draft && release?.prerelease && parseNightly(release.tag_name))
+    .sort((a, b) => {
+      const av = parseNightly(a.tag_name);
+      const bv = parseNightly(b.tag_name);
+      return compareVersions(bv.core, av.core) || bv.build - av.build;
+    })[0] || null;
+}
+
+async function checkForUpdates({ currentVersion, repo = resolveUpdateRepo(), channel = 'stable' } = {}) {
   if (!isUpdateRepoConfigured(repo)) {
     return { status: 'unavailable', reason: 'Update repository is not configured yet (RUNCONTAINER_UPDATE_REPO).' };
   }
-  const normalizedCurrent = normalizeVersion(currentVersion);
+  const normalizedCurrent = channel === 'nightly' ? parseNightly(currentVersion)?.version : normalizeVersion(currentVersion);
   if (!normalizedCurrent) {
     return { status: 'unavailable', reason: 'Installed version is unreadable.' };
   }
   let release;
   try {
-    release = await fetchLatestRelease({ repo });
+    release = await fetchLatestRelease({ repo, channel });
+    if (channel === 'nightly') release = selectNightlyRelease(release);
   } catch (error) {
     return { status: 'unavailable', reason: error?.message || 'Update check failed.' };
   }
   // /releases/latest only ever returns a published non-prerelease, but the
   // version is still compared locally: GitHub orders "latest" by creation
   // date, not by version number.
-  const latestVersion = normalizeVersion(release?.tag_name);
+  const latestVersion = channel === 'nightly' ? parseNightly(release?.tag_name)?.version : normalizeVersion(release?.tag_name);
   if (!latestVersion) {
     return { status: 'unavailable', reason: 'Latest release has no readable version.' };
   }
-  if (!isNewerVersion(normalizedCurrent, latestVersion)) {
+  const currentNightly = channel === 'nightly' && parseNightly(normalizedCurrent);
+  const latestNightly = channel === 'nightly' && parseNightly(latestVersion);
+  const newer = channel === 'nightly'
+    ? compareVersions(currentNightly.core, latestNightly.core) < 0 || (currentNightly.core === latestNightly.core && currentNightly.build < latestNightly.build)
+    : isNewerVersion(normalizedCurrent, latestVersion);
+  if (!newer) {
     return { status: 'up-to-date', currentVersion: normalizedCurrent, latestVersion };
   }
   const { installerUrl, installerName, installerSize, installerDigest, releaseUrl } = pickReleaseLink({
     assets: release?.assets,
     htmlUrl: release?.html_url,
     version: latestVersion,
+    channel,
   });
   return {
     status: 'update-available',
@@ -198,6 +224,8 @@ module.exports = {
   compareVersions,
   isNewerVersion,
   pickReleaseLink,
+  parseNightly,
+  selectNightlyRelease,
   fetchLatestRelease,
   checkForUpdates,
 };

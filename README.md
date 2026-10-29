@@ -14,7 +14,11 @@ Get the latest **`RunContainer-Setup-<version>.exe`** from the [Releases page](h
 - No administrator rights needed for RunContainer itself. Some apps and installers will still ask for permission, and that prompt comes from Windows.
 - Installers are not code-signed yet, so Windows may show "Unknown publisher". Only run an installer you downloaded from the links above.
 
-Already installed? You do not have to watch for releases. When a new version is out, the app shows a notice with an **Update…** button and the Updates tab explains what changed.
+Already installed? When a new version in your channel is available, the app shows an **Update…** notice.
+
+### Nightly (experimental)
+
+**RunContainer Nightly** is the blue early-access edition. Download its clearly labelled `RunContainer-Nightly-Setup-<version>.exe` from the [pre-releases](https://github.com/RunContainer-7/runcontainer/releases). It can be buggy. Nightly installs alongside stable with its own apps, settings and updates; it does not copy your existing app library automatically. The first nightly is based on stable 0.9.0 and adds the separate nightly edition; future nightlies can preview new features. Installers are currently unsigned.
 
 ## Your first app
 
@@ -30,7 +34,7 @@ A second RunContainer window opens with the app inside it. If the app comes as a
 - **Sources** — add an app from a URL.
 - **Tweaks** — launch arguments, memory and CPU limits, and JIT settings for .NET apps.
 - **Profiles** — how much access an app gets, from normal to locked (no network).
-- **Settings** — installers, updates, RC-Brain, the beginner tour, and developer mode.
+- **Settings** — installers, appearance, RC-Brain, and the beginner tour. Nightly also has developer mode.
 - **Manage** — per app: where it lives, its log, and how its window is shown.
 - **Info** — version, links and support.
 - **Updates** — what changed and the update button.
@@ -53,11 +57,11 @@ You can read the full story on the documentation's [RC-Brain page](https://runco
 
 ## Developer mode
 
-Settings has one switch, **Enable developer mode**. It adds a **Virtualise** tab for running a whole operating system on RunContainer's own QEMU backend, plus the technical details behind RC-Brain. It is labelled experimental, because it is. Nothing else about the app changes.
+In Nightly, **Enable developer mode** adds the experimental **Virtualise** tab and RC-Brain technical details. You need your own QEMU installation and operating-system media. VM support can be buggy; it remains available for experimentation rather than being removed. Stable no longer shows these tools, and no existing VM files are deleted.
 
 ## Updating
 
-When a new stable version exists, the app shows the changes and an **Update…** button that downloads the installer, checks it, installs it over your copy, and restarts. Your apps and settings are kept. **Remind tomorrow** hides that version for a day.
+When a newer release in the same channel exists, the app shows the changes and an **Update…** button that downloads the installer, checks it, installs it over your copy, and restarts. Your apps and settings are kept. **Remind tomorrow** hides that version for a day.
 
 ## Support
 
@@ -78,7 +82,7 @@ npm run build
 npm start
 ```
 
-On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; releases are cut by pushing a matching tag such as `v0.9.0`.
+On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; nightly releases are cut by pushing a matching tag such as `v0.9.1-nightly.1`; stable releases use a matching stable version and tag.
 
 ## License
 

@@ -61,7 +61,7 @@ function stepsFor(version) {
       lead: "Keeps RunContainer itself current.",
       bullets: [
         "It shows the version you have, checks GitHub Releases, and tells you what the check found.",
-        "When a newer stable version exists, you get the release notes, a one-click download with progress, and the installer runs over your copy.",
+        "When a newer version in your release channel exists, you get the release notes, a download with progress, and the installer runs over your copy.",
         "Remind tomorrow snoozes that version for a day. This check only reads the release feed; it never installs anything by itself.",
       ],
     },
@@ -91,8 +91,8 @@ function stepsFor(version) {
       lead: "Everything RunContainer can tell you about this PC, and the RC-Brain panel.",
       bullets: [
         "Which isolation this PC can use, where each app's files live, and where the logs are written.",
-        "Measured launch timings: from pressing Run to confirmed containment. Recorded locally, never uploaded.",
-        "RC-Brain, RunContainer's own on-device model, with its version, its held-out evaluation numbers, the incidents it diagnosed, and the switch that turns monitoring off.",
+        "Choose your appearance and how supported installers run.",
+        "RC-Brain, RunContainer's own on-device model, the incidents it diagnosed, and the switch that turns monitoring off.",
       ],
     },
     {

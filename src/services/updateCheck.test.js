@@ -8,6 +8,8 @@ const {
   updateApiBase,
   DEFAULT_UPDATE_REPO,
   PLACEHOLDER_UPDATE_REPO,
+  parseNightly,
+  selectNightlyRelease,
 } = require('../../public/update-check');
 
 describe('update check helpers', () => {
@@ -68,6 +70,25 @@ describe('update check helpers', () => {
     expect(fallback.installerUrl).toBeNull();
     expect(fallback.installerSize).toBeNull();
     expect(fallback.releaseUrl).toBe(htmlUrl);
+  });
+
+  it('selects the newest nightly prerelease and never selects stable or drafts', () => {
+    const releases = [
+      { tag_name: 'v9.0.0', prerelease: false },
+      { tag_name: 'v0.9.1-nightly.10', prerelease: true, draft: true },
+      { tag_name: 'v0.9.1-nightly.2', prerelease: true },
+      { tag_name: 'v0.9.1-nightly.9', prerelease: true },
+      { tag_name: 'v0.9.1-beta.10', prerelease: true },
+    ];
+    expect(selectNightlyRelease(releases).tag_name).toBe('v0.9.1-nightly.9');
+    expect(parseNightly('0.9.1-nightly.9').build).toBe(9);
+    expect(parseNightly('0.9.1')).toBeNull();
+    expect(pickReleaseLink({ version: '0.9.1-nightly.9', channel: 'nightly', assets: [
+      { name: 'RunContainer-Setup-0.9.1-nightly.9.exe', browser_download_url: 'https://example.com/stable' },
+    ] }).installerUrl).toBeNull();
+    expect(pickReleaseLink({ version: '0.9.1', assets: [
+      { name: 'RunContainer-Nightly-Setup-0.9.1.exe', browser_download_url: 'https://example.com/nightly' },
+    ] }).installerUrl).toBeNull();
   });
 
   it('defaults the API base to GitHub but honors the test override', () => {

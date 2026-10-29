@@ -1,14 +1,15 @@
 const { FusesPlugin } = require('@electron-forge/plugin-fuses');
 const { FuseV1Options, FuseVersion } = require('@electron/fuses');
+const nightly = /-nightly\./.test(require('./package.json').version);
 
 module.exports = {
   packagerConfig: {
     asar: true,
     // Explicit .ico: Windows picks this for the packaged RunContainer.exe and
     // the window/taskbar icon, and it carries every size 16-256.
-    icon: 'public/runcontainer-icon.ico',
-    executableName: 'RunContainer',
-    name: 'RunContainer',
+    icon: nightly ? 'public/runcontainer-nightly-icon.ico' : 'public/runcontainer-icon.ico',
+    executableName: nightly ? 'RunContainerNightly' : 'RunContainer',
+    name: nightly ? 'RunContainer Nightly' : 'RunContainer',
     overwrite: true,
     // The main process only needs Electron itself plus Node builtins, so drop
     // devDependencies from the shipped app. This also keeps paths short: dev
@@ -21,6 +22,9 @@ module.exports = {
     // normalizes paths before matching, so backslash classes never match.)
     ignore: [
       /\/\.cache(\/|$)/,
+      /^\/dist(\/|$)/,
+      /^\/out(\/|$)/,
+      /^\/build\/build(\/|$)/,
     ],
   },
   rebuildConfig: {},

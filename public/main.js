@@ -6,6 +6,12 @@ const net = require('net');
 const https = require('https');
 const crypto = require('crypto');
 const os = require('os');
+// Derive the channel from packaged metadata, not a renderer or user-controlled switch.
+const IS_NIGHTLY = /-nightly\.\d+$/.test(app.getVersion());
+const PRODUCT_NAME = IS_NIGHTLY ? 'RunContainer Nightly' : 'RunContainer';
+const PRODUCT_ICON = IS_NIGHTLY ? 'runcontainer-nightly-icon.ico' : 'runcontainer-icon.ico';
+// Set before any userData path is resolved; stable and nightly never share stores.
+if (IS_NIGHTLY) app.setPath('userData', path.join(app.getPath('appData'), 'RunContainer Nightly'));
 // No Sandboxie backend: RunContainer's only isolation engines are Hyper-V VMs
 // (arbitrary software) and AppContainer (compatible apps, explicit opt-in).
 // isWithinDirectory comes from isolated-launch (pure path validation).
@@ -163,8 +169,8 @@ async function withOpLock(appId, op, fn) {
 const sandboxRootBase = path.join(app.getPath('userData'), 'sandboxes');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-app.setName('RunContainer');
-app.setAppUserModelId('RunContainer');
+app.setName(PRODUCT_NAME);
+app.setAppUserModelId(IS_NIGHTLY ? 'com.runcontainer.nightly' : 'RunContainer');
 
 // Reads only the PE header area of the copied executable: no launching, no disk
 // scan. The result is what the Tweaks panel reports, so the claim about JIT
@@ -2380,7 +2386,7 @@ function ensureGuestWindow(appRecord, note) {
     if (note) setGuestWindowStatus(existing, note);
     return existing;
   }
-  const title = `RunContainer — ${appRecord.name || 'App window'}`;
+  const title = `${PRODUCT_NAME} — ${appRecord.name || 'App window'}`;
   const win = new BrowserWindow({
     width: 1180,
     height: 840,
@@ -2390,7 +2396,7 @@ function ensureGuestWindow(appRecord, note) {
     // Shown on the first hosted window: an empty duplicate window would be a flash.
     show: false,
     backgroundColor: '#0e1116',
-    icon: path.join(__dirname, 'runcontainer-icon.ico'),
+    icon: path.join(__dirname, PRODUCT_ICON),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -2411,7 +2417,7 @@ function ensureGuestWindow(appRecord, note) {
   const pagePath = guestWindowPagePath();
   const search = `appId=${encodeURIComponent(appRecord.id)}&name=${encodeURIComponent(appRecord.name || 'App window')}`
     + `&note=${encodeURIComponent(note || 'This window belongs to RunContainer.')}`
-    + `&autosetup=0`;
+    + `&autosetup=0&channel=${IS_NIGHTLY ? 'nightly' : 'stable'}`;
   if (pagePath) {
     win.loadFile(pagePath, { search }).catch((error) => {
       appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Guest window failed to load: ${error.message}`);
@@ -3806,12 +3812,12 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 800,
-    title: 'RunContainer',
+    title: PRODUCT_NAME,
     show: false,
     titleBarStyle: 'hiddenInset',
     // Windows only renders .ico/.png window icons; an SVG path silently falls
     // back to the stock Electron icon in the taskbar and Alt-Tab switcher.
-    icon: path.join(__dirname, 'runcontainer-icon.ico'),
+    icon: path.join(__dirname, PRODUCT_ICON),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -3819,7 +3825,7 @@ function createWindow() {
     },
   });
 
-  mainWindow.setTitle('RunContainer');
+  mainWindow.setTitle(PRODUCT_NAME);
   // Links open in the default browser, never in a new RunContainer window. Only https is passed on.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) shell.openExternal(url);
@@ -5510,7 +5516,7 @@ ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
 // The beginner introduction is shown once for this installation and never again —
 // not once per version. The answer therefore lives in an app-wide file, not on an
 // app record, and it outlives every app being deleted.
-ipcMain.handle('get-preferences', async () => loadPreferences());
+ipcMain.handle('get-preferences', async () => ({ ...loadPreferences(), channel: IS_NIGHTLY ? 'nightly' : 'stable' }));
 ipcMain.handle('set-preference', async (_event, payload = {}) => {
   const updated = savePreferences(payload);
   emitToRenderer('app:preferences', updated);
@@ -5561,7 +5567,7 @@ ipcMain.handle('check-app-updates', async (_event, options = {}) => {
     return applySnooze(lastUpdateCheck.result);
   }
   const updateCheck = require('./update-check');
-  const result = await updateCheck.checkForUpdates({ currentVersion: app.getVersion() });
+  const result = await updateCheck.checkForUpdates({ currentVersion: app.getVersion(), channel: IS_NIGHTLY ? 'nightly' : 'stable' });
   lastUpdateCheck = { at: now, result };
   saveUpdateState({ ...loadUpdateState(), lastCheck: lastUpdateCheck });
   appendLog(
@@ -5683,7 +5689,7 @@ ipcMain.handle('download-update', async () => {
   if (result?.status !== 'update-available' || !url || !UPDATE_LINK_PREFIXES.some((prefix) => url.startsWith(prefix))) {
     return { downloaded: false, error: 'No verified installer is available. Check for updates first.' };
   }
-  const destPath = path.join(app.getPath('temp'), `RunContainer-Setup-${result.latestVersion}.exe`);
+  const destPath = path.join(app.getPath('temp'), result.installerName);
   downloadedUpdatePath = null;
   try {
     // A size/digest check over HTTPS catches corruption, not a hostile mirror;

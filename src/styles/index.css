@@ -1722,3 +1722,33 @@ body[data-theme="light"] .detail-panel::-webkit-scrollbar-thumb {
     background: rgba(15, 92, 76, 0.26);
     background-clip: padding-box;
 }
+
+/* Nightly has its own blue identity, including the optional light appearance. */
+body[data-channel="nightly"] {
+    --rc-line: rgba(98, 174, 255, .20);
+    --rc-line-strong: rgba(98, 174, 255, .4);
+    --rc-accent: #65b5ff;
+    --rc-accent-strong: #4aa3ff;
+    --rc-glow: rgba(54, 145, 255, .25);
+    background: radial-gradient(ellipse at top, #102b4c, #0a0d11 70%);
+}
+body[data-channel="nightly"] .screen {
+    background-image: linear-gradient(rgba(98, 174, 255, .045) 1px, transparent 1px), linear-gradient(90deg, rgba(98, 174, 255, .045) 1px, transparent 1px), linear-gradient(180deg, #152237, #0a0d11);
+}
+body[data-channel="nightly"] .brand-mark,
+body[data-channel="nightly"] .settings-button:not(.ghost),
+body[data-channel="nightly"] .nav-button.active { background: linear-gradient(135deg, #4aa3ff, #1755ba); color: #fff; }
+body[data-channel="nightly"] .eyebrow { color: #9fd1ff; }
+body[data-channel="nightly"] .boot-overlay { background: radial-gradient(circle at top, rgba(40, 125, 230, .28), rgba(14, 17, 22, .97)); }
+body[data-channel="nightly"] .boot-ring { border-top-color: #83c5ff; }
+body[data-channel="nightly"] .profile-card.active,
+body[data-channel="nightly"] .update-banner,
+body[data-channel="nightly"] .pill { border-color: rgba(74, 163, 255, .4); background-color: rgba(74, 163, 255, .14); color: #b9ddff; }
+body[data-channel="nightly"][data-theme="light"] { --rc-line: rgba(25, 87, 160, .18); --rc-line-strong: rgba(25, 87, 160, .32); background: #edf4fc; }
+body[data-channel="nightly"][data-theme="light"] .screen { background-image: linear-gradient(rgba(44, 109, 185, .05) 1px, transparent 1px), linear-gradient(90deg, rgba(44, 109, 185, .05) 1px, transparent 1px), linear-gradient(180deg, #fff, #eef5ff); }
+body[data-channel="nightly"][data-theme="light"] .eyebrow,
+body[data-channel="nightly"][data-theme="light"] .profile-card.active,
+body[data-channel="nightly"][data-theme="light"] .update-banner,
+body[data-channel="nightly"][data-theme="light"] .pill { color: #174f8f; }
+body[data-channel="nightly"][data-theme="light"] .boot-overlay { background: radial-gradient(circle at top, rgba(74, 163, 255, .25), rgba(244, 247, 250, .97)); }
+body[data-channel="nightly"][data-theme="light"] .boot-copy { color: #174f8f; }

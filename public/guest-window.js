@@ -13,7 +13,10 @@ const note = params.get('note') || 'This window belongs to RunContainer.';
 
 document.getElementById('app-name').textContent = name;
 document.getElementById('app-note').textContent = note;
-document.title = `RunContainer — ${name}`;
+const nightly = params.get('channel') === 'nightly';
+if (nightly) document.body.classList.add('nightly');
+document.title = `${nightly ? 'RunContainer Nightly' : 'RunContainer'} — ${name}`;
+document.getElementById('main').textContent = nightly ? 'RunContainer Nightly' : 'RunContainer';
 
 const status = document.getElementById('status');
 

@@ -30,6 +30,8 @@ permissions:
 
 jobs:
   release:
+    # Nightly tags have their own workflow and must never become a stable release.
+    if: ${{ !contains(github.ref_name, '-nightly.') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
