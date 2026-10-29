@@ -21,7 +21,7 @@ Already installed? When a new version in your channel is available, the app show
 
 ### Nightly (experimental)
 
-**RunContainer Nightly** is the blue early-access edition. Download its clearly labelled `RunContainer-Nightly-Setup-<version>.exe` from the [pre-releases](https://github.com/RunContainer-7/runcontainer/releases). It can be buggy. Nightly installs alongside stable with its own apps, settings and updates; it does not copy your existing app library automatically. The first nightly is based on stable 0.9.0 and adds the separate nightly edition; future nightlies can preview new features. Installers are currently unsigned.
+**RunContainer Nightly** is the blue early-access edition. Download its clearly labelled `RunContainer-Nightly-Setup-<version>.exe` from the [pre-releases](https://github.com/RunContainer-7/runcontainer/releases). It can be buggy. Nightly installs alongside stable with its own apps, settings and updates; it does not copy your existing app library automatically. New features reach Nightly first. Installers are currently unsigned.
 
 ## Your first app
 
@@ -85,7 +85,7 @@ npm run build
 npm start
 ```
 
-On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; nightly releases are cut by pushing a matching tag such as `v0.9.1-nightly.1`; stable releases use a matching stable version and tag.
+On Windows you can also double-click `run.bat`. The version in `package.json` is the version the whole app uses; nightly releases are cut by pushing a matching tag such as `v0.9.1-nightly.2`; stable releases use a matching stable version and tag.
 
 ## License
 
