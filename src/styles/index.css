@@ -545,6 +545,14 @@ body {
     flex-direction: column;
 }
 
+.updates-list-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 14px;
+}
+
 .updates-list {
     display: flex;
     flex-direction: column;
@@ -570,6 +578,42 @@ body {
     box-shadow: 0 0 18px rgba(63, 207, 170, 0.25);
 }
 
+.update-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    list-style: none;
+    cursor: pointer;
+}
+
+.update-summary::-webkit-details-marker,
+.update-diagnostics summary::-webkit-details-marker {
+    display: none;
+}
+
+.update-summary::marker,
+.update-diagnostics summary::marker {
+    content: "";
+}
+
+.update-summary:hover .update-title {
+    color: #ffffff;
+}
+
+.update-card[open] .update-summary {
+    margin-bottom: 2px;
+}
+
+.update-diagnostics summary {
+    cursor: pointer;
+    font-weight: 600;
+    list-style: none;
+}
+
+.update-diagnostics[open] summary {
+    margin-bottom: 8px;
+}
+
 .update-head {
     display: flex;
     align-items: center;
@@ -589,6 +633,7 @@ body {
 .update-changes {
     margin: 0;
     padding-left: 18px;
+    margin-top: 4px;
     display: grid;
     gap: 4px;
     color: #cbd5e1;

@@ -128,6 +128,10 @@ export default function ContainerManager() {
   const [hypervStatus, setHypervStatus] = useState(null);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateChecking, setUpdateChecking] = useState(false);
+  // Release notes are collapsed by default so the feed opens on what is new rather
+  // than on every release at once. A version is only recorded here once the user
+  // has chosen for it; until then the installed release is the one left open.
+  const [openUpdates, setOpenUpdates] = useState({});
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [showUpdateWizard, setShowUpdateWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState('notes');
@@ -227,6 +231,9 @@ export default function ContainerManager() {
   }
 
   const visibleTabs = developerMode ? [...tabs, ...DEVELOPER_ONLY_TABS] : tabs;
+  // Each edition reads its own feed: Stable never shows a Nightly prerelease, and
+  // Nightly keeps the stable notes that its build is based on.
+  const visibleUpdates = UPDATES.filter((entry) => isNightly || !entry.version.includes('-nightly.'));
 
   function finishBeginnerSetup() {
     setShowBeginnerSetup(false);
@@ -1861,12 +1868,12 @@ export default function ContainerManager() {
             )}
           </div>
           {updateInfo && (
-            <div className="profile-card update-diagnostics">
-              <strong>Update check diagnostics</strong>
+            <details className="profile-card update-diagnostics">
+              <summary>Update check diagnostics</summary>
               <span>Installed: v{appVersion} • Status: {updateInfo.status}{updateInfo.latestVersion ? ` • Latest seen: v${updateInfo.latestVersion}` : ''}</span>
               {updateInfo.reason && <span className="muted">{updateInfo.reason}</span>}
               <span className="muted">New installers are attached to each {isNightly ? 'Nightly prerelease' : 'stable release'} on GitHub; this check never installs anything by itself.</span>
-            </div>
+            </details>
           )}
           {updateInfo?.status === 'update-available' && (
             <div className="profile-card active update-available">
@@ -1881,23 +1888,39 @@ export default function ContainerManager() {
           {updateInfo?.status === 'up-to-date' && (
             <p className="muted">You are on the latest release.</p>
           )}
+          <div className="updates-list-head">
+            <strong>{isNightly ? 'Nightly releases' : 'Stable releases'}</strong>
+            <span className="muted">{visibleUpdates.length} {visibleUpdates.length === 1 ? 'release' : 'releases'}</span>
+          </div>
           <div className="updates-list">
-            {UPDATES.filter((entry) => isNightly || !entry.version.includes('-nightly.')).map((entry) => {
+            {visibleUpdates.map((entry) => {
               const isCurrent = entry.version === appVersion;
+              const isOpen = openUpdates[entry.version] === undefined ? isCurrent : openUpdates[entry.version];
               return (
-                <div key={`${entry.version}-${entry.date}`} className={`update-card ${isCurrent ? 'current' : ''}`}>
-                  <div className="update-head">
-                    <strong>v{entry.version}</strong>
-                    {isCurrent && <span className="pill">Installed</span>}
-                    <span className="muted update-meta">{entry.date}</span>
-                  </div>
-                  <div className="update-title">{entry.title}</div>
+                <details
+                  key={`${entry.version}-${entry.date}`}
+                  className={`update-card ${isCurrent ? 'current' : ''}`}
+                  open={isOpen}
+                  onToggle={(event) => {
+                    const next = event.currentTarget.open;
+                    if (next === isOpen) return;
+                    setOpenUpdates((previous) => ({ ...previous, [entry.version]: next }));
+                  }}
+                >
+                  <summary className="update-summary">
+                    <span className="update-head">
+                      <strong>v{entry.version}</strong>
+                      {isCurrent && <span className="pill">Installed</span>}
+                      <span className="muted update-meta">{entry.date}</span>
+                    </span>
+                    <span className="update-title">{entry.title}</span>
+                  </summary>
                   <ul className="update-changes">
                     {entry.changes.map((change, index) => (
                       <li key={index}>{change}</li>
                     ))}
                   </ul>
-                </div>
+                </details>
               );
             })}
           </div>
