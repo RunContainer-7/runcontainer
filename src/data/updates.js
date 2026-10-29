@@ -4,6 +4,15 @@
 
 export const UPDATES = [
   {
+    version: '0.9.1',
+    date: '2026-10-29',
+    title: 'A simpler Stable edition',
+    changes: [
+      'Developer mode, Virtualise and technical RC-Brain details are available in the separate Nightly edition. Existing Stable VM files are not deleted.',
+      'Stable and Nightly use separate installers, app libraries, settings and updates.',
+    ],
+  },
+  {
     version: '0.9.1-nightly.1',
     date: '2026-10-29',
     title: 'Introducing RunContainer Nightly',
