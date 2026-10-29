@@ -46,15 +46,15 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum RunContainer-Setup-*.exe > SHA256SUMS.txt
+          sha256sum RunContainer-Stable-Setup-*.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: RunContainer-Setup
+          name: RunContainer-Stable-Setup
           path: |
-            dist/RunContainer-Setup-*.exe
+            dist/RunContainer-Stable-Setup-*.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
 

@@ -1,7 +1,7 @@
 {
   "name": "RunContainer",
   "productName": "RunContainer",
-  "version": "0.9.1-nightly.1",
+  "version": "0.9.1-nightly.2",
   "description": "A Windows-based container management application for running applications in a sandboxed environment.",
   "main": "public/main.js",
   "scripts": {
@@ -62,7 +62,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "artifactName": "RunContainer-Setup-${version}.exe"
+      "artifactName": "RunContainer-Stable-Setup-${version}.exe"
     },
     "extraMetadata": {
       "main": "public/main.js"

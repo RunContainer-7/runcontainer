@@ -72,6 +72,17 @@ describe('update check helpers', () => {
     expect(fallback.releaseUrl).toBe(htmlUrl);
   });
 
+  it('prefers the renamed stable installer while retaining legacy release support', () => {
+    const assets = [
+      { name: 'RunContainer-Setup-0.9.1.exe', browser_download_url: 'https://example.com/legacy' },
+      { name: 'RunContainer-Stable-Setup-0.9.1.exe', browser_download_url: 'https://example.com/stable' },
+      { name: 'RunContainer-Nightly-Setup-0.9.1.exe', browser_download_url: 'https://example.com/nightly' },
+    ];
+    expect(pickReleaseLink({ version: '0.9.1', assets }).installerUrl).toBe('https://example.com/stable');
+    expect(pickReleaseLink({ version: '0.9.1', assets: assets.slice(0, 1) }).installerUrl).toBe('https://example.com/legacy');
+    expect(pickReleaseLink({ version: '0.9.1', channel: 'nightly', assets: assets.slice(0, 2) }).installerUrl).toBeNull();
+  });
+
   it('selects the newest nightly prerelease and never selects stable or drafts', () => {
     const releases = [
       { tag_name: 'v9.0.0', prerelease: false },

@@ -65,17 +65,20 @@ function isNewerVersion(current, latest) {
   return compareVersions(normalizedCurrent, normalizedLatest) < 0;
 }
 
-// Pick the installer asset for a release. First the EXACT filename our release
-// workflow produces (RunContainer-Setup-<version>.exe), then looser patterns.
+// Pick the exact channel-specific installer asset for a release. Stable releases
+// before the rename use the legacy prefix; keep those updates working.
 // Never the first .exe returned: a wrong asset would install the wrong thing.
 // The asset size + digest travel with the pick so the downloader can verify.
 function pickReleaseLink({ assets, htmlUrl, version, channel = 'stable' }) {
   const list = Array.isArray(assets) ? assets : [];
   const hasUrl = (asset) => asset && typeof asset.name === 'string' && typeof asset.browser_download_url === 'string';
   // Never fall back to a different channel's installer: the two are separate products.
-  const prefix = channel === 'nightly' ? 'RunContainer-Nightly-Setup-' : 'RunContainer-Setup-';
-  const exactName = version ? `${prefix}${version}.exe`.toLowerCase() : null;
-  const installer = exactName && list.find((asset) => hasUrl(asset) && asset.name.toLowerCase() === exactName);
+  const prefixes = channel === 'nightly'
+    ? ['RunContainer-Nightly-Setup-']
+    : ['RunContainer-Stable-Setup-', 'RunContainer-Setup-'];
+  const installer = version && prefixes.reduce((found, prefix) => found || list.find(
+    (asset) => hasUrl(asset) && asset.name.toLowerCase() === `${prefix}${version}.exe`.toLowerCase()
+  ), null);
   return {
     installerUrl: installer ? installer.browser_download_url : null,
     installerName: installer ? installer.name : null,

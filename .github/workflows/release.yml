@@ -100,7 +100,7 @@ jobs:
           # so propagate it explicitly: a silent compiler failure would otherwise
           # only surface later as a missing asset.
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
-          $setup = Join-Path $out "RunContainer-Setup-$ver.exe"
+          $setup = Join-Path $out "RunContainer-Stable-Setup-$ver.exe"
           if (-not (Test-Path $setup)) { throw "Installer was not produced at $setup." }
           Write-Output "Built $setup ($((Get-Item $setup).Length) bytes)"
 
@@ -118,7 +118,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-installer
-          path: out/RunContainer-Setup-*.exe
+          path: out/RunContainer-Stable-Setup-*.exe
           if-no-files-found: error
 
       # Every signing request is approved by a person, so this step waits for
@@ -147,17 +147,28 @@ jobs:
         if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
         shell: pwsh
         run: |
-          $setup = Get-ChildItem 'out\signed\RunContainer-Setup-*.exe' -ErrorAction Stop | Select-Object -First 1
+          $setup = Get-ChildItem 'out\signed\RunContainer-Stable-Setup-*.exe' -ErrorAction Stop | Select-Object -First 1
           $sig = Get-AuthenticodeSignature $setup.FullName
           Write-Output "Signature status: $($sig.Status)"
           Write-Output "Signed by: $($sig.SignerCertificate.Subject)"
           if ($sig.Status -ne 'Valid') { throw "Installer is not validly signed ($($sig.Status))." }
 
+      # Stable versions already in the wild only recognize the original filename.
+      # Publish an identical alias so their in-app updater can reach this release.
+      - name: Create legacy installer alias
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          $dir = if ('${{ vars.SIGNPATH_ORGANIZATION_ID }}' -ne '') { 'out/signed' } else { 'out' }
+          Copy-Item "$dir/RunContainer-Stable-Setup-$ver.exe" "$dir/RunContainer-Setup-$ver.exe"
+
       - name: Attach the signed installer to the GitHub Release
         if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: out/signed/RunContainer-Setup-*.exe
+          files: |
+            out/signed/RunContainer-Stable-Setup-*.exe
+            out/signed/RunContainer-Setup-*.exe
           generate_release_notes: true
           fail_on_unmatched_files: true
 
@@ -165,6 +176,8 @@ jobs:
         if: ${{ vars.SIGNPATH_ORGANIZATION_ID == '' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: out/RunContainer-Setup-*.exe
+          files: |
+            out/RunContainer-Stable-Setup-*.exe
+            out/RunContainer-Setup-*.exe
           generate_release_notes: true
           fail_on_unmatched_files: true

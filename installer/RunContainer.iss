@@ -7,7 +7,7 @@
   #define ProductName "RunContainer"
   #define ProductExe "RunContainer"
   #define ProductId "{{62FD400C-D5A3-4ACA-9B40-A8310FCC5F26}"
-  #define SetupPrefix "RunContainer-Setup-"
+  #define SetupPrefix "RunContainer-Stable-Setup-"
 #endif
 #ifndef MyAppVersion
 #define MyAppVersion "0.7.1"
@@ -119,7 +119,7 @@ begin
     Exit;
   end;
   // No PowerShell: fall back to taskkill and give the process tree time to go.
-  Exec(ExpandConstant('{sysnative}\taskkill.exe'), '/IM RunContainer.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sysnative}\taskkill.exe'), '/IM {#ProductExe}.exe /T /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(5000);
   Result := not RunContainerRunning();
 end;

@@ -8,7 +8,10 @@ If you know LiveContainer on iOS, this is the same idea for Windows. No account,
 
 ## Download
 
-Get the latest **`RunContainer-Setup-<version>.exe`** from the [Releases page](https://github.com/RunContainer-7/runcontainer/releases) or from the [website](https://runcontainer-7.github.io/9-runcontainer/), then run it.
+Choose an edition from the [downloads page](https://runcontainer-7.github.io/9-runcontainer/downloads) or [GitHub Releases](https://github.com/RunContainer-7/runcontainer/releases):
+
+- **Stable** (green): recommended for everyday use. New installers are named `RunContainer-Stable-Setup-<version>.exe`; older releases use `RunContainer-Setup-<version>.exe`.
+- **Nightly** (blue): early access to experimental features, including developer mode and Virtualise. Nightly may be buggy. Its installer is `RunContainer-Nightly-Setup-<version>.exe`.
 
 - Windows 10 or 11, 64-bit.
 - No administrator rights needed for RunContainer itself. Some apps and installers will still ask for permission, and that prompt comes from Windows.
@@ -26,7 +29,7 @@ Already installed? When a new version in your channel is available, the app show
 2. Pick an `.exe`, or paste a download link in **Sources**.
 3. Press **Run**.
 
-A second RunContainer window opens with the app inside it. If the app comes as an installer, its wizard appears in that window too, and the app it produces opens there when setup finishes. You can close that window to stop looking at it, or use its buttons to stop the app or send the window back to your desktop.
+RunContainer tries to show the app in a separate RunContainer window. Depending on your installer settings, setup runs in the background or its wizard is shown. Some apps, installers and Windows prompts cannot be embedded and may appear separately.
 
 ## What is in the app
 
@@ -57,7 +60,7 @@ You can read the full story on the documentation's [RC-Brain page](https://runco
 
 ## Developer mode
 
-In Nightly, **Enable developer mode** adds the experimental **Virtualise** tab and RC-Brain technical details. You need your own QEMU installation and operating-system media. VM support can be buggy; it remains available for experimentation rather than being removed. Stable no longer shows these tools, and no existing VM files are deleted.
+In Nightly, **Enable developer mode** adds the experimental **Virtualise** tab and RC-Brain technical details. You need your own QEMU installation and operating-system media. VM support can be buggy. Starting with Stable 0.9.1, these tools are available only in Nightly; Stable 0.9.0 still includes them. Existing Stable VM files are not deleted.
 
 ## Updating
 
