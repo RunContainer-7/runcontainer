@@ -10,7 +10,7 @@ If you know LiveContainer on iOS, this is the same idea for Windows. No account,
 
 Choose an edition from the [downloads page](https://runcontainer-7.github.io/9-runcontainer/downloads) or [GitHub Releases](https://github.com/RunContainer-7/runcontainer/releases):
 
-- **Stable** (green): recommended for everyday use. New installers are named `RunContainer-Stable-Setup-<version>.exe`. Releases up to 0.9.0 used `RunContainer-Setup-<version>.exe`; 0.9.1 also publishes that old name as an identical compatibility copy so existing in-app updaters keep finding the release.
+- **Stable** (green): recommended for everyday use. New installers are named `RunContainer-Stable-Setup-<version>.exe`; older releases use `RunContainer-Setup-<version>.exe`.
 - **Nightly** (blue): early access to experimental features, including developer mode and Virtualise. Nightly may be buggy. Its installer is `RunContainer-Nightly-Setup-<version>.exe`.
 
 - Windows 10 or 11, 64-bit.
