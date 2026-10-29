@@ -378,6 +378,37 @@ describe("ContainerManager", () => {
     });
   });
 
+  it("opens the installed release and leaves older notes collapsed", async () => {
+    getAppVersion.mockResolvedValue("0.9.1");
+    const container = render();
+    openTab(container, "Updates");
+    await act(async () => { await Promise.resolve(); });
+    const cards = Array.from(container.querySelectorAll("details.update-card"));
+    expect(cards.length).toBeGreaterThan(1);
+    const current = cards.find((card) => card.querySelector("strong")?.textContent === "v0.9.1");
+    const older = cards.find((card) => card.querySelector("strong")?.textContent !== "v0.9.1");
+    expect(current?.open).toBe(true);
+    expect(older?.open).toBe(false);
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
+  it("shows the Nightly release feed in the Nightly edition", async () => {
+    getAppVersion.mockResolvedValue("0.9.1-nightly.1");
+    getPreferences.mockResolvedValue({ beginnerSetupSeen: true, channel: 'nightly' });
+    const container = render();
+    openTab(container, "Updates");
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("Nightly releases");
+    const nightly = Array.from(container.querySelectorAll("details.update-card"))
+      .find((card) => card.querySelector("strong")?.textContent === "v0.9.1-nightly.1");
+    expect(nightly?.open).toBe(true);
+    act(() => {
+      ReactDOM.unmountComponentAtNode(container);
+    });
+  });
+
   it("offers a Refresh action in the header instead of tab redirects", () => {
     const container = render();
     const headerButtons = Array.from(container.querySelectorAll(".header-actions button"));
