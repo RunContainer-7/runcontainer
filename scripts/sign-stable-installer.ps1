@@ -17,7 +17,6 @@ if ($installer.Name -ne "RunContainer-Stable-Setup-$version.exe") {
 # Each build uses a new certificate; it is not a publicly trusted identity.
 # No private key is exported or included in the installer.
 $cert = $null
-$root = $null
 try {
   $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=RunContainer (self-signed)' `
     -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy NonExportable `
@@ -27,29 +26,55 @@ try {
     throw 'The installer was not signed with the generated certificate.'
   }
 
-  if ($env:GITHUB_ACTIONS -eq 'true') {
-    # Verify Windows Authenticode cryptography and file integrity on the disposable
-    # GitHub runner. Never install a trust anchor on an end user's computer.
-    $root = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
-    $root.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $root.Add($cert)
-    $verified = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-    if ($verified.Status -ne 'Valid' -or $verified.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
-      throw "Authenticode verification failed: $($verified.Status) $($verified.StatusMessage)"
-    }
-  } else {
-    # On an ordinary PC Windows cannot build a trusted chain for this certificate.
-    # Check that a signature was added; don't change the machine's trust stores.
-    $verified = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-    if (-not $verified.SignerCertificate -or $verified.SignerCertificate.Thumbprint -ne $cert.Thumbprint -or
-        $verified.Status -notin @('Valid', 'UnknownError')) {
-      throw "Unable to inspect the self-signed installer: $($verified.Status) $($verified.StatusMessage)"
-    }
+  # Never add a trust root: Windows can prompt interactively, including on CI.
+  # Verify the embedded Authenticode signature and file hash with no UI.
+  # The only acceptable trust failure is CERT_E_UNTRUSTEDROOT, expected for a
+  # self-signed certificate. A hash mismatch or other failure is rejected.
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RunContainerSignatureCheck {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct FileInfo {
+    public uint cbStruct;
+    public IntPtr path, file, knownSubject;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct TrustData {
+    public uint cbStruct;
+    public IntPtr policyCallback, sipClientData;
+    public uint uiChoice, revocationChecks, unionChoice;
+    public IntPtr fileInfo;
+    public uint stateAction;
+    public IntPtr stateData, urlReference;
+    public uint providerFlags, uiContext;
+    public IntPtr signatureSettings;
+  }
+  [DllImport("wintrust.dll", ExactSpelling = true, PreserveSig = true)]
+  static extern int WinVerifyTrust(IntPtr hwnd, ref Guid action, ref TrustData data);
+  public static int Verify(string path) {
+    IntPtr pathPtr = Marshal.StringToCoTaskMemUni(path);
+    IntPtr infoPtr = Marshal.AllocCoTaskMem(Marshal.SizeOf(typeof(FileInfo)));
+    try {
+      var file = new FileInfo { cbStruct = (uint)Marshal.SizeOf(typeof(FileInfo)), path = pathPtr };
+      Marshal.StructureToPtr(file, infoPtr, false);
+      var data = new TrustData { cbStruct = (uint)Marshal.SizeOf(typeof(TrustData)), uiChoice = 2,
+        revocationChecks = 0, unionChoice = 1, fileInfo = infoPtr, providerFlags = 0x1010 };
+      var action = new Guid("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
+      return WinVerifyTrust(new IntPtr(-1), ref action, ref data);
+    } finally { Marshal.FreeCoTaskMem(infoPtr); Marshal.FreeCoTaskMem(pathPtr); }
+  }
+}
+'@
+  $verified = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+  if (-not $verified.SignerCertificate -or $verified.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+    throw 'Signature signer did not match the generated certificate.'
+  }
+  $trustCode = [RunContainerSignatureCheck]::Verify($installer.FullName)
+  if ($trustCode -ne 0 -and $trustCode -ne -2146762487) {
+    throw ('Authenticode verification failed: 0x{0:X8}' -f [uint32]([long]$trustCode -band 0xffffffffL))
   }
   Write-Output "Self-signed $($installer.Name); Windows signature status: $($verified.Status). The certificate is not publicly trusted."
 } finally {
-  if ($root) {
-    try { if ($cert) { $root.Remove($cert) } } finally { $root.Close() }
-  }
   if ($cert) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey -ErrorAction Stop }
 }

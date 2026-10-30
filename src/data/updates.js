@@ -4,7 +4,7 @@
 
 export const UPDATES = [
   {
-    version: '0.9.2',
+    version: '0.9.3',
     date: '2026-10-30',
     title: 'Stable installer signing',
     changes: [

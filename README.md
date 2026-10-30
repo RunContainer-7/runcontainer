@@ -15,7 +15,7 @@ Choose an edition from the [downloads page](https://runcontainer-7.github.io/9-r
 
 - Windows 10 or 11, 64-bit.
 - No administrator rights needed for RunContainer itself. Some apps and installers will still ask for permission, and that prompt comes from Windows.
-- Starting with 0.9.2, Stable installers are self-signed; older Stable releases and Nightly installers are unsigned. Windows may warn in either case because self-signed certificates are not publicly trusted. Only run an installer you downloaded from the links above.
+- Starting with 0.9.3, Stable installers are self-signed; older Stable releases and Nightly installers are unsigned. Windows may warn in either case because self-signed certificates are not publicly trusted. Only run an installer you downloaded from the links above.
 
 Already installed? When a new version in your channel is available, the app shows an **Update…** notice.
 
