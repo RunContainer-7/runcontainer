@@ -1052,6 +1052,60 @@ body {
     color: #9ca3af;
 }
 
+/* An optional public https address. It is a separate section because turning it on
+   changes what the QR code above points at. */
+.companion-web {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 10px;
+    background: rgba(8, 12, 17, 0.35);
+}
+
+.companion-web-on {
+    border-color: rgba(79, 216, 180, 0.45);
+    background: rgba(63, 207, 170, 0.08);
+}
+
+.companion-web-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.companion-web-url code {
+    display: inline-block;
+    padding: 4px 8px;
+    border: 1px solid rgba(79, 216, 180, 0.28);
+    border-radius: 8px;
+    background: rgba(8, 12, 17, 0.55);
+    color: #d6fbf1;
+    font-size: 12.5px;
+    word-break: break-all;
+}
+
+.companion-web-error {
+    color: #ffb4a8;
+    font-size: 12.5px;
+}
+
+body[data-channel="nightly"] .companion-web-url code {
+    color: #dceeff;
+    border-color: rgba(74, 163, 255, 0.32);
+}
+
+body[data-theme="light"] .companion-web {
+    background: rgba(14, 23, 33, 0.04);
+}
+
+body[data-theme="light"] .companion-web-url code {
+    background: rgba(14, 23, 33, 0.06);
+    color: #0b3f33;
+}
+
 .companion-code {
     font-size: 27px;
     font-weight: 700;

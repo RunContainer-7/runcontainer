@@ -27,7 +27,8 @@ const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
 const PNG_SIZE = 256;
 
 const BACKGROUND = [0x0e, 0x11, 0x16];
-const ACCENT = nightly ? [0x4a, 0xa3, 0xff] : [0x3f, 0xcf, 0xaa];
+const NIGHTLY_ACCENT = [0x4a, 0xa3, 0xff];
+const ACCENT = nightly ? NIGHTLY_ACCENT : [0x3f, 0xcf, 0xaa];
 
 // Design space is the SVG's viewBox: 32 x 32 units.
 const UNIT = 32;
@@ -60,16 +61,20 @@ function insideTriangle(px, py) {
 
 // Returns the color of the design at a point in 32x32 design space, or null for
 // transparent (the rounded corners of the background).
-function sampleColor(px, py) {
+function sampleColor(px, py, accent = ACCENT, opaque = false) {
   const bg = { x: 0, y: 0, w: UNIT, h: UNIT, r: RADIUS_BG };
-  if (roundRectDistance(px, py, bg) > 0) return null;
+  // A home-screen icon must be a full square: iOS refuses to draw transparency as
+  // anything but black, so the corners cannot be cut out there.
+  if (!opaque && roundRectDistance(px, py, bg) > 0) return null;
   if (insideTriangle(px, py)) return BACKGROUND;
-  if (Math.abs(roundRectDistance(px, py, BORDER)) <= BORDER.stroke / 2) return ACCENT;
-  if (roundRectDistance(px, py, CORE) <= 0) return ACCENT;
+  if (Math.abs(roundRectDistance(px, py, BORDER)) <= BORDER.stroke / 2) return accent;
+  if (roundRectDistance(px, py, CORE) <= 0) return accent;
   return BACKGROUND;
 }
 
-function renderRgba(size) {
+function renderRgba(size, options = {}) {
+  const accent = options.nightly ? NIGHTLY_ACCENT : ACCENT;
+  const opaque = Boolean(options.opaque);
   const data = Buffer.alloc(size * size * 4);
   const scale = UNIT / size;
   const step = 1 / SUBSAMPLES;
@@ -83,7 +88,7 @@ function renderRgba(size) {
         for (let sx = 0; sx < SUBSAMPLES; sx += 1) {
           const px = (x + (sx + 0.5) * step) * scale;
           const py = (y + (sy + 0.5) * step) * scale;
-          const color = sampleColor(px, py);
+          const color = sampleColor(px, py, accent, opaque);
           if (color) {
             r += color[0];
             g += color[1];

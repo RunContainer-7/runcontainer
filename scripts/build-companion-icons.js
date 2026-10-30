@@ -1,8 +1,10 @@
-// Writes the companion's home-screen icons.
+// Writes the companion's home-screen icons and manifests.
 //
-// iOS asks for 180px, Android and the manifest for 192 and 512. All three are the same
-// RunContainer mark as the desktop app, rendered by the same rasteriser, so the icon on
-// the home screen is recognisably the same product.
+// iOS asks for 180px, Android and the manifest for 192 and 512. All of them are the
+// same RunContainer mark as the desktop app, rendered by the same rasteriser. Unlike
+// the Windows icon, these are full squares: iOS draws transparent corners as black.
+// Nightly gets the blue accent and its own folder, so the installed icon matches the
+// edition that served the page.
 //
 // Usage: node scripts/build-companion-icons.js [--check]
 
@@ -11,16 +13,54 @@ const path = require('path');
 const { renderRgba, encodePng } = require('./build-app-icon');
 
 const ROOT = path.join(__dirname, '..');
-const OUT_DIR = path.join(ROOT, 'public', 'companion', 'icons');
+const COMPANION_DIR = path.join(ROOT, 'public', 'companion');
+const ICON_DIR = path.join(COMPANION_DIR, 'icons');
 const SIZES = [180, 192, 512];
 
-function build() {
-  return SIZES.map((size) => ({
-    size,
-    path: path.join(OUT_DIR, `icon-${size}.png`),
-    label: `public/companion/icons/icon-${size}.png`,
-    data: encodePng(size, renderRgba(size)),
+const DESIGNS = [
+  { nightly: false, dir: ICON_DIR, manifest: path.join(COMPANION_DIR, 'manifest.webmanifest') },
+  { nightly: true, dir: path.join(ICON_DIR, 'nightly'), manifest: path.join(COMPANION_DIR, 'manifest-nightly.webmanifest') },
+];
+
+function manifestFor(design) {
+  const icons = SIZES.map((size) => ({
+    src: `${design.nightly ? '/icons/nightly' : '/icons'}/icon-${size}.png`,
+    sizes: `${size}x${size}`,
+    type: 'image/png',
+    purpose: 'any',
   }));
+  return `${JSON.stringify({
+    name: design.nightly ? 'RunContainer Nightly Companion' : 'RunContainer Companion',
+    short_name: design.nightly ? 'RC Nightly' : 'RunContainer',
+    description: 'See and control an app that is running in RunContainer on your Windows PC.',
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'any',
+    background_color: '#080b10',
+    theme_color: '#0b0f14',
+    icons,
+  }, null, 2)}\n`;
+}
+
+function build() {
+  const files = [];
+  for (const design of DESIGNS) {
+    for (const size of SIZES) {
+      const filePath = path.join(design.dir, `icon-${size}.png`);
+      files.push({
+        path: filePath,
+        label: path.relative(ROOT, filePath).replace(/\\/g, '/'),
+        data: encodePng(size, renderRgba(size, { nightly: design.nightly, opaque: true })),
+      });
+    }
+    files.push({
+      path: design.manifest,
+      label: path.relative(ROOT, design.manifest).replace(/\\/g, '/'),
+      data: Buffer.from(manifestFor(design), 'utf8'),
+    });
+  }
+  return files;
 }
 
 function main() {
@@ -37,14 +77,14 @@ function main() {
       console.error('Run: node scripts/build-companion-icons.js');
       process.exit(1);
     }
-    console.log(`Companion icons up to date (${SIZES.join('/')} px).`);
+    console.log(`Companion icons up to date (${SIZES.join('/')} px, stable and nightly).`);
     return;
   }
 
-  fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const file of files) {
+    fs.mkdirSync(path.dirname(file.path), { recursive: true });
     fs.writeFileSync(file.path, file.data);
-    console.log(`Wrote ${file.label} (${file.data.length} bytes)`);
+    console.log(`Wrote ${file.label}`);
   }
 }
 
