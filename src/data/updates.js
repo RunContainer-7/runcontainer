@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.5-nightly.1',
+    date: '2026-10-30',
+    title: 'The iPhone companion leads the Settings page',
+    changes: [
+      'Nightly gets the 0.9.5 fixes first: the iPhone companion card is the first thing on Settings, with the address, Copy address, the Home Screen steps and the pairing code in one place.',
+      'The companion’s web app has a remembered light and dark switch.',
+      'The first-run tour names the companion. Developer mode and the Virtualise tab stay Nightly-only.',
+    ],
+  },
+  {
     version: '0.9.5',
     date: '2026-10-30',
     title: 'Find the iPhone companion, and read it in your theme',

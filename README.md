@@ -37,7 +37,7 @@ RunContainer tries to show the app in a separate RunContainer window. Depending 
 - **Sources** — add an app from a URL.
 - **Tweaks** — launch arguments, memory and CPU limits, and JIT settings for .NET apps.
 - **Profiles** — how much access an app gets, from normal to locked (no network).
-- **Settings** — installers, appearance, RC-Brain, and the beginner tour. Nightly also has developer mode.
+- **Settings** — appearance, how installers run, the iPhone companion, RC-Brain, and the beginner tour. Nightly also has developer mode.
 - **Manage** — per app: where it lives, its log, and how its window is shown.
 - **Info** — version, links and support.
 - **Updates** — what changed and the update button.
