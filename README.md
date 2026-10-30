@@ -15,13 +15,13 @@ Choose an edition from the [downloads page](https://runcontainer-7.github.io/9-r
 
 - Windows 10 or 11, 64-bit.
 - No administrator rights needed for RunContainer itself. Some apps and installers will still ask for permission, and that prompt comes from Windows.
-- Installers are not code-signed yet, so Windows may show "Unknown publisher". Only run an installer you downloaded from the links above.
+- Published installers are unsigned. A self-signing step for future Stable releases is prepared locally; Nightly remains unsigned. Windows may warn in either case because self-signed certificates are not publicly trusted. Only run an installer you downloaded from the links above.
 
 Already installed? When a new version in your channel is available, the app shows an **Update…** notice.
 
 ### Nightly (experimental)
 
-**RunContainer Nightly** is the blue early-access edition. Download its clearly labelled `RunContainer-Nightly-Setup-<version>.exe` from the [pre-releases](https://github.com/RunContainer-7/runcontainer/releases). It can be buggy. Nightly installs alongside stable with its own apps, settings and updates; it does not copy your existing app library automatically. New features reach Nightly first. Installers are currently unsigned.
+**RunContainer Nightly** is the blue early-access edition. Download its clearly labelled `RunContainer-Nightly-Setup-<version>.exe` from the [pre-releases](https://github.com/RunContainer-7/runcontainer/releases). It can be buggy. Nightly installs alongside stable with its own apps, settings and updates; it does not copy your existing app library automatically. New features reach Nightly first. Nightly installers are unsigned.
 
 ## Your first app
 
