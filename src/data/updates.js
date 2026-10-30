@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.9.4',
+    date: '2026-10-30',
+    title: 'Use an app from an iPhone',
+    changes: [
+      'Settings has an iPhone companion: turn it on, open the address it shows in Safari on the phone, and add it to the Home Screen. The phone then shows an app that is already running here and sends your taps, typing and scrolling back to it.',
+      'Pairing uses a six-digit code shown on this PC. The code works once, expires after five minutes, and a paired phone can be forgotten at any time. The companion is off until you turn it on, and it shares one app window rather than your screen.',
+      'While a phone is watching, that app’s RunContainer window says so, so remote control is never silent.',
+      'The companion reaches the PC over the network it is already on: the same Wi-Fi, or a private network such as Tailscale when you are away. It does not install or run anything on the phone.',
+    ],
+  },
+  {
     version: '0.9.3',
     date: '2026-10-30',
     title: 'Stable installer signing',

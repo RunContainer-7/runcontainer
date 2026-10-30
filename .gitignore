@@ -2,3 +2,5 @@ node_modules
 out/
 build/
 dist/
+# Local verification scratch: a Windows check compiles its probe here.
+.rc-verification-tmp/

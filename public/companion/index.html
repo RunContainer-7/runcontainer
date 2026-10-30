@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0b0f14">
+  <meta name="color-scheme" content="dark light">
+  <!-- Add to Home Screen: Safari opens this in its own window, without the browser
+       chrome, which is what makes it feel like an app rather than a bookmarked page. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="RunContainer">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <link rel="icon" href="/icons/icon-192.png" sizes="192x192">
+  <link rel="stylesheet" href="/companion.css">
+  <title>RunContainer — Companion</title>
+</head>
+<body>
+  <div class="halo" aria-hidden="true"></div>
+
+  <main id="screen-pair" class="screen" hidden>
+    <section class="card pair-card">
+      <img class="mark" src="/icons/icon-192.png" alt="" width="64" height="64">
+      <h1>Connect to your PC</h1>
+      <p class="lede">
+        This is the RunContainer companion. It shows an app that is running on your Windows PC
+        and lets you use it from this phone. Nothing is installed or run on the phone itself.
+      </p>
+      <ol class="steps">
+        <li>On the PC, open <strong>RunContainer → Settings → iPhone companion</strong> and turn it on.</li>
+        <li>Open the address it shows. This page is already that address.</li>
+        <li>Type the six-digit code the PC is showing.</li>
+      </ol>
+      <label class="field">
+        <span>Pairing code</span>
+        <input id="pair-code" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]*" maxlength="6" placeholder="000000" enterkeyhint="done">
+      </label>
+      <label class="field">
+        <span>Name this phone</span>
+        <input id="pair-device" maxlength="40" placeholder="My iPhone" autocomplete="off">
+      </label>
+      <button id="pair-button" class="primary" type="button">Pair with my PC</button>
+      <p id="pair-error" class="error" role="alert" hidden></p>
+      <p class="fineprint">
+        A pairing code works once and expires after five minutes. The phone keeps its place
+        until you remove it on the PC.
+      </p>
+    </section>
+  </main>
+
+  <main id="screen-apps" class="screen" hidden>
+    <header class="bar">
+      <div class="bar-title">
+        <strong>RunContainer</strong>
+        <span id="connection" class="pill">Connecting…</span>
+      </div>
+      <button id="refresh" class="ghost small" type="button" aria-label="Refresh">Refresh</button>
+    </header>
+    <section class="body">
+      <h2>Apps on this PC</h2>
+      <p class="hint" id="apps-hint">Apps that are running can be opened here.</p>
+      <ul id="app-list" class="app-list"></ul>
+      <div class="tip">
+        <strong>Tip</strong>
+        <span>Start an app on the PC first, then it appears here. Your phone never runs Windows applications itself.</span>
+      </div>
+    </section>
+  </main>
+
+  <main id="screen-view" class="screen viewer" hidden>
+    <header class="bar">
+      <button id="back" class="ghost icon" type="button" aria-label="Back to apps">←</button>
+      <div class="bar-title">
+        <strong id="view-name">App</strong>
+        <span id="view-state" class="pill">Waiting for a picture</span>
+      </div>
+      <button id="quality" class="ghost small" type="button" aria-label="Picture quality">Auto</button>
+    </header>
+
+    <div id="stage" class="stage">
+      <canvas id="screen" aria-label="Live view of the app on your PC"></canvas>
+      <div id="stage-note" class="stage-note">Waiting for the PC to send the first frame…</div>
+    </div>
+
+    <div id="keys" class="keys" hidden>
+      <button data-key="Escape" type="button">Esc</button>
+      <button data-key="Tab" type="button">Tab</button>
+      <button data-key="Backspace" type="button">⌫</button>
+      <button data-key="Enter" type="button">⏎</button>
+      <button data-key="ArrowLeft" type="button">←</button>
+      <button data-key="ArrowUp" type="button">↑</button>
+      <button data-key="ArrowDown" type="button">↓</button>
+      <button data-key="ArrowRight" type="button">→</button>
+    </div>
+
+    <form id="type-form" class="composer">
+      <button id="keyboard" class="ghost icon" type="submit" aria-label="Send">↵</button>
+      <input id="type-field" placeholder="Type to the app…" autocomplete="off" autocorrect="off"
+             autocapitalize="off" spellcheck="false" enterkeyhint="send">
+      <button id="more-keys" class="ghost icon" type="button" aria-label="More keys">⌨</button>
+    </form>
+  </main>
+
+  <script src="/companion.js"></script>
+</body>
+</html>

@@ -91,6 +91,40 @@ export async function setPreference(patch = {}) {
   }
 }
 
+// The iPhone companion: one server on this PC, off until it is turned on. Each call
+// returns the whole status, so the panel cannot show a stale address or code.
+export async function getCompanionStatus() {
+  if (!ipcRenderer) return null;
+  try {
+    return await ipcRenderer.invoke('companion-status');
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function enableCompanion() {
+  return requireIpc('The iPhone companion').invoke('companion-enable');
+}
+
+export async function disableCompanion() {
+  return requireIpc('The iPhone companion').invoke('companion-disable');
+}
+
+export async function newCompanionCode() {
+  return requireIpc('The iPhone companion').invoke('companion-new-code');
+}
+
+export async function forgetCompanionDevices() {
+  return requireIpc('The iPhone companion').invoke('companion-forget');
+}
+
+export function onCompanionStatus(handler) {
+  if (!ipcRenderer) return () => {};
+  const listener = (_event, status) => handler(status);
+  ipcRenderer.on('app:companion', listener);
+  return () => ipcRenderer.removeListener('app:companion', listener);
+}
+
 export async function killContainer(container) {
   return requireIpc('Stopping apps').invoke('kill-exe', container);
 }

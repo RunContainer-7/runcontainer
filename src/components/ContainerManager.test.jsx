@@ -81,6 +81,22 @@ jest.mock("../services/containerService", () => ({
   // panel every other test is looking at. The tests that are about it opt in.
   getPreferences: jest.fn(async () => ({ beginnerSetupSeen: true })),
   setPreference: jest.fn(async (patch) => patch),
+  // The iPhone companion is off in these tests unless a test turns it on.
+  getCompanionStatus: jest.fn(async () => ({
+    supported: true,
+    enabled: false,
+    running: false,
+    port: 0,
+    urls: [],
+    code: null,
+    devices: [],
+    connected: 0,
+  })),
+  enableCompanion: jest.fn(async () => ({ running: true, port: 7878, urls: [{ url: 'http://192.168.1.10:7878/', interface: 'Wi-Fi' }], code: '123456', devices: [] })),
+  disableCompanion: jest.fn(async () => ({ running: false, port: 0, urls: [], devices: [] })),
+  newCompanionCode: jest.fn(async () => ({ running: true, code: '654321', urls: [], devices: [] })),
+  forgetCompanionDevices: jest.fn(async () => ({ running: true, devices: [] })),
+  onCompanionStatus: jest.fn(() => () => {}),
   // Virtual machines (developer mode).
   listVms: jest.fn(async () => ({ vms: [] })),
   browseVmIso: jest.fn(async () => ({ path: null })),

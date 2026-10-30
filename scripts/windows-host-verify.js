@@ -16,9 +16,14 @@
 // It uses its own user-data directory, so the app list, the settings and the sandboxes
 // of the person running it are untouched. No administrator rights are needed.
 //
+// It also proves the iPhone companion end to end: the server starts from the app's own
+// IPC, a phone pairs with the code the screen shows, and a real JPEG frame of the hosted
+// window arrives over the socket before taps and typing are accepted.
+//
 // Exit code 0 means the app's window was found inside a RunContainer window with a
-// sensible size, and that no copy of it was left on the desktop. Anything else is a
-// failure and is reported with the app's own log lines as evidence.
+// sensible size, that no copy of it is left on the desktop, and that a paired phone
+// received a picture of it. Anything else is a failure and is reported with the app's
+// own log lines as evidence.
 
 const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
@@ -65,6 +70,106 @@ function freePort() {
       server.close(() => resolve(port));
     });
   });
+}
+
+// The iPhone companion, checked the way a phone uses it: turn it on through the app's own
+// IPC, pair with the code the screen shows, open the socket, ask for the running app and
+// wait for real pixels. A JPEG frame is the only proof that the window is actually being
+// shared rather than merely reported as available.
+function httpJson(port, urlPath, { method = 'GET', headers = {}, body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = require('http').request({ host: '127.0.0.1', port, path: urlPath, method, headers }, (response) => {
+      let text = '';
+      response.on('data', (chunk) => { text += chunk; });
+      response.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(text); } catch (error) { parsed = null; }
+        resolve({ status: response.statusCode, body: parsed, text });
+      });
+    });
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+async function checkCompanion({ evaluate, appId, userDataDir }) {
+  const status = await evaluate(`require('electron').ipcRenderer.invoke('companion-enable')`);
+  if (!status || status.running !== true || !status.port) {
+    throw new Error(`the companion did not start: ${JSON.stringify(status)}`);
+  }
+  if (!/^\d{6}$/.test(String(status.code || ''))) {
+    throw new Error(`the companion shows no six-digit pairing code: ${JSON.stringify(status.code)}`);
+  }
+  notes.push(`companion listening on port ${status.port}`);
+
+  const pair = await httpJson(status.port, '/api/pair', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code: status.code, device: 'verify' }),
+  });
+  if (pair.status !== 200 || !pair.body?.token) {
+    throw new Error(`pairing was refused: ${pair.status} ${pair.text}`);
+  }
+
+  const state = await httpJson(status.port, '/api/state', { headers: { authorization: `Bearer ${pair.body.token}` } });
+  if (state.status !== 200 || !Array.isArray(state.body?.apps)) {
+    throw new Error(`the paired phone could not read the app list: ${state.status} ${state.text}`);
+  }
+
+  const socket = new WebSocket(`ws://127.0.0.1:${status.port}/ws?token=${encodeURIComponent(pair.body.token)}`);
+  const frames = [];
+  const messages = [];
+  try {
+    await new Promise((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    socket.on('message', (data, isBinary) => {
+      // ws 7 does not report isBinary, so a frame is recognised by its JPEG header.
+      const buffer = Buffer.from(data);
+      const isPicture = isBinary === true || (buffer[0] === 0xff && buffer[1] === 0xd8);
+      if (isPicture) frames.push(buffer);
+      else messages.push(buffer.toString('utf8'));
+    });
+    socket.send(JSON.stringify({ type: 'view.start', appId, quality: 'small' }));
+
+    const deadline = Date.now() + 25000;
+    while (Date.now() < deadline && frames.length === 0) await wait(500);
+    if (frames.length === 0) {
+      let logText = '';
+      try { logText = fs.readFileSync(path.join(userDataDir, 'runcontainer-companion.log'), 'utf8'); } catch (error) { logText = '(no companion log)'; }
+      throw new Error(`the phone asked for the running app, but no picture arrived. Messages: ${JSON.stringify(messages.slice(-4))}. Log: ${logText.split(/\r?\n/).slice(-12).join(' | ')}`);
+    }
+    const jpeg = frames[0];
+    if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+      throw new Error(`the frame is not a JPEG picture (first bytes ${jpeg.subarray(0, 4).toString('hex')})`);
+    }
+    if (jpeg.length < 4000) {
+      throw new Error(`the frame is too small to be the app window: ${jpeg.length} bytes`);
+    }
+    notes.push(`companion streamed a ${jpeg.length}-byte JPEG frame of the app window`);
+
+    // A tap and a scroll, through the same path the phone uses. What is checked here is
+    // that the PC accepts them without dropping the session; the probe has no control to
+    // click, so the picture continuing to arrive is the observable result.
+    socket.send(JSON.stringify({ type: 'input', action: 'pointer.down', x: 0.5, y: 0.6 }));
+    socket.send(JSON.stringify({ type: 'input', action: 'pointer.up', x: 0.5, y: 0.6 }));
+    socket.send(JSON.stringify({ type: 'input', action: 'wheel', x: 0.5, y: 0.6, delta: -120 }));
+    socket.send(JSON.stringify({ type: 'input', action: 'text', text: 'ok' }));
+    await wait(1200);
+    if (socket.readyState !== WebSocket.OPEN) {
+      throw new Error('the session closed while input was being sent');
+    }
+    notes.push('companion accepted taps, a scroll and typing without losing the session');
+  } finally {
+    try { socket.close(); } catch (error) { /* closing */ }
+    await evaluate(`require('electron').ipcRenderer.invoke('companion-disable')`).catch(() => {});
+  }
+
+  const after = await httpJson(status.port, '/health').catch(() => ({ status: 0 }));
+  if (after.status === 200) throw new Error('turning the companion off left its port open');
+  notes.push('companion stopped and its port closed');
 }
 
 function removeQuietly(target) {
@@ -518,6 +623,7 @@ async function main() {
     const dialogOnDesktop = afterReset.find((entry) => entry.kind === 'TOP' && entry.title === 'RCHostProbeDialog');
     if (!dialogAgain || dialogOnDesktop) throw new Error('the dialog was not re-hosted after its framework reset its parent');
     notes.push('remaining window filled the host and the reset dialog was re-hosted');
+    await checkCompanion({ evaluate: evaluateWithRetry, appId: installed.id, userDataDir });
     await evaluateWithRetry(`require('electron').ipcRenderer.invoke('kill-exe', ${JSON.stringify({ id: installed.id })})`);
     installed = null;
 
@@ -608,7 +714,7 @@ async function main() {
 
   for (const note of notes) log(`  · ${note}`);
   if (passed) {
-    log('\nPASS  an app really renders inside a RunContainer window');
+    log('\nPASS  an app really renders inside a RunContainer window, and a paired phone is sent its picture');
     process.exit(0);
   }
   log(`\nFAIL  the app did not render inside RunContainer — ${failure ? failure.message : 'unknown failure'}`);

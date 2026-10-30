@@ -262,4 +262,8 @@ function main() {
   console.log(`Icon sizes: ${ICO_SIZES.join(', ')} px`);
 }
 
-main();
+// The same rasteriser draws the companion's home-screen icon, so the two can never
+// drift apart.
+module.exports = { renderRgba, encodePng, UNIT, ACCENT, BACKGROUND };
+
+if (require.main === module) main();

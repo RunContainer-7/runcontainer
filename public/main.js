@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session, desktopCapturer } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
@@ -81,6 +81,8 @@ const { createBrain, REGISTRY_PATH: AI_REGISTRY_PATH, createAgentCoordinator } =
 const { detectLogSignals } = require('../src/ai/features');
 const { createExperienceStore } = require('../src/ai/experiences');
 const { extractIconToFile } = require('../src/services/exeIcon');
+const { createCompanionServer } = require('../src/services/companionServer');
+const { buildCompanionInputProgram, commandFor } = require('./companion-input');
 const { planSetupRun, findInstalledCandidates } = require('../src/services/setupInstall');
 const repairVerification = require('../src/utils/repairVerifier');
 const runtimeProfile = require('../src/services/runtimeProfile');
@@ -3893,6 +3895,21 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Screen sharing is only ever answered by the window the companion asked for. A page
+  // that asks on its own gets nothing.
+  try {
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      const source = pendingCaptureSource;
+      pendingCaptureSource = null;
+      if (!source) {
+        callback({});
+        return;
+      }
+      callback({ video: source });
+    });
+  } catch (error) {
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `Screen sharing could not be set up: ${error.message}`);
+  }
   try {
     const apps = loadApps();
     let changed = false;
@@ -3922,9 +3939,26 @@ app.whenReady().then(() => {
   // not pay for compiling it.
   const warm = setTimeout(prewarmWindowHost, 1500);
   if (warm.unref) warm.unref();
+  // The companion stays on across launches when it was turned on, because the phone's
+  // home-screen shortcut points at this PC's address and would otherwise go nowhere.
+  if (process.platform === 'win32' && loadCompanionState().enabled) {
+    const resume = setTimeout(() => {
+      startCompanionServer().catch((error) => {
+        appendLog(path.join(app.getPath('userData'), 'runcontainer-companion.log'), `The companion did not resume: ${error.message}`);
+      });
+    }, 1200);
+    if (resume.unref) resume.unref();
+  }
 });
 
 app.on('before-quit', () => {
+  // Closing RunContainer closes the companion's server and the small input helper, so
+  // nothing of the remote session outlives the window it belonged to.
+  stopCompanionInput();
+  if (companionServer) {
+    try { companionServer.stop(); } catch (error) { /* quitting */ }
+    companionServer = null;
+  }
   // Closing RunContainer stops the machines it started: each one owns a disk and a console
   // port, and there is no window left to show it in once the app is gone.
   if (vmProcs.size > 0 || loadVmStore().vms.some((record) => record.qemuPid)) {
@@ -5516,6 +5550,418 @@ ipcMain.handle('guest-window-action', async (_event, payload = {}) => {
     return { ok: true, released };
   }
   return { ok: false, error: 'Unknown window action.' };
+});
+
+// --- iPhone companion --------------------------------------------------------
+//
+// The companion is a small web app for a phone's home screen. It shows the window of an
+// app that is already running here, and sends taps and keys back to it. The phone never
+// runs an app itself, and this PC is the only thing that captures or injects anything.
+//
+// It is off until it is turned on, and it needs a code that only this screen shows. What
+// it exposes is one app window at a time, never the desktop, and never a file listing.
+const companionStatePath = path.join(app.getPath('userData'), 'runcontainer-companion.json');
+const COMPANION_DEFAULT_PORT = 7878;
+// How much picture the phone is sent. A phone on the same network can afford more than
+// one on mobile data, so the phone can ask for less and the PC resizes on the fly.
+const COMPANION_QUALITY = {
+  auto: { fps: 6, maxWidth: 1280, jpeg: 0.55 },
+  sharp: { fps: 10, maxWidth: 1600, jpeg: 0.72 },
+  small: { fps: 4, maxWidth: 960, jpeg: 0.42 },
+};
+let companionServer = null;
+let companionCapture = { appId: null, viewport: { width: 0, height: 0 }, quality: 'auto' };
+let pendingCaptureSource = null;
+let companionInputProcess = null;
+let companionInputStarting = null;
+const companionInputQueue = [];
+
+function loadCompanionState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(companionStatePath, 'utf8'));
+    return {
+      enabled: parsed?.enabled === true,
+      port: Number.isInteger(parsed?.port) ? parsed.port : COMPANION_DEFAULT_PORT,
+      tokens: Array.isArray(parsed?.tokens) ? parsed.tokens.filter((entry) => entry?.hash) : [],
+    };
+  } catch (error) {
+    return { enabled: false, port: COMPANION_DEFAULT_PORT, tokens: [] };
+  }
+}
+
+function saveCompanionState(patch = {}) {
+  const updated = { ...loadCompanionState(), ...patch };
+  try {
+    fs.writeFileSync(companionStatePath, `${JSON.stringify(updated, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `The companion settings could not be saved: ${error.message}`);
+  }
+  return updated;
+}
+
+// The page is shipped inside the app, next to the rest of public/. In development the
+// same folder is read from the source tree.
+function companionAssetDir() {
+  const candidates = [
+    path.join(__dirname, 'companion'),
+    path.join(process.resourcesPath || '', 'app', 'public', 'companion'),
+    path.join(__dirname, '..', 'public', 'companion'),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(path.join(candidate, 'index.html'))) || candidates[0];
+}
+
+// Every address the PC can be reached on, so the screen can show one that will work on
+// the network the phone is actually using. Tailscale addresses appear here too.
+function companionUrls(port) {
+  const urls = [];
+  try {
+    for (const [name, addresses] of Object.entries(os.networkInterfaces())) {
+      for (const address of addresses || []) {
+        if (address.family !== 'IPv4' || address.internal) continue;
+        urls.push({ url: `http://${address.address}:${port}/`, interface: name });
+      }
+    }
+  } catch (error) {
+    // Without an interface list the loopback address is still true.
+  }
+  return urls.sort((a, b) => Number(b.interface.startsWith('Tailscale')) - Number(a.interface.startsWith('Tailscale')));
+}
+
+function companionDevices() {
+  return loadCompanionState().tokens.map((entry) => ({ device: entry.device || 'iPhone', createdAt: entry.createdAt }));
+}
+
+function companionStatus() {
+  const stored = loadCompanionState();
+  const code = companionServer?.currentPairingCode() || null;
+  return {
+    supported: process.platform === 'win32',
+    enabled: stored.enabled,
+    running: Boolean(companionServer?.listening),
+    port: companionServer?.port || 0,
+    urls: companionServer?.listening ? companionUrls(companionServer.port) : [],
+    code: code?.code || null,
+    codeExpiresAt: code?.expiresAt || 0,
+    devices: companionDevices(),
+    connected: companionServer?.socketCount() || 0,
+    assets: Boolean(companionAssetDir()),
+  };
+}
+
+function emitCompanionStatus() {
+  emitToRenderer('app:companion', companionStatus());
+}
+
+async function startCompanionServer() {
+  if (process.platform !== 'win32') {
+    return { ok: false, error: 'The companion needs RunContainer on Windows.' };
+  }
+  if (companionServer?.listening) return { ok: true, status: companionStatus() };
+  const stored = loadCompanionState();
+  const server = createCompanionServer({
+    rootDir: companionAssetDir(),
+    version: app.getVersion(),
+    channel: IS_NIGHTLY ? 'nightly' : 'stable',
+    productName: PRODUCT_NAME,
+    apps: () => loadApps(),
+    logger: (text) => appendLog(path.join(app.getPath('userData'), 'runcontainer-companion.log'), text),
+  });
+  server.setTokens(stored.tokens);
+  server.onTokensChanged((tokens) => {
+    saveCompanionState({ tokens });
+    emitCompanionStatus();
+  });
+  server.onSession((message, record) => {
+    handleCompanionMessage(message, record).catch((error) => {
+      appendLog(path.join(app.getPath('userData'), 'runcontainer-companion.log'), `Companion message failed: ${error.message}`);
+    });
+  });
+
+  let port = stored.port;
+  try {
+    ({ port } = await server.start(port));
+  } catch (error) {
+    // The saved port may be taken by something else. A different port is better than a
+    // companion that refuses to start; the screen shows the address it actually uses.
+    try {
+      ({ port } = await server.start(0));
+    } catch (fallbackError) {
+      return { ok: false, error: `The companion could not start: ${fallbackError.message}` };
+    }
+  }
+  if (!server.currentPairingCode()) server.issuePairingCode();
+  companionServer = server;
+  saveCompanionState({ enabled: true, port });
+  emitCompanionStatus();
+  return { ok: true, status: companionStatus() };
+}
+
+async function stopCompanionServer() {
+  stopCompanionInput();
+  stopCompanionCapture();
+  if (companionServer) {
+    await companionServer.stop();
+    companionServer = null;
+  }
+  saveCompanionState({ enabled: false });
+  emitCompanionStatus();
+  return { ok: true, status: companionStatus() };
+}
+
+function stopCompanionCapture() {
+  const appId = companionCapture.appId;
+  const win = appId ? guestWindows.get(appId) : null;
+  if (win && !win.isDestroyed()) {
+    try { win.webContents.send('companion-capture-stop'); } catch (error) { /* window closing */ }
+    // The person at the PC is told the remote session has ended, so the window never
+    // carries a stale "a phone is watching" line.
+    setGuestWindowStatus(win, win.__rcNote || 'This window belongs to RunContainer.');
+  }
+  companionCapture = { appId: null, viewport: { width: 0, height: 0 }, quality: 'auto' };
+}
+
+// The phone may only watch one window at a time, and only while it is paired. The plain
+// app record is enough for the list; a window is what can actually be shown.
+async function startCompanionCapture(appId, quality = 'auto') {
+  const appRecord = loadApps().find((entry) => entry.id === appId);
+  if (!appRecord) return { ok: false, reason: 'That app is not in RunContainer\u2019s list any more.' };
+  if (appRecord.status !== 'Running' && appRecord.status !== 'Displaying') {
+    return { ok: false, reason: 'Start that app on the PC first; it can then be opened here.' };
+  }
+  const win = guestWindows.get(appId);
+  if (!win || win.isDestroyed()) {
+    return { ok: false, reason: 'This app is running, but its window is not inside a RunContainer window. Open it on the PC and try again.' };
+  }
+  const preset = COMPANION_QUALITY[quality] || COMPANION_QUALITY.auto;
+  if (companionCapture.appId && companionCapture.appId !== appId) stopCompanionCapture();
+
+  // Windows' screen capture is asked for this window by name. The one-shot source is what
+  // the page's own getDisplayMedia() receives; nothing else may share a window.
+  let source = null;
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } });
+    const title = win.getTitle();
+    source = sources.find((entry) => entry.name === title) || null;
+  } catch (error) {
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-companion.log'), `Screen capture could not list windows: ${error.message}`);
+  }
+  if (!source) return { ok: false, reason: 'Windows did not offer that window for sharing. It may be minimised.' };
+  pendingCaptureSource = source;
+  companionCapture = { appId, viewport: companionCapture.viewport, quality: quality in COMPANION_QUALITY ? quality : 'auto' };
+  win.webContents.send('companion-capture-start', { appId, preset });
+  // Remote viewing is never invisible to the person at the PC: this window says so for
+  // as long as it lasts, and the session can be ended from Settings.
+  setGuestWindowStatus(win, 'A paired phone is viewing and controlling this window. Turn the companion off in Settings to end it.');
+  return { ok: true };
+}
+
+async function handleCompanionMessage(message, record) {
+  if (!message || typeof message !== 'object') return;
+  if (message.type === 'view.start') {
+    const result = await startCompanionCapture(String(message.appId || ''), message.quality);
+    record.watching = result.ok ? String(message.appId) : null;
+    record.send(JSON.stringify(result.ok
+      ? { type: 'view.state', stage: 'capturing', appId: message.appId }
+      : { type: 'view.state', stage: 'unavailable', reason: result.reason }));
+    return;
+  }
+  if (message.type === 'view.stop') {
+    record.watching = null;
+    if (!companionServer?.watchingAppIds().length) stopCompanionCapture();
+    return;
+  }
+  if (message.type === 'view.quality') {
+    if (!record.watching) return;
+    const quality = COMPANION_QUALITY[message.quality] ? message.quality : 'auto';
+    await startCompanionCapture(record.watching, quality);
+    return;
+  }
+  if (message.type === 'socket.closed') {
+    // The last phone that was watching a window lets it go, so the PC goes back to
+    // drawing it only for the person sitting in front of it.
+    if (record.watching) record.watching = null;
+    if (!companionServer?.watchingAppIds().length) stopCompanionCapture();
+    return;
+  }
+  if (message.type === 'input') {
+    const appId = record.watching;
+    if (!appId) return;
+    const win = guestWindows.get(appId);
+    if (!win || win.isDestroyed()) return;
+    const parentHandle = nativeHandleToInt(win.getNativeWindowHandle());
+    const line = commandFor(message, { parentHandle, viewport: companionCapture.viewport, headerPx: GUEST_WINDOW_HEADER_PX });
+    if (line) sendCompanionInput(line);
+  }
+}
+
+// A small resident helper turns commands into Windows input. It is compiled once with
+// the .NET Framework compiler Windows already has, the same way the window host is.
+function companionInputProgramPath() {
+  const digest = crypto.createHash('sha1').update(buildCompanionInputProgram()).digest('hex').slice(0, 12);
+  return path.join(app.getPath('userData'), `RunContainerRemoteInput-${digest}.exe`);
+}
+
+function buildCompanionInputExe(exePath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      const sourcePath = `${exePath}.cs`;
+      fs.writeFileSync(sourcePath, buildCompanionInputProgram(), 'utf8');
+      const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+      try { fs.rmSync(exePath, { force: true }); } catch (error) { /* absent is fine */ }
+      const command = "$ErrorActionPreference = 'Stop'; "
+        + `Add-Type -TypeDefinition ([System.IO.File]::ReadAllText(${quote(sourcePath)})) `
+        + `-Language CSharp -OutputAssembly ${quote(exePath)} -OutputType ConsoleApplication`;
+      const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-2000); });
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch (error) { /* already gone */ }
+        finish(null);
+      }, 120000);
+      child.once('error', () => { clearTimeout(timer); finish(null); });
+      child.once('exit', () => {
+        clearTimeout(timer);
+        const built = fs.existsSync(exePath);
+        if (!built && stderr.trim()) {
+          appendLog(path.join(app.getPath('userData'), 'runcontainer-companion.log'), `Remote input could not be built: ${stderr.trim()}`);
+        }
+        finish(built ? exePath : null);
+      });
+    } catch (error) {
+      finish(null);
+    }
+  });
+}
+
+function ensureCompanionInputExe() {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  const exePath = companionInputProgramPath();
+  if (fs.existsSync(exePath)) return Promise.resolve(exePath);
+  return buildCompanionInputExe(exePath);
+}
+
+function sendCompanionInput(line) {
+  if (companionInputProcess && companionInputProcess.stdin?.writable) {
+    companionInputProcess.stdin.write(`${line}\n`);
+    return;
+  }
+  companionInputQueue.push(line);
+  if (companionInputQueue.length > 40) companionInputQueue.shift();
+  if (companionInputStarting) return;
+  companionInputStarting = ensureCompanionInputExe().then((exePath) => {
+    companionInputStarting = null;
+    if (!exePath) {
+      companionInputQueue.length = 0;
+      return;
+    }
+    const child = spawn(exePath, [], { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    child.on('error', () => { if (companionInputProcess === child) companionInputProcess = null; });
+    child.on('exit', () => { if (companionInputProcess === child) companionInputProcess = null; });
+    companionInputProcess = child;
+    for (const queued of companionInputQueue.splice(0)) child.stdin.write(`${queued}\n`);
+  }).catch(() => { companionInputStarting = null; });
+}
+
+function stopCompanionInput() {
+  companionInputQueue.length = 0;
+  if (companionInputProcess) {
+    try { companionInputProcess.stdin.write('quit\n'); } catch (error) { /* closing */ }
+    try { companionInputProcess.kill(); } catch (error) { /* already gone */ }
+    companionInputProcess = null;
+  }
+}
+
+ipcMain.handle('companion-status', async () => companionStatus());
+
+ipcMain.handle('companion-enable', async () => {
+  const result = await startCompanionServer();
+  emitCompanionStatus();
+  return result.ok ? companionStatus() : { ...companionStatus(), error: result.error };
+});
+
+ipcMain.handle('companion-disable', async () => {
+  await stopCompanionServer();
+  return companionStatus();
+});
+
+// A new code invalidates the previous one, so seeing an old code on a photo is useless.
+ipcMain.handle('companion-new-code', async () => {
+  if (!companionServer?.listening) return companionStatus();
+  companionServer.issuePairingCode();
+  emitCompanionStatus();
+  return companionStatus();
+});
+
+// Removing a phone closes its socket and forgets its token: the next connection needs
+// the code again, which only this screen can show.
+ipcMain.handle('companion-forget', async () => {
+  if (companionServer) {
+    await companionServer.stop();
+    companionServer = null;
+    saveCompanionState({ tokens: [] });
+    const result = await startCompanionServer();
+    if (!result.ok) return { ...companionStatus(), error: result.error };
+  } else {
+    saveCompanionState({ tokens: [] });
+  }
+  emitCompanionStatus();
+  return companionStatus();
+});
+
+// Frames arrive from the guest window's own renderer, already encoded. Only a window
+// that is being watched may send them, and only for the app it belongs to.
+// A window that could not be shared, or stopped being shared, is reported to the phone
+// instead of leaving it on a picture that no longer changes.
+ipcMain.on('companion-capture-failed', (event, payload = {}) => {
+  if (!companionServer) return;
+  const appId = String(payload.appId || '');
+  if (!appId || companionCapture.appId !== appId) return;
+  const source = guestWindows.get(appId);
+  if (source && source.webContents.id !== event.sender.id) return;
+  companionCapture.appId = null;
+  companionServer.broadcast(JSON.stringify({
+    type: 'view.state',
+    stage: 'unavailable',
+    reason: payload.error || 'This window cannot be shared.',
+  }));
+});
+
+ipcMain.on('companion-capture-ended', (event, payload = {}) => {
+  if (!companionServer) return;
+  const appId = String(payload.appId || '');
+  if (!appId || companionCapture.appId !== appId) return;
+  companionCapture.appId = null;
+  companionServer.broadcast(JSON.stringify({
+    type: 'view.state',
+    stage: 'unavailable',
+    reason: 'The window stopped being shared. It may have closed on the PC.',
+  }));
+});
+
+ipcMain.on('companion-frame', (event, payload = {}) => {
+  if (!companionServer) return;
+  const appId = String(payload.appId || '');
+  if (!appId || companionCapture.appId !== appId) return;
+  const source = guestWindows.get(appId);
+  if (source && source.webContents.id !== event.sender.id) return;
+  if (Number.isFinite(payload.width) && Number.isFinite(payload.height)) {
+    companionCapture.viewport = { width: payload.width, height: payload.height };
+  }
+  const buffer = payload.buffer ? Buffer.from(payload.buffer) : null;
+  if (buffer && buffer.length > 0) {
+    companionServer.sendFrame(buffer, {
+      appId,
+      width: payload.width,
+      height: payload.height,
+      sequence: payload.sequence,
+    });
+  }
 });
 
 // The beginner introduction is shown once for this installation and never again —

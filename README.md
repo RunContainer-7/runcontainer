@@ -58,6 +58,12 @@ While RC-Brain is checking an app it can call on specialist helpers — a resear
 
 You can read the full story on the documentation's [RC-Brain page](https://runcontainer-7.github.io/9-runcontainer/guide/ai-brain).
 
+## Use an app from an iPhone (experimental)
+
+Settings has an **iPhone companion**. Turn it on and the PC shows an address and a six-digit code. Open the address in Safari on the iPhone, add it to the Home Screen, and pair it with the code.
+
+The phone then shows an app that is already running on the PC and sends your taps, typing and scrolling to it. The app still runs on the PC: nothing is installed or run on the phone, and it cannot open `.exe` or `.ipa` files. It reaches the PC over your own network — the same Wi-Fi, or a private network such as Tailscale when you are away — so do not forward its port on your router. It is experimental, off by default, and shares one app window rather than your screen.
+
 ## Developer mode
 
 In Nightly, **Enable developer mode** adds the experimental **Virtualise** tab and RC-Brain technical details. You need your own QEMU installation and operating-system media. VM support can be buggy. Starting with Stable 0.9.1, these tools are available only in Nightly; Stable 0.9.0 still includes them. Existing Stable VM files are not deleted.

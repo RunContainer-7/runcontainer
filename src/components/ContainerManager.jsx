@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference, getCompanionStatus, enableCompanion, disableCompanion, newCompanionCode, forgetCompanionDevices, onCompanionStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
 import VirtualiseTab from "./VirtualiseTab";
@@ -31,7 +31,9 @@ function useBootAnimation() {
   return booting;
 }
 // Used only until the main process reports the version from package.json.
-const APP_VERSION_FALLBACK = "0.9.3";
+// Shown only for the moment before the main process reports the real version; the
+// test asserts that it tracks package.json, so it must be bumped with the release.
+const APP_VERSION_FALLBACK = "0.9.4";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -171,6 +173,10 @@ export default function ContainerManager() {
   // Appearance. Dark is the default and the app's identity; light is for daylight and
   // projectors. One preference, applied to <body>, so every surface follows it.
   const [theme, setTheme] = useState("dark");
+  // The iPhone companion is off until it is turned on here. Its address and pairing
+  // code are read from the main process, never guessed by this panel.
+  const [companion, setCompanion] = useState(null);
+  const [companionBusy, setCompanionBusy] = useState(false);
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -208,6 +214,61 @@ export default function ContainerManager() {
   function chooseTheme(next) {
     setTheme(next);
     Promise.resolve(setPreference({ theme: next })).catch(() => {});
+  }
+
+  // The companion panel is only read while Settings is open, and it follows the main
+  // process: a phone pairing on another device updates the count and the code here.
+  useEffect(() => {
+    if (activeTab !== 'Settings') return undefined;
+    // Outside the desktop app (or in a test bridge) these bindings may not exist; the
+    // panel then simply stays as it was instead of throwing on the way in.
+    if (typeof getCompanionStatus === 'function') {
+      Promise.resolve(getCompanionStatus()).then((status) => { if (status) setCompanion(status); }).catch(() => {});
+    }
+    return typeof onCompanionStatus === 'function'
+      ? onCompanionStatus((status) => { if (status) setCompanion(status); })
+      : undefined;
+  }, [activeTab]);
+
+  async function toggleCompanion() {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      const status = companion?.running ? await disableCompanion() : await enableCompanion();
+      if (status) setCompanion(status);
+    } catch (error) {
+      // The panel keeps its last known state; the reason is written to the app's log.
+    } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function refreshCompanionCode() {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      const status = await newCompanionCode();
+      if (status) setCompanion(status);
+    } catch (error) { /* see toggleCompanion */ } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  async function forgetCompanion() {
+    if (companionBusy) return;
+    setCompanionBusy(true);
+    try {
+      const status = await forgetCompanionDevices();
+      if (status) setCompanion(status);
+    } catch (error) { /* see toggleCompanion */ } finally {
+      setCompanionBusy(false);
+    }
+  }
+
+  function formatCompanionCode(code) {
+    const text = String(code || '');
+    if (text.length !== 6) return text;
+    return `${text.slice(0, 3)} ${text.slice(3)}`;
   }
 
   // Switching developer mode on or off is one preference write. Nothing is hidden that
@@ -1402,6 +1463,61 @@ export default function ContainerManager() {
               <div className="detail-actions">
                 <button className={`settings-button ${theme === 'dark' ? '' : 'ghost'}`} onClick={() => chooseTheme('dark')}>Dark</button>
                 <button className={`settings-button ${theme === 'light' ? '' : 'ghost'}`} onClick={() => chooseTheme('light')}>Light</button>
+              </div>
+            </div>
+            <div className={`profile-card companion-card ${companion?.running ? 'companion-on' : ''}`}>
+              <strong>iPhone companion</strong>
+              <span>
+                {companion?.running
+                  ? 'On. A paired iPhone can see and control an app that is already running here, one window at a time. The app itself still runs on this PC.'
+                  : 'Off. Turn this on to use an app from an iPhone. The phone shows the app that is running on this PC; nothing is installed or run on the phone.'}
+              </span>
+              {companion?.running ? (
+                <>
+                  <span className="companion-address">
+                    {companion.urls?.length
+                      ? companion.urls.map((entry) => <code key={entry.url}>{entry.url}</code>)
+                      : <code>http://localhost:{companion.port}/</code>}
+                  </span>
+                  <span className="companion-code-label">Pairing code</span>
+                  <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
+                  <span className="muted">
+                    Open the address in Safari on the iPhone, then <strong>Share → Add to Home Screen</strong> so it opens
+                    like an app. The code works once and expires after five minutes.
+                    {companion.connected > 0 ? ` ${companion.connected} phone${companion.connected === 1 ? '' : 's'} connected now.` : ''}
+                  </span>
+                  <span className="muted">
+                    {companion.devices?.length
+                      ? `Paired: ${companion.devices.map((entry) => entry.device).join(', ')}.`
+                      : 'No phone is paired yet.'}
+                    {' '}This PC must be on, and the phone must be able to reach it: the same Wi-Fi, or a private network
+                    such as Tailscale when you are away. It is not a way to run apps on the phone itself.
+                  </span>
+                </>
+              ) : (
+                <span className="muted">
+                  Turn it on, then open the address it shows on the iPhone. Use the same Wi-Fi, or a private network such as
+                  Tailscale when you are away from home. The companion is experimental.
+                </span>
+              )}
+              <div className="detail-actions">
+                <button
+                  className={`settings-button ${companion?.running ? '' : 'ghost'}`}
+                  onClick={toggleCompanion}
+                  disabled={companionBusy}
+                >
+                  {companion?.running ? 'Turn off' : 'Turn on'}
+                </button>
+                {companion?.running && (
+                  <button className="settings-button ghost" onClick={refreshCompanionCode} disabled={companionBusy}>
+                    New code
+                  </button>
+                )}
+                {companion?.running && companion.devices?.length > 0 && (
+                  <button className="settings-button ghost" onClick={forgetCompanion} disabled={companionBusy}>
+                    Forget paired phones
+                  </button>
+                )}
               </div>
             </div>
             {isNightly && <div className={`profile-card ${developerMode ? 'active' : ''}`}>
