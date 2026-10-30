@@ -5690,8 +5690,10 @@ function companionStatus() {
     web: {
       installed: companionWebProbe.installed,
       signedIn: companionWebProbe.signedIn,
-      enabled: stored.webEnabled === true,
-      url: stored.webUrl || '',
+      enabled: stored.webEnabled === true && companionWebProbe.signedIn === true,
+      // A saved address is only valid while Tailscale is signed in and Funnel is on.
+      // Otherwise Safari gets a name that no longer serves anything.
+      url: companionWebProbe.signedIn === true ? stored.webUrl || '' : '',
       error: stored.webError || companionWebProbe.error || '',
     },
   };
