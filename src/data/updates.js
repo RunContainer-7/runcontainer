@@ -4,13 +4,23 @@
 
 export const UPDATES = [
   {
-    version: '0.9.5-nightly.1',
+    version: '0.9.6-nightly.1',
     date: '2026-10-30',
-    title: 'The iPhone companion leads the Settings page',
+    title: 'Add the iPhone companion from a scan',
     changes: [
-      'Nightly gets the 0.9.5 fixes first: the iPhone companion card is the first thing on Settings, with the address, Copy address, the Home Screen steps and the pairing code in one place.',
-      'The companion’s web app has a remembered light and dark switch.',
-      'The first-run tour names the companion. Developer mode and the Virtualise tab stay Nightly-only.',
+      'Nightly gets 0.9.6 first: Settings shows a QR code for the companion. Point the iPhone camera at it, open the link, then Share → Add to Home Screen: there is no address or port to type.',
+      'Copy link instead copies the same address for when a camera is not handy, and the full address list moved under a details row so the card stays short.',
+      'The phone’s Home Screen icon opens the real interface directly. Developer mode and the Virtualise tab remain Nightly-only.',
+    ],
+  },
+  {
+    version: '0.9.6',
+    date: '2026-10-30',
+    title: 'Add the iPhone companion from a scan',
+    changes: [
+      'Settings now shows a QR code for the companion. Point the iPhone camera at it, open the link, then Share → Add to Home Screen: there is no address or port to type.',
+      'Copy link instead copies the same address for when a camera is not handy, and the full address list moved under a details row so the card stays short.',
+      'On the phone, the Home Screen icon opens the real interface directly. The QR code opens the same page in Safari so it can be installed.',
     ],
   },
   {

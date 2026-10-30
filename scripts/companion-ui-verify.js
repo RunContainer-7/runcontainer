@@ -190,27 +190,42 @@ async function main() {
     if (!enabled.clicked) throw new Error('the companion card has no Turn on button');
 
     let card = '';
+    let hasQr = false;
+    let address = '';
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
+      const state = await evaluate(client, `(() => ({
+        qr: Boolean(document.querySelector('.companion-card svg.companion-qr')),
+        width: document.querySelector('.companion-card svg.companion-qr')?.getBoundingClientRect().width || 0,
+        address: document.querySelector('.companion-card .companion-address')?.textContent || '',
+      }))()`);
       card = await evaluate(client, 'document.body.innerText');
-      if (/http:\/\/\d+\.\d+\.\d+\.\d+:\d+/i.test(card) && /\b\d{3}\s\d{3}\b/.test(card)) break;
+      hasQr = state.qr && state.width > 100;
+      address = state.address;
+      if (hasQr && /\b\d{3}\s\d{3}\b/.test(card)) break;
       await wait(700);
     }
-    if (!/http:\/\/\d+\.\d+\.\d+\.\d+:\d+/i.test(card)) {
-      throw new Error('turning the companion on showed no address');
+    if (!hasQr) {
+      throw new Error('turning the companion on showed no scannable QR code');
     }
     if (!/\b\d{3}\s\d{3}\b/.test(card)) {
       throw new Error('turning the companion on showed no six-digit code');
     }
-    notes.push('turning it on shows an address and a six-digit pairing code');
+    if (!/http:\/\/\d+\.\d+\.\d+\.\d+:\d+/i.test(address)) {
+      throw new Error('the card does not list the address the code encodes');
+    }
+    notes.push('turning it on shows a QR code, the address it encodes, and a six-digit code');
 
+    if (!/Scan this with the iPhone camera/i.test(card)) {
+      throw new Error('the card does not tell the person to scan the code with the phone');
+    }
     if (!/Add to Home Screen/i.test(card)) {
       throw new Error('the card does not tell the person to add the page to the Home Screen');
     }
-    if (!/Copy address/i.test(card)) {
-      throw new Error('the card has no way to copy the address');
+    if (!/Copy link instead/i.test(card)) {
+      throw new Error('the card has no way to copy the link when a camera is not available');
     }
-    notes.push('the card gives the address, a copy button, Home Screen steps and the code');
+    notes.push('the card leads with a scan, then the copy fallback, Home Screen steps and the code');
 
     await evaluate(client, `(async () => {
       const button = [...document.querySelectorAll('button')]

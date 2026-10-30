@@ -2,8 +2,18 @@ import React, { useEffect, useMemo, useState } from "react";
 import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference, getCompanionStatus, enableCompanion, disableCompanion, newCompanionCode, forgetCompanionDevices, onCompanionStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
+import CompanionQr from "./CompanionQr";
 import VirtualiseTab from "./VirtualiseTab";
 import { UPDATES } from "../data/updates";
+
+// The address to put in front of a phone. A Tailscale address only works once the
+// phone is on the same private network, so a plain local address is preferred for the
+// QR code; the private one stays available in the list for when it is needed.
+function companionLinkUrl(companion) {
+  const urls = companion?.urls || [];
+  const local = urls.find((entry) => !/^http:\/\/100\./.test(entry.url));
+  return (local || urls[0])?.url || (companion?.port ? `http://localhost:${companion.port}/` : "");
+}
 
 // The same names the main process uses for these strategies (src/services/runtimeProfile.js),
 // so the interface and the log describe a JIT run in identical words.
@@ -33,7 +43,7 @@ function useBootAnimation() {
 // Used only until the main process reports the version from package.json.
 // Shown only for the moment before the main process reports the real version; the
 // test asserts that it tracks package.json, so it must be bumped with the release.
-const APP_VERSION_FALLBACK = "0.9.5-nightly.1";
+const APP_VERSION_FALLBACK = "0.9.6-nightly.1";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -269,7 +279,7 @@ export default function ContainerManager() {
   // The address is the one thing a person has to type on the phone, so copying it has
   // to work even where the clipboard API is unavailable.
   async function copyCompanionAddress() {
-    const address = companion?.urls?.[0]?.url || (companion?.port ? `http://localhost:${companion.port}/` : '');
+    const address = companionLinkUrl(companion);
     if (!address) return;
     try {
       if (navigator.clipboard?.writeText) {
@@ -1482,38 +1492,60 @@ export default function ContainerManager() {
               {companion?.running ? (
                 <>
                   <span>
-                    On. Use an app that is running on this PC from an iPhone. The app keeps running here; the phone is
-                    its screen and keyboard.
+                    On. The phone shows an app that is running here and sends your taps and typing back to it; nothing is
+                    installed on the phone.
                   </span>
-                  <ol className="companion-steps">
-                    <li>
-                      Open this address in <strong>Safari</strong> on the iPhone:
-                      <span className="companion-address">
-                        {companion.urls?.length
-                          ? companion.urls.map((entry) => <code key={entry.url}>{entry.url}</code>)
-                          : <code>http://localhost:{companion.port}/</code>}
-                      </span>
-                      <button className="settings-button ghost" type="button" onClick={copyCompanionAddress}>
-                        {companionCopied ? 'Copied' : 'Copy address'}
-                      </button>
-                    </li>
-                    <li>Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>. It then opens like an app.</li>
-                    <li>
-                      Type this code on the phone:
-                      <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
-                    </li>
-                  </ol>
+                  {companionLinkUrl(companion) ? (
+                    <div className="companion-connect">
+                      <CompanionQr
+                        value={companionLinkUrl(companion)}
+                        label={`Scan to open the iPhone companion at ${companionLinkUrl(companion)}`}
+                      />
+                      <div className="companion-connect-copy">
+                        <span className="companion-scan-title">Scan this with the iPhone camera</span>
+                        <ol className="companion-steps">
+                          <li>Point the camera at the code and tap the link it offers.</li>
+                          <li>
+                            Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>. From then on it opens
+                            like an app.
+                          </li>
+                          <li>Type the pairing code below and give the phone a name.</li>
+                        </ol>
+                        <div className="detail-actions">
+                          <button className="settings-button ghost" type="button" onClick={copyCompanionAddress}>
+                            {companionCopied ? 'Copied' : 'Copy link instead'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="muted">
+                      On, but this PC has no network address right now. Connect to Wi-Fi or a private network and the code
+                      appears here.
+                    </span>
+                  )}
+                  <div className="companion-pair">
+                    <span className="companion-code-label">Pairing code</span>
+                    <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
+                  </div>
                   <span className="muted">
                     The code works once and expires after five minutes. The phone keeps its place until you forget it.
                     {companion.connected > 0 ? ` ${companion.connected} phone${companion.connected === 1 ? '' : 's'} connected now.` : ''}
                   </span>
-                  <span className="muted">
-                    {companion.devices?.length
-                      ? `Paired: ${companion.devices.map((entry) => entry.device).join(', ')}.`
-                      : 'No phone is paired yet.'}
-                    {' '}The PC must stay on, and the phone must reach it: the same Wi-Fi, or a private network such as
-                    Tailscale when you are away. An address beginning with 100. is that private network.
-                  </span>
+                  {companion.urls?.length > 0 && (
+                    <details className="companion-addresses">
+                      <summary>Addresses this PC answers on</summary>
+                      <span className="companion-address">
+                        {companion.urls.map((entry) => <code key={entry.url}>{entry.url}</code>)}
+                      </span>
+                      {companion.urls.some((entry) => /^http:\/\/100\./.test(entry.url)) && (
+                        <span className="muted">
+                          Away from home, use the address beginning 100: that is Tailscale, which needs to be connected
+                          on both the PC and the phone.
+                        </span>
+                      )}
+                    </details>
+                  )}
                 </>
               ) : (
                 <>
