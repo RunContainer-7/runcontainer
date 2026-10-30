@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference, getCompanionStatus, enableCompanion, disableCompanion, newCompanionCode, forgetCompanionDevices, onCompanionStatus } from "../services/containerService";
+import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference, getCompanionStatus, enableCompanion, disableCompanion, newCompanionCode, forgetCompanionDevices, enableCompanionWeb, disableCompanionWeb, onCompanionStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
 import CompanionQr from "./CompanionQr";
@@ -10,6 +10,7 @@ import { UPDATES } from "../data/updates";
 // phone is on the same private network, so a plain local address is preferred for the
 // QR code; the private one stays available in the list for when it is needed.
 function companionLinkUrl(companion) {
+  if (companion?.web?.enabled && companion.web.url) return companion.web.url;
   const urls = companion?.urls || [];
   const local = urls.find((entry) => !/^http:\/\/100\./.test(entry.url));
   return (local || urls[0])?.url || (companion?.port ? `http://localhost:${companion.port}/` : "");
@@ -188,6 +189,8 @@ export default function ContainerManager() {
   const [companion, setCompanion] = useState(null);
   const [companionBusy, setCompanionBusy] = useState(false);
   const [companionCopied, setCompanionCopied] = useState(false);
+  const [companionWebBusy, setCompanionWebBusy] = useState(false);
+  const [companionWebError, setCompanionWebError] = useState('');
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -274,6 +277,26 @@ export default function ContainerManager() {
     } catch (error) { /* see toggleCompanion */ } finally {
       setCompanionBusy(false);
     }
+  }
+
+  async function changeCompanionWeb(enable) {
+    if (companionWebBusy) return;
+    setCompanionWebBusy(true);
+    setCompanionWebError('');
+    try {
+      const status = enable ? await enableCompanionWeb() : await disableCompanionWeb();
+      if (status) setCompanion(status);
+      if (status?.error) setCompanionWebError(status.error);
+    } catch (error) {
+      setCompanionWebError(error?.message || 'The web address could not be changed.');
+    } finally {
+      setCompanionWebBusy(false);
+    }
+  }
+
+  function openTailscaleDownload(event) {
+    event.preventDefault();
+    Promise.resolve(openExternalUrl('https://tailscale.com/download/windows')).catch(() => {});
   }
 
   // The address is the one thing a person has to type on the phone, so copying it has
@@ -1524,6 +1547,73 @@ export default function ContainerManager() {
                       appears here.
                     </span>
                   )}
+                  <div className={`companion-web ${companion.web?.enabled ? 'companion-web-on' : ''}`}>
+                    <div className="companion-web-head">
+                      <strong>Web address</strong>
+                      <span className="companion-pill">{companion.web?.enabled ? 'On' : 'Optional'}</span>
+                    </div>
+                    {companion.web?.enabled ? (
+                      <>
+                        <span className="companion-web-url">
+                          <code>{companion.web.url}</code>
+                        </span>
+                        <span className="muted">
+                          Works anywhere this PC has internet, through Tailscale Funnel. The pairing code is still
+                          required, and the address is public while it is on.
+                        </span>
+                        <div className="detail-actions">
+                          <button
+                            className="settings-button ghost"
+                            type="button"
+                            disabled={companionWebBusy}
+                            onClick={() => changeCompanionWeb(false)}
+                          >
+                            {companionWebBusy ? 'Closing…' : 'Turn off web address'}
+                          </button>
+                        </div>
+                      </>
+                    ) : companion.web?.installed === false ? (
+                      <>
+                        <span className="muted">
+                          A web address needs Tailscale on this PC: it is free, and it gives the phone an https://
+                          address instead of a local one.
+                        </span>
+                        <div className="detail-actions">
+                          <a
+                            className="settings-button ghost info-link-button"
+                            href="https://tailscale.com/download/windows"
+                            onClick={openTailscaleDownload}
+                          >
+                            Get Tailscale
+                          </a>
+                        </div>
+                      </>
+                    ) : companion.web?.installed === null || companion.web?.installed === undefined ? (
+                      <span className="muted">Checking Tailscale…</span>
+                    ) : companion.web?.signedIn ? (
+                      <>
+                        <span className="muted">
+                          Open an https://…ts.net address for the phone. It works away from home, and the QR code above
+                          switches to it.
+                        </span>
+                        <div className="detail-actions">
+                          <button
+                            className="settings-button"
+                            type="button"
+                            disabled={companionWebBusy}
+                            onClick={() => changeCompanionWeb(true)}
+                          >
+                            {companionWebBusy ? 'Opening…' : 'Open web address'}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <span className="muted">
+                        {companion.web?.error || 'Open Tailscale and sign in, then open a web address here.'}
+                      </span>
+                    )}
+                    {companionWebError && <span className="companion-web-error">{companionWebError}</span>}
+                  </div>
                   <div className="companion-pair">
                     <span className="companion-code-label">Pairing code</span>
                     <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>

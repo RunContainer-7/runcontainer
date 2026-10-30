@@ -118,6 +118,15 @@ export async function forgetCompanionDevices() {
   return requireIpc('The iPhone companion').invoke('companion-forget');
 }
 
+// A Tailscale Funnel address is https://<pc>.<tailnet>.ts.net/, opened on demand.
+export async function enableCompanionWeb() {
+  return requireIpc('The iPhone companion').invoke('companion-enable-web');
+}
+
+export async function disableCompanionWeb() {
+  return requireIpc('The iPhone companion').invoke('companion-disable-web');
+}
+
 export function onCompanionStatus(handler) {
   if (!ipcRenderer) return () => {};
   const listener = (_event, status) => handler(status);

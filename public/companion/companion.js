@@ -56,6 +56,20 @@
 
   // The interface follows the phone until it is told otherwise, then it remembers. The
   // button shows the theme it switches to, not the one in use.
+  // Stable and Nightly are told apart by the icon on the phone as well as the colour:
+  // iOS takes the apple-touch-icon, Android the manifest, and both change together.
+  function applyChannel(channel) {
+    const nightly = channel === 'nightly';
+    document.body.classList.toggle('nightly', nightly);
+    const base = nightly ? '/icons/nightly' : '/icons';
+    const icon = document.getElementById('app-icon');
+    const favicon = document.getElementById('app-favicon');
+    const manifest = document.getElementById('app-manifest');
+    if (icon) icon.href = `${base}/icon-180.png`;
+    if (favicon) favicon.href = `${base}/icon-192.png`;
+    if (manifest) manifest.href = nightly ? '/manifest-nightly.webmanifest' : '/manifest.webmanifest';
+  }
+
   function applyTheme(theme) {
     const chosen = theme === 'light' ? 'light' : 'dark';
     document.body.dataset.theme = chosen;
@@ -154,7 +168,7 @@
       }
       saveToken(result.body.token);
       try { localStorage.setItem(DEVICE_KEY, result.body.device || deviceName()); } catch (error) { /* private */ }
-      if (result.body.channel === 'nightly') document.body.classList.add('nightly');
+      applyChannel(result.body.channel);
       await open();
     } catch (error) {
       message('Could not reach the PC. Check that both devices are on the same network, then try again.');
@@ -447,7 +461,7 @@
         return;
       }
       if (result.ok && result.body) {
-        if (result.body.channel === 'nightly') document.body.classList.add('nightly');
+        applyChannel(result.body.channel);
         state.apps = result.body.apps || [];
         renderApps();
       }

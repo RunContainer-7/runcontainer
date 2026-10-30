@@ -82,6 +82,7 @@ const { detectLogSignals } = require('../src/ai/features');
 const { createExperienceStore } = require('../src/ai/experiences');
 const { extractIconToFile } = require('../src/services/exeIcon');
 const { createCompanionServer } = require('../src/services/companionServer');
+const { createTailscaleFunnel } = require('../src/services/tailscaleFunnel');
 const { buildCompanionInputProgram, commandFor } = require('./companion-input');
 const { planSetupRun, findInstalledCandidates } = require('../src/services/setupInstall');
 const repairVerification = require('../src/utils/repairVerifier');
@@ -3951,7 +3952,22 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('before-quit', () => {
+let quittingAfterCompanionWeb = false;
+
+app.on('before-quit', (event) => {
+  // A funnel outlives the window unless it is closed first, so quitting waits for that
+  // one command. The guard stops the second quit from waiting again.
+  if (!quittingAfterCompanionWeb && loadCompanionState().webEnabled) {
+    quittingAfterCompanionWeb = true;
+    event.preventDefault();
+    Promise.resolve(tailscaleFunnel.disable())
+      .catch(() => null)
+      .then(() => {
+        saveCompanionState({ webEnabled: false, webUrl: '', webError: '' });
+        app.quit();
+      });
+    return;
+  }
   // Closing RunContainer closes the companion's server and the small input helper, so
   // nothing of the remote session outlives the window it belonged to.
   stopCompanionInput();
@@ -5575,6 +5591,11 @@ let pendingCaptureSource = null;
 let companionInputProcess = null;
 let companionInputStarting = null;
 const companionInputQueue = [];
+const tailscaleFunnel = createTailscaleFunnel();
+// The Tailscale CLI is only asked on demand: spawning a process on every status
+// refresh would be wasteful, and the answer rarely changes.
+let companionWebProbe = { installed: null, signedIn: false, error: '' };
+let companionWebBusy = false;
 
 function loadCompanionState() {
   try {
@@ -5583,9 +5604,12 @@ function loadCompanionState() {
       enabled: parsed?.enabled === true,
       port: Number.isInteger(parsed?.port) ? parsed.port : COMPANION_DEFAULT_PORT,
       tokens: Array.isArray(parsed?.tokens) ? parsed.tokens.filter((entry) => entry?.hash) : [],
+      webEnabled: parsed?.webEnabled === true,
+      webUrl: typeof parsed?.webUrl === 'string' ? parsed.webUrl : '',
+      webError: typeof parsed?.webError === 'string' ? parsed.webError : '',
     };
   } catch (error) {
-    return { enabled: false, port: COMPANION_DEFAULT_PORT, tokens: [] };
+    return { enabled: false, port: COMPANION_DEFAULT_PORT, tokens: [], webEnabled: false, webUrl: '', webError: '' };
   }
 }
 
@@ -5631,6 +5655,24 @@ function companionDevices() {
   return loadCompanionState().tokens.map((entry) => ({ device: entry.device || 'iPhone', createdAt: entry.createdAt }));
 }
 
+async function refreshCompanionWebProbe() {
+  if (process.platform !== 'win32') {
+    companionWebProbe = { installed: false, signedIn: false, error: 'The companion needs RunContainer on Windows.' };
+    return companionWebProbe;
+  }
+  try {
+    const status = await tailscaleFunnel.status();
+    companionWebProbe = {
+      installed: status.installed,
+      signedIn: status.signedIn,
+      error: status.error,
+    };
+  } catch (error) {
+    companionWebProbe = { installed: true, signedIn: false, error: error.message };
+  }
+  return companionWebProbe;
+}
+
 function companionStatus() {
   const stored = loadCompanionState();
   const code = companionServer?.currentPairingCode() || null;
@@ -5645,6 +5687,13 @@ function companionStatus() {
     devices: companionDevices(),
     connected: companionServer?.socketCount() || 0,
     assets: Boolean(companionAssetDir()),
+    web: {
+      installed: companionWebProbe.installed,
+      signedIn: companionWebProbe.signedIn,
+      enabled: stored.webEnabled === true,
+      url: stored.webUrl || '',
+      error: stored.webError || companionWebProbe.error || '',
+    },
   };
 }
 
@@ -5693,10 +5742,36 @@ async function startCompanionServer() {
   companionServer = server;
   saveCompanionState({ enabled: true, port });
   emitCompanionStatus();
+  // The funnel points at a port, and the port can change when another program took the
+  // saved one, so it is re-opened against the port the server actually got.
+  if (stored.webEnabled) {
+    tailscaleFunnel
+      .enable(port)
+      .then((result) => {
+        saveCompanionState(
+          result.ok
+            ? { webEnabled: true, webUrl: result.url, webError: '' }
+            : { webEnabled: false, webUrl: '', webError: result.error },
+        );
+        emitCompanionStatus();
+      })
+      .catch((error) => {
+        saveCompanionState({ webEnabled: false, webUrl: '', webError: error.message });
+        emitCompanionStatus();
+      });
+  }
   return { ok: true, status: companionStatus() };
 }
 
 async function stopCompanionServer() {
+  if (loadCompanionState().webEnabled) {
+    try {
+      await tailscaleFunnel.disable();
+    } catch (error) {
+      // Turning the server off must not be blocked by Tailscale.
+    }
+    saveCompanionState({ webEnabled: false, webUrl: '', webError: '' });
+  }
   stopCompanionInput();
   stopCompanionCapture();
   if (companionServer) {
@@ -5877,7 +5952,10 @@ function stopCompanionInput() {
   }
 }
 
-ipcMain.handle('companion-status', async () => companionStatus());
+ipcMain.handle('companion-status', async () => {
+  await refreshCompanionWebProbe();
+  return companionStatus();
+});
 
 ipcMain.handle('companion-enable', async () => {
   const result = await startCompanionServer();
@@ -5888,6 +5966,42 @@ ipcMain.handle('companion-enable', async () => {
 ipcMain.handle('companion-disable', async () => {
   await stopCompanionServer();
   return companionStatus();
+});
+
+// Funnel is only opened when asked for: it puts the companion on the public internet,
+// protected by the pairing code. The local address keeps working either way.
+ipcMain.handle('companion-enable-web', async () => {
+  if (!companionServer?.listening) {
+    return { ...companionStatus(), error: 'Turn the companion on first, then open a web address.' };
+  }
+  if (companionWebBusy) return { ...companionStatus(), error: 'A web address is already being opened.' };
+  companionWebBusy = true;
+  try {
+    const result = await tailscaleFunnel.enable(companionServer.port);
+    if (!result.ok) {
+      saveCompanionState({ webError: result.error });
+      return { ...companionStatus(), error: result.error };
+    }
+    saveCompanionState({ webEnabled: true, webUrl: result.url, webError: '' });
+    await refreshCompanionWebProbe();
+    emitCompanionStatus();
+    return companionStatus();
+  } finally {
+    companionWebBusy = false;
+  }
+});
+
+ipcMain.handle('companion-disable-web', async () => {
+  if (companionWebBusy) return { ...companionStatus(), error: 'A web address is already being changed.' };
+  companionWebBusy = true;
+  try {
+    const result = await tailscaleFunnel.disable();
+    saveCompanionState({ webEnabled: false, webUrl: '', webError: result.ok ? '' : result.error });
+    emitCompanionStatus();
+    return result.ok ? companionStatus() : { ...companionStatus(), error: result.error };
+  } finally {
+    companionWebBusy = false;
+  }
 });
 
 // A new code invalidates the previous one, so seeing an old code on a photo is useless.
