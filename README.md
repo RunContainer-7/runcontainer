@@ -42,6 +42,10 @@ RunContainer tries to show the app in a separate RunContainer window. Depending 
 - **Info** — version, links and support.
 - **Updates** — what changed and the update button.
 
+## From an iPhone
+
+The iPhone companion shows an app that is already running on the PC. Scan the QR code in Settings with the phone camera, then **Share → Add to Home Screen**; it opens like an app, with no port to type. With Tailscale signed in, Settings can open a real `https://…ts.net` address through Funnel, so it also works away from home. Apps keep running on the PC, and pairing is required.
+
 ## Keeping apps apart
 
 Each app runs in its own managed environment: its own folder, its own saved data, its own process tree with optional memory and CPU limits. Pressing **Duplicate** makes a second copy with separate data. **Delete** removes the app and its folder.
