@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.7-nightly.1',
+    date: '2026-10-30',
+    title: 'A real web address for the iPhone companion',
+    changes: [
+      'Nightly gets 0.9.7 first: when Tailscale is signed in on this PC, Settings can open a https://…ts.net address for the companion. It works away from home, has no port, and becomes the address in the QR code and Copy link.',
+      'The address is opened only when asked for, and closes when the companion is turned off or RunContainer quits. Pairing is still required, and the page is public while it is on.',
+      'The home-screen icon is now a full square with the blue Nightly accent, so iOS no longer fills its corners with black. Developer mode and Virtualise stay Nightly-only.',
+    ],
+  },
+  {
     version: '0.9.6-nightly.1',
     date: '2026-10-30',
     title: 'Add the iPhone companion from a scan',
