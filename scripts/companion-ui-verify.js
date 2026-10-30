@@ -225,7 +225,10 @@ async function main() {
     if (!/Copy link instead/i.test(card)) {
       throw new Error('the card has no way to copy the link when a camera is not available');
     }
-    notes.push('the card leads with a scan, then the copy fallback, Home Screen steps and the code');
+    if (!/Web address/i.test(card)) {
+      throw new Error('the card does not offer a web address');
+    }
+    notes.push('the card leads with a scan, then the copy fallback, a web address, Home Screen steps and the code');
 
     await evaluate(client, `(async () => {
       const button = [...document.querySelectorAll('button')]
