@@ -10,12 +10,12 @@ If you know LiveContainer on iOS, this is the same idea for Windows. No account,
 
 Choose an edition from the [downloads page](https://runcontainer-7.github.io/9-runcontainer/downloads) or [GitHub Releases](https://github.com/RunContainer-7/runcontainer/releases):
 
-- **Stable** (green): recommended for everyday use. New installers are named `RunContainer-Stable-Setup-<version>.exe`. Releases up to 0.9.0 used `RunContainer-Setup-<version>.exe`; 0.9.1 also publishes that old name as an identical compatibility copy so existing in-app updaters keep finding the release.
+- **Stable** (green): recommended for everyday use. New installers are named `RunContainer-Stable-Setup-<version>.exe`; older releases use `RunContainer-Setup-<version>.exe`.
 - **Nightly** (blue): early access to experimental features, including developer mode and Virtualise. Nightly may be buggy. Its installer is `RunContainer-Nightly-Setup-<version>.exe`.
 
 - Windows 10 or 11, 64-bit.
 - No administrator rights needed for RunContainer itself. Some apps and installers will still ask for permission, and that prompt comes from Windows.
-- Published installers are unsigned. A self-signing step for future Stable releases is prepared locally; Nightly remains unsigned. Windows may warn in either case because self-signed certificates are not publicly trusted. Only run an installer you downloaded from the links above.
+- Starting with 0.9.2, Stable installers are self-signed; older Stable releases and Nightly installers are unsigned. Windows may warn in either case because self-signed certificates are not publicly trusted. Only run an installer you downloaded from the links above.
 
 Already installed? When a new version in your channel is available, the app shows an **Update…** notice.
 

@@ -4,6 +4,15 @@
 
 export const UPDATES = [
   {
+    version: '0.9.2',
+    date: '2026-10-30',
+    title: 'Stable installer signing',
+    changes: [
+      'The Stable installer is self-signed. Windows does not trust the self-signed certificate by default and may still warn; Nightly installers remain unsigned.',
+      'The Updates feed keeps older release notes collapsed.',
+    ],
+  },
+  {
     version: '0.9.1',
     date: '2026-10-29',
     title: 'A simpler Stable edition',
