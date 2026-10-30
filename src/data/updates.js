@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.7',
+    date: '2026-10-30',
+    title: 'A real web address for the iPhone companion',
+    changes: [
+      'When Tailscale is signed in on this PC, Settings can open a https://…ts.net address for the companion. It works away from home, has no port, and becomes the address in the QR code and Copy link.',
+      'The address is opened only when asked for, and closes when the companion is turned off or RunContainer quits. Pairing is still required, and the page is public while it is on.',
+      'The home-screen icon is now a full square in the edition’s colour, so iOS no longer fills its corners with black. Nightly has a blue icon.',
+    ],
+  },
+  {
     version: '0.9.6',
     date: '2026-10-30',
     title: 'Add the iPhone companion from a scan',
