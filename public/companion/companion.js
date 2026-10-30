@@ -65,8 +65,10 @@
     const icon = document.getElementById('app-icon');
     const favicon = document.getElementById('app-favicon');
     const manifest = document.getElementById('app-manifest');
+    const mark = document.getElementById('app-mark');
     if (icon) icon.href = `${base}/icon-180.png`;
     if (favicon) favicon.href = `${base}/icon-192.png`;
+    if (mark) mark.src = `${base}/icon-192.png`;
     if (manifest) manifest.href = nightly ? '/manifest-nightly.webmanifest' : '/manifest.webmanifest';
   }
 
