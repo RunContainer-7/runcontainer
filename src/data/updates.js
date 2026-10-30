@@ -4,6 +4,14 @@
 
 export const UPDATES = [
   {
+    version: '0.9.8-nightly.1',
+    date: '2026-10-30',
+    title: 'The Nightly mark follows the edition',
+    changes: [
+      'The pairing screen now shows the blue Nightly logo and the blue home-screen icon, instead of borrowing the green Stable mark.',
+    ],
+  },
+  {
     version: '0.9.7-nightly.1',
     date: '2026-10-30',
     title: 'A real web address for the iPhone companion',
