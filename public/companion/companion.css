@@ -58,6 +58,73 @@ body.nightly {
   --line-strong: rgba(74, 163, 255, 0.45);
 }
 
+/* Daylight. The dark surface reads as flat grey on a bright screen, so the light theme
+   is a real palette rather than a lighter shade of the same one: pale mint paper, dark
+   ink, and the same teal accent for anything actionable. */
+body[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f1f6f5;
+  --bg-soft: #ffffff;
+  --panel: rgba(255, 255, 255, 0.92);
+  --line: rgba(11, 70, 59, 0.16);
+  --line-strong: rgba(11, 70, 59, 0.42);
+  --accent: #0f8c6f;
+  --accent-soft: rgba(15, 140, 111, 0.12);
+  --accent-text: #073c31;
+  --text: #0c1a17;
+  --muted: #4d625d;
+  --danger: #b42318;
+  background:
+    radial-gradient(1100px 620px at 78% -8%, rgba(15, 140, 111, 0.12), transparent 62%),
+    radial-gradient(820px 520px at -12% 108%, rgba(38, 120, 255, 0.08), transparent 60%),
+    linear-gradient(180deg, #f8fbfa, #eaf2f0 62%);
+}
+body[data-theme="light"].nightly {
+  --accent: #1f6fe0;
+  --accent-soft: rgba(31, 111, 224, 0.1);
+  --accent-text: #0b2f63;
+  --line: rgba(20, 60, 120, 0.16);
+  --line-strong: rgba(20, 60, 120, 0.4);
+}
+
+body[data-theme="light"] .halo {
+  background-image:
+    linear-gradient(rgba(11, 70, 59, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(11, 70, 59, 0.07) 1px, transparent 1px);
+}
+
+body[data-theme="light"] input {
+  background: #ffffff;
+  color: var(--text);
+}
+
+body[data-theme="light"] .pill,
+body[data-theme="light"] .app-card,
+body[data-theme="light"] .keys button {
+  background: #ffffff;
+}
+
+body[data-theme="light"] .app-card {
+  background: linear-gradient(180deg, #ffffff, #f4f9f8);
+}
+
+body[data-theme="light"] .stage {
+  background: radial-gradient(700px 420px at 50% 0%, rgba(15, 140, 111, 0.08), transparent 70%), #ffffff;
+}
+
+body[data-theme="light"] .stage-note,
+body[data-theme="light"] .empty {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+body[data-theme="light"] .primary {
+  color: #ffffff;
+}
+
+body[data-theme="light"] .mark {
+  box-shadow: 0 10px 24px -16px rgba(11, 70, 59, 0.5);
+}
+
 .screen {
   position: relative;
   min-height: 100%;

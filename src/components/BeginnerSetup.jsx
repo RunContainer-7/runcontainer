@@ -92,6 +92,7 @@ function stepsFor(version) {
       bullets: [
         "Which isolation this PC can use, where each app's files live, and where the logs are written.",
         "Choose your appearance and how supported installers run.",
+        "The iPhone companion: turn it on to use an app that is running here from an iPhone on the same Wi-Fi.",
         "RC-Brain, RunContainer's own on-device model, the incidents it diagnosed, and the switch that turns monitoring off.",
       ],
     },
@@ -134,7 +135,7 @@ function stepsFor(version) {
         "The documentation covers every tab, the isolation model and the known limitations.",
         "The Discord server is the fastest place to ask a question or report a problem.",
         "The YouTube channel has videos on getting started.",
-        "If it is useful to you: subscribe to the channel and join the Discord. That is what keeps it going.",
+        "If it is useful to you: star the repository on GitHub, subscribe to the channel and join the Discord. That is what keeps it going.",
       ],
       links: [
         { label: "GitHub", url: GH_URL },

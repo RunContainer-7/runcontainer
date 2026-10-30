@@ -177,6 +177,7 @@ export default function ContainerManager() {
   // code are read from the main process, never guessed by this panel.
   const [companion, setCompanion] = useState(null);
   const [companionBusy, setCompanionBusy] = useState(false);
+  const [companionCopied, setCompanionCopied] = useState(false);
   // Ticks only while something is being set up, so a long setup is visibly still
   // working instead of looking like an app that never appears. It is declared here,
   // in the component that renders the app list and the setup line, because that is
@@ -262,6 +263,29 @@ export default function ContainerManager() {
       if (status) setCompanion(status);
     } catch (error) { /* see toggleCompanion */ } finally {
       setCompanionBusy(false);
+    }
+  }
+
+  // The address is the one thing a person has to type on the phone, so copying it has
+  // to work even where the clipboard API is unavailable.
+  async function copyCompanionAddress() {
+    const address = companion?.urls?.[0]?.url || (companion?.port ? `http://localhost:${companion.port}/` : '');
+    if (!address) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(address);
+      } else {
+        const area = document.createElement('textarea');
+        area.value = address;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      }
+      setCompanionCopied(true);
+      setTimeout(() => setCompanionCopied(false), 1800);
+    } catch (error) {
+      // A refused clipboard leaves the address on screen to be read and typed.
     }
   }
 
@@ -1450,55 +1474,58 @@ export default function ContainerManager() {
           <h3>Settings</h3>
           <p>Nothing to set up. RunContainer decides how to keep each app apart from the rest of your PC.</p>
           <div className="profile-list">
-            <div className={`profile-card ${theme === 'dark' ? 'active' : ''}`}>
-              <strong>Appearance</strong>
-              <span>
-                {theme === 'dark'
-                  ? `Dark. The graphite and ${isNightly ? 'blue' : 'teal'} interface.`
-                  : 'Light. The same interface on a pale, high-contrast surface for daylight and projectors.'}
-              </span>
-              <span className="muted">
-                This changes colour only. No app, environment or file is affected, and the choice is remembered.
-              </span>
-              <div className="detail-actions">
-                <button className={`settings-button ${theme === 'dark' ? '' : 'ghost'}`} onClick={() => chooseTheme('dark')}>Dark</button>
-                <button className={`settings-button ${theme === 'light' ? '' : 'ghost'}`} onClick={() => chooseTheme('light')}>Light</button>
-              </div>
-            </div>
             <div className={`profile-card companion-card ${companion?.running ? 'companion-on' : ''}`}>
-              <strong>iPhone companion</strong>
-              <span>
-                {companion?.running
-                  ? 'On. A paired iPhone can see and control an app that is already running here, one window at a time. The app itself still runs on this PC.'
-                  : 'Off. Turn this on to use an app from an iPhone. The phone shows the app that is running on this PC; nothing is installed or run on the phone.'}
-              </span>
+              <div className="companion-heading">
+                <strong>iPhone companion</strong>
+                <span className="companion-pill">Experimental</span>
+              </div>
               {companion?.running ? (
                 <>
-                  <span className="companion-address">
-                    {companion.urls?.length
-                      ? companion.urls.map((entry) => <code key={entry.url}>{entry.url}</code>)
-                      : <code>http://localhost:{companion.port}/</code>}
+                  <span>
+                    On. Use an app that is running on this PC from an iPhone. The app keeps running here; the phone is
+                    its screen and keyboard.
                   </span>
-                  <span className="companion-code-label">Pairing code</span>
-                  <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
+                  <ol className="companion-steps">
+                    <li>
+                      Open this address in <strong>Safari</strong> on the iPhone:
+                      <span className="companion-address">
+                        {companion.urls?.length
+                          ? companion.urls.map((entry) => <code key={entry.url}>{entry.url}</code>)
+                          : <code>http://localhost:{companion.port}/</code>}
+                      </span>
+                      <button className="settings-button ghost" type="button" onClick={copyCompanionAddress}>
+                        {companionCopied ? 'Copied' : 'Copy address'}
+                      </button>
+                    </li>
+                    <li>Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>. It then opens like an app.</li>
+                    <li>
+                      Type this code on the phone:
+                      <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
+                    </li>
+                  </ol>
                   <span className="muted">
-                    Open the address in Safari on the iPhone, then <strong>Share → Add to Home Screen</strong> so it opens
-                    like an app. The code works once and expires after five minutes.
+                    The code works once and expires after five minutes. The phone keeps its place until you forget it.
                     {companion.connected > 0 ? ` ${companion.connected} phone${companion.connected === 1 ? '' : 's'} connected now.` : ''}
                   </span>
                   <span className="muted">
                     {companion.devices?.length
                       ? `Paired: ${companion.devices.map((entry) => entry.device).join(', ')}.`
                       : 'No phone is paired yet.'}
-                    {' '}This PC must be on, and the phone must be able to reach it: the same Wi-Fi, or a private network
-                    such as Tailscale when you are away. It is not a way to run apps on the phone itself.
+                    {' '}The PC must stay on, and the phone must reach it: the same Wi-Fi, or a private network such as
+                    Tailscale when you are away. An address beginning with 100. is that private network.
                   </span>
                 </>
               ) : (
-                <span className="muted">
-                  Turn it on, then open the address it shows on the iPhone. Use the same Wi-Fi, or a private network such as
-                  Tailscale when you are away from home. The companion is experimental.
-                </span>
+                <>
+                  <span>
+                    Off. Turn it on to use an app from an iPhone: the phone shows an app that is already running here and
+                    sends your taps and typing to it. Nothing is installed on the phone.
+                  </span>
+                  <span className="muted">
+                    You need the PC switched on and the phone on the same Wi-Fi, or on a private network such as Tailscale
+                    when you are away. It is experimental, and it shows one app window rather than your screen.
+                  </span>
+                </>
               )}
               <div className="detail-actions">
                 <button
@@ -1518,6 +1545,21 @@ export default function ContainerManager() {
                     Forget paired phones
                   </button>
                 )}
+              </div>
+            </div>
+            <div className={`profile-card ${theme === 'dark' ? 'active' : ''}`}>
+              <strong>Appearance</strong>
+              <span>
+                {theme === 'dark'
+                  ? `Dark. The graphite and ${isNightly ? 'blue' : 'teal'} interface.`
+                  : 'Light. The same interface on a pale, high-contrast surface for daylight and projectors.'}
+              </span>
+              <span className="muted">
+                This changes colour only. No app, environment or file is affected, and the choice is remembered.
+              </span>
+              <div className="detail-actions">
+                <button className={`settings-button ${theme === 'dark' ? '' : 'ghost'}`} onClick={() => chooseTheme('dark')}>Dark</button>
+                <button className={`settings-button ${theme === 'light' ? '' : 'ghost'}`} onClick={() => chooseTheme('light')}>Light</button>
               </div>
             </div>
             {isNightly && <div className={`profile-card ${developerMode ? 'active' : ''}`}>

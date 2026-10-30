@@ -9,6 +9,7 @@
 
   const TOKEN_KEY = 'rc-companion-token';
   const DEVICE_KEY = 'rc-companion-device';
+  const THEME_KEY = 'rc-companion-theme';
 
   const screens = {
     pair: document.getElementById('screen-pair'),
@@ -51,6 +52,34 @@
     for (const [key, element] of Object.entries(screens)) {
       element.hidden = key !== name;
     }
+  }
+
+  // The interface follows the phone until it is told otherwise, then it remembers. The
+  // button shows the theme it switches to, not the one in use.
+  function applyTheme(theme) {
+    const chosen = theme === 'light' ? 'light' : 'dark';
+    document.body.dataset.theme = chosen;
+    for (const button of document.querySelectorAll('.theme-toggle')) {
+      button.textContent = chosen === 'dark' ? '☀' : '☾';
+      button.setAttribute('aria-label', chosen === 'dark' ? 'Switch to the light interface' : 'Switch to the dark interface');
+    }
+  }
+
+  function preferredTheme() {
+    try {
+      const stored = localStorage.getItem(THEME_KEY);
+      if (stored === 'light' || stored === 'dark') return stored;
+    } catch (error) { /* private mode */ }
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+    } catch (error) { /* older browser */ }
+    return 'dark';
+  }
+
+  function toggleTheme() {
+    const next = document.body.dataset.theme === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (error) { /* private mode */ }
   }
 
   function setPill(element, text, tone) {
@@ -490,6 +519,11 @@
   });
 
   // ------------------------------------------------------------------- start ---
+
+  applyTheme(preferredTheme());
+  for (const button of document.querySelectorAll('.theme-toggle')) {
+    button.addEventListener('click', toggleTheme);
+  }
 
   pairDevice.value = deviceName();
   if (currentToken()) {

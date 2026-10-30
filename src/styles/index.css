@@ -962,13 +962,37 @@ body {
     word-break: break-all;
 }
 
-.companion-code-label {
-    margin-top: 4px;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: rgba(232, 238, 252, 0.62);
+.companion-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
+
+.companion-pill {
+    padding: 2px 8px;
+    border: 1px solid rgba(79, 216, 180, 0.35);
+    border-radius: 999px;
+    background: rgba(63, 207, 170, 0.1);
+    color: #bdf3e5;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+/* The three things a person does, in order. A paragraph made people ask what to do
+   next; a list cannot be read out of order. */
+.companion-steps {
+    margin: 6px 0 4px;
+    padding-left: 20px;
+    display: grid;
+    gap: 8px;
+    font-size: 13.5px;
+}
+.companion-steps li { padding-left: 2px; }
+.companion-steps .companion-address { margin-top: 6px; }
+.companion-steps .settings-button { margin-top: 6px; }
+.companion-steps .companion-code { display: block; margin-top: 4px; }
 
 .companion-code {
     font-size: 27px;

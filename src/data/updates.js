@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.5',
+    date: '2026-10-30',
+    title: 'Find the iPhone companion, and read it in your theme',
+    changes: [
+      'The iPhone companion card is now the first thing on Settings and says exactly what to do next: the address with a Copy address button, Add to Home Screen, then the pairing code.',
+      'The companion’s web app has a light and dark switch, so it is no longer only a grey surface. It follows the phone until you choose, then remembers that choice.',
+      'The first-run tour names the iPhone companion under Settings, and the support step asks for a GitHub star alongside the channel and Discord.',
+    ],
+  },
+  {
     version: '0.9.4',
     date: '2026-10-30',
     title: 'Use an app from an iPhone',
