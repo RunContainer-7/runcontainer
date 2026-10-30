@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.6',
+    date: '2026-10-30',
+    title: 'Add the iPhone companion from a scan',
+    changes: [
+      'Settings now shows a QR code for the companion. Point the iPhone camera at it, open the link, then Share → Add to Home Screen: there is no address or port to type.',
+      'Copy link instead copies the same address for when a camera is not handy, and the full address list moved under a details row so the card stays short.',
+      'On the phone, the Home Screen icon opens the real interface directly. The QR code opens the same page in Safari so it can be installed.',
+    ],
+  },
+  {
     version: '0.9.5',
     date: '2026-10-30',
     title: 'Find the iPhone companion, and read it in your theme',
