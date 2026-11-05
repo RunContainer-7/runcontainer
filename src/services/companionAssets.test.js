@@ -67,6 +67,8 @@ describe('companion appearance', () => {
     const html = fs.readFileSync(path.join(COMPANION, 'index.html'), 'utf8');
     expect(html).toMatch(/apple-touch-icon[^>]+icon-180\.png\?v=/);
     expect(html).toMatch(/rel="icon"[^>]+icon-192\.png\?v=/);
+    expect(html).toMatch(/href="\/companion\.css\?v=/);
+    expect(html).toMatch(/src="\/companion\.js\?v=/);
     const script = fs.readFileSync(path.join(COMPANION, 'companion.js'), 'utf8');
     expect(script).toMatch(/icon-180\.png\?v=\$\{ICON_VERSION\}/);
     for (const manifest of ['manifest.webmanifest', 'manifest-nightly.webmanifest']) {
@@ -77,6 +79,12 @@ describe('companion appearance', () => {
   it('has no green left in the companion page styles', () => {
     const css = fs.readFileSync(path.join(COMPANION, 'companion.css'), 'utf8');
     expect(css).not.toMatch(/3fcfaa|2bb390|0f8c6f|4fd8b4|120,\s*200,\s*180|140,\s*233,\s*208/i);
+  });
+
+  it('keeps the install sheet title rule off the inline <strong>s in its steps', () => {
+    const css = fs.readFileSync(path.join(COMPANION, 'companion.css'), 'utf8');
+    expect(css).toContain('.install-card > strong');
+    expect(css).not.toMatch(/^\.install-card strong \{/m);
   });
 
   it('keeps the last app list so the shortcut is not empty when the PC is off', () => {

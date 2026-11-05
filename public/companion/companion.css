@@ -442,10 +442,12 @@ body.nightly .primary {
   padding-bottom: calc(22px + var(--safe-bottom));
   border: 1px solid var(--line);
   border-radius: 22px;
-  background: var(--panel);
+  /* Opaque, so the pairing form does not show through the sheet. */
+  background: var(--bg-soft);
   box-shadow: 0 30px 80px -50px #000;
 }
-.install-card strong { display: block; margin-bottom: 10px; font-size: 18px; }
+/* Only the sheet's own title; the steps also use <strong> and must stay inline. */
+.install-card > strong { display: block; margin-bottom: 10px; font-size: 18px; }
 .install-card .steps { margin-bottom: 16px; }
 
 /* Shown while the PC is unreachable: the list is last-known, not live. */
