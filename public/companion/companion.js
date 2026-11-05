@@ -10,6 +10,10 @@
   const TOKEN_KEY = 'rc-companion-token';
   const DEVICE_KEY = 'rc-companion-device';
   const THEME_KEY = 'rc-companion-theme';
+  const APPS_KEY = 'rc-companion-apps';
+  // iOS keeps a home-screen icon until its URL changes, so the icon URLs carry a
+  // version. Bumping it is how a shortcut that already exists picks up a new icon.
+  const ICON_VERSION = '2';
 
   const screens = {
     pair: document.getElementById('screen-pair'),
@@ -45,7 +49,7 @@
     quality: 'auto',
     retry: 0,
     retryTimer: null,
-    retry: 0,
+    offline: false,
   };
 
   function show(name) {
@@ -66,9 +70,9 @@
     const favicon = document.getElementById('app-favicon');
     const manifest = document.getElementById('app-manifest');
     const mark = document.getElementById('app-mark');
-    if (icon) icon.href = `${base}/icon-180.png`;
-    if (favicon) favicon.href = `${base}/icon-192.png`;
-    if (mark) mark.src = `${base}/icon-192.png`;
+    if (icon) icon.href = `${base}/icon-180.png?v=${ICON_VERSION}`;
+    if (favicon) favicon.href = `${base}/icon-192.png?v=${ICON_VERSION}`;
+    if (mark) mark.src = `${base}/icon-192.png?v=${ICON_VERSION}`;
     if (manifest) manifest.href = nightly ? '/manifest-nightly.webmanifest' : '/manifest.webmanifest';
   }
 
@@ -221,6 +225,7 @@
       state.connected = true;
       state.retry = 0;
       setPill(connection, 'Connected', 'live');
+      setOffline(false);
     });
 
     socket.addEventListener('message', (event) => {
@@ -236,6 +241,7 @@
     socket.addEventListener('close', () => {
       state.connected = false;
       if (state.socket === socket) state.socket = null;
+      setOffline(true);
       setPill(connection, 'Reconnecting…', 'bad');
       if (screens.pair.hidden && !screens.apps.hidden) scheduleReconnect();
       else if (screens.view.hidden) scheduleReconnect();
@@ -260,6 +266,8 @@
   function handleMessage(payload) {
     if (payload.type === 'hello' || payload.type === 'apps') {
       state.apps = Array.isArray(payload.apps) ? payload.apps : [];
+      saveAppsCache(state.apps);
+      setOffline(false);
       renderApps();
       return;
     }
@@ -383,25 +391,54 @@
     return (name || '?').trim().charAt(0).toUpperCase() || '?';
   }
 
+  // The PC can be off, asleep, or simply not running. The last list it sent is kept so a
+  // shortcut opened on the home screen shows what this PC has instead of an empty page.
+  function saveAppsCache(apps) {
+    try {
+      localStorage.setItem(APPS_KEY, JSON.stringify({ at: Date.now(), apps: Array.isArray(apps) ? apps : [] }));
+    } catch (error) { /* private mode */ }
+  }
+
+  function readAppsCache() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(APPS_KEY) || 'null');
+      return Array.isArray(parsed?.apps) ? parsed.apps : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function setOffline(offline) {
+    const next = Boolean(offline);
+    if (state.offline === next) return;
+    state.offline = next;
+    document.body.classList.toggle('offline', next);
+    renderApps();
+  }
+
   function renderApps() {
     appList.textContent = '';
     const apps = state.apps.filter((app) => app && app.id);
     if (apps.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'empty';
-      empty.textContent = 'No apps yet. Add one on the PC, then start it there.';
+      empty.textContent = state.offline
+        ? 'This PC is not reachable. Open RunContainer on the PC; it keeps running in the notification area while the companion is on.'
+        : 'No apps yet. Add one on the PC, then start it there.';
       appList.appendChild(empty);
       appsHint.hidden = true;
       return;
     }
     appsHint.hidden = false;
-    appsHint.textContent = 'Apps that are running can be opened here.';
+    appsHint.textContent = state.offline
+      ? 'Last known list. Open RunContainer on the PC to use these apps.'
+      : 'Apps that are running can be opened here.';
     for (const app of apps) {
       const item = document.createElement('li');
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'app-card';
-      button.disabled = !app.running;
+      button.disabled = !app.running || state.offline;
 
       const glyph = document.createElement('span');
       glyph.className = 'glyph';
@@ -411,7 +448,9 @@
       const title = document.createElement('strong');
       title.textContent = app.name;
       const status = document.createElement('span');
-      status.textContent = app.running ? 'Running — tap to open' : `${app.status} — start it on the PC`;
+      status.textContent = state.offline
+        ? `${app.status} — PC offline`
+        : app.running ? 'Running — tap to open' : `${app.status} — start it on the PC`;
       meta.append(title, status);
       const chevron = document.createElement('span');
       chevron.className = 'chev';
@@ -465,15 +504,22 @@
       if (result.ok && result.body) {
         applyChannel(result.body.channel);
         state.apps = result.body.apps || [];
+        saveAppsCache(state.apps);
+        setOffline(false);
         renderApps();
       }
     } catch (error) {
+      setOffline(true);
       setPill(connection, 'PC not reachable', 'bad');
     }
   }
 
   async function open() {
     show('apps');
+    // A fresh launch from the home screen has no live list yet, so show the last one the
+    // PC sent while the real state is fetched.
+    if (state.apps.length === 0) state.apps = readAppsCache();
+    renderApps();
     await refresh();
     connectSocket();
   }
@@ -535,6 +581,22 @@
   });
 
   // ------------------------------------------------------------------- start ---
+
+  // First open in a Safari tab: explain Add to Home Screen once. Hidden once the page is
+  // already installed (standalone), and never shown again after it is dismissed.
+  const INSTALL_KEY = 'rc-companion-install-seen';
+  const installTip = document.getElementById('install-tip');
+  const standalone = Boolean(window.navigator.standalone)
+    || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  let seenInstall = false;
+  try { seenInstall = localStorage.getItem(INSTALL_KEY) === '1'; } catch (error) { /* private mode */ }
+  if (installTip && !standalone && !seenInstall) {
+    installTip.hidden = false;
+    document.getElementById('install-dismiss').addEventListener('click', () => {
+      installTip.hidden = true;
+      try { localStorage.setItem(INSTALL_KEY, '1'); } catch (error) { /* private mode */ }
+    });
+  }
 
   applyTheme(preferredTheme());
   for (const button of document.querySelectorAll('.theme-toggle')) {

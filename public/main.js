@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session, desktopCapturer, Tray, Menu, nativeImage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn, spawnSync } = require('child_process');
@@ -3893,6 +3893,79 @@ function createWindow() {
   const showFallback = setTimeout(showWindow, 4000);
   if (showFallback.unref) showFallback.unref();
   mainWindow.webContents.once('did-finish-load', showWindow);
+  // With the companion on, closing the window keeps RunContainer running in the
+  // notification area. The phone's home-screen shortcut points at this PC, so quitting
+  // on close would leave it pointing at nothing. With the companion off, closing quits
+  // exactly as it did before.
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    if (!loadCompanionState().enabled) return;
+    const activeTray = ensureTray();
+    // No tray means no way back to the window, so closing behaves as usual instead.
+    if (!activeTray) return;
+    event.preventDefault();
+    mainWindow.hide();
+    showTrayHintOnce();
+  });
+}
+
+let tray = null;
+let isQuitting = false;
+let trayHintShown = false;
+
+function ensureTray() {
+  if (tray && !tray.isDestroyed()) return tray;
+  const iconPath = path.join(__dirname, PRODUCT_ICON);
+  let image = nativeImage.createFromPath(iconPath);
+  if (image.isEmpty()) image = nativeImage.createEmpty();
+  try {
+    tray = new Tray(image);
+  } catch (error) {
+    appendLog(path.join(app.getPath('userData'), 'runcontainer-error.log'), `The notification-area icon could not be created: ${error.message}`);
+    tray = null;
+    return null;
+  }
+  tray.setToolTip(`${PRODUCT_NAME} is still running so the iPhone companion stays reachable.`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Open ${PRODUCT_NAME}`, click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: 'Stop the companion and quit', click: () => { isQuitting = true; app.quit(); } },
+  ]));
+  tray.on('click', () => showMainWindow());
+  return tray;
+}
+
+function destroyTray() {
+  if (!tray) return;
+  try {
+    if (!tray.isDestroyed()) tray.destroy();
+  } catch (error) {
+    // A tray that is already gone needs no cleanup.
+  }
+  tray = null;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+// Said once, because the window disappearing can otherwise look like a quit.
+function showTrayHintOnce() {
+  if (trayHintShown || !tray) return;
+  trayHintShown = true;
+  try {
+    tray.displayBalloon({
+      title: PRODUCT_NAME,
+      content: 'Still running so the iPhone companion stays reachable. Right-click this icon to quit.',
+    });
+  } catch (error) {
+    // Balloons are not available on every shell; the tooltip already says it.
+  }
 }
 
 app.whenReady().then(() => {
@@ -3955,6 +4028,8 @@ app.whenReady().then(() => {
 let quittingAfterCompanionWeb = false;
 
 app.on('before-quit', (event) => {
+  // The close handler must not turn a real quit into a hide.
+  isQuitting = true;
   // A funnel outlives the window unless it is closed first, so quitting waits for that
   // one command. The guard stops the second quit from waiting again.
   if (!quittingAfterCompanionWeb && loadCompanionState().webEnabled) {
@@ -3971,6 +4046,7 @@ app.on('before-quit', (event) => {
   // Closing RunContainer closes the companion's server and the small input helper, so
   // nothing of the remote session outlives the window it belonged to.
   stopCompanionInput();
+  destroyTray();
   if (companionServer) {
     try { companionServer.stop(); } catch (error) { /* quitting */ }
     companionServer = null;
@@ -3992,6 +4068,7 @@ app.on('window-all-closed', () => {
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  else showMainWindow();
 });
 
 ipcMain.handle('open-file-dialog', async () => {
@@ -5743,6 +5820,8 @@ async function startCompanionServer() {
   if (!server.currentPairingCode()) server.issuePairingCode();
   companionServer = server;
   saveCompanionState({ enabled: true, port });
+  // The companion is on, so the window may be closed without stopping it.
+  ensureTray();
   emitCompanionStatus();
   // The funnel points at a port, and the port can change when another program took the
   // saved one, so it is re-opened against the port the server actually got.
@@ -5781,6 +5860,7 @@ async function stopCompanionServer() {
     companionServer = null;
   }
   saveCompanionState({ enabled: false });
+  destroyTray();
   emitCompanionStatus();
   return { ok: true, status: companionStatus() };
 }
