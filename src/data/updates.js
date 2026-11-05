@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.9.9',
+    date: '2026-11-05',
+    title: 'The iPhone companion stays reachable',
+    changes: [
+      'The companion is grey now: its Home Screen icon, pairing screen and app list match, instead of borrowing the desktop app\u2019s green. The desktop app keeps its own colour.',
+      'Closing RunContainer\u2019s window no longer stops the companion. While it is on, the app keeps running in the notification area, so a Home Screen shortcut still reaches this PC; right-click that icon to reopen the window or to stop the companion and quit.',
+      'If the PC is asleep or RunContainer is not running, the shortcut shows the last list of apps it knew about and says the PC is unreachable, rather than an empty page.',
+      'The companion page, its styles and its icons carry a version now, so an update reaches a shortcut that was added earlier instead of serving the old page.',
+    ],
+  },
+  {
     version: '0.9.8',
     date: '2026-10-30',
     title: 'The companion shows its own mark',
