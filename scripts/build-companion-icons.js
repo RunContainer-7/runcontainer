@@ -16,6 +16,11 @@ const ROOT = path.join(__dirname, '..');
 const COMPANION_DIR = path.join(ROOT, 'public', 'companion');
 const ICON_DIR = path.join(COMPANION_DIR, 'icons');
 const SIZES = [180, 192, 512];
+// The stable home-screen icon is grey so it reads as a neutral bookmark; nightly keeps its blue.
+const STABLE_ACCENT = [0x9a, 0xa3, 0xb0];
+// iOS keeps an installed home-screen icon until its URL changes, so icon URLs carry
+// this version. Bump it whenever the artwork or accent changes.
+const ICON_VERSION = '2';
 
 const DESIGNS = [
   { nightly: false, dir: ICON_DIR, manifest: path.join(COMPANION_DIR, 'manifest.webmanifest') },
@@ -24,7 +29,7 @@ const DESIGNS = [
 
 function manifestFor(design) {
   const icons = SIZES.map((size) => ({
-    src: `${design.nightly ? '/icons/nightly' : '/icons'}/icon-${size}.png`,
+    src: `${design.nightly ? '/icons/nightly' : '/icons'}/icon-${size}.png?v=${ICON_VERSION}`,
     sizes: `${size}x${size}`,
     type: 'image/png',
     purpose: 'any',
@@ -51,7 +56,7 @@ function build() {
       files.push({
         path: filePath,
         label: path.relative(ROOT, filePath).replace(/\\/g, '/'),
-        data: encodePng(size, renderRgba(size, { nightly: design.nightly, opaque: true })),
+        data: encodePng(size, renderRgba(size, { nightly: design.nightly, opaque: true, accent: design.nightly ? undefined : STABLE_ACCENT })),
       });
     }
     files.push({

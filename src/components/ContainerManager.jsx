@@ -44,7 +44,7 @@ function useBootAnimation() {
 // Used only until the main process reports the version from package.json.
 // Shown only for the moment before the main process reports the real version; the
 // test asserts that it tracks package.json, so it must be bumped with the release.
-const APP_VERSION_FALLBACK = "0.9.8";
+const APP_VERSION_FALLBACK = "0.9.9";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -1514,10 +1514,7 @@ export default function ContainerManager() {
               </div>
               {companion?.running ? (
                 <>
-                  <span>
-                    On. The phone shows an app that is running here and sends your taps and typing back to it; nothing is
-                    installed on the phone.
-                  </span>
+                  <span>On. The phone shows an app running here. Nothing is installed on the phone.</span>
                   {companionLinkUrl(companion) ? (
                     <div className="companion-connect">
                       <CompanionQr
@@ -1526,14 +1523,9 @@ export default function ContainerManager() {
                       />
                       <div className="companion-connect-copy">
                         <span className="companion-scan-title">Scan this with the iPhone camera</span>
-                        <ol className="companion-steps">
-                          <li>Point the camera at the code and tap the link it offers.</li>
-                          <li>
-                            Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>. From then on it opens
-                            like an app.
-                          </li>
-                          <li>Type the pairing code below and give the phone a name.</li>
-                        </ol>
+                        <span className="muted">
+                          Then tap <strong>Share</strong> and <strong>Add to Home Screen</strong>. The page also explains this when it opens.
+                        </span>
                         <div className="detail-actions">
                           <button className="settings-button ghost" type="button" onClick={copyCompanionAddress}>
                             {companionCopied ? 'Copied' : 'Copy link instead'}
@@ -1558,8 +1550,7 @@ export default function ContainerManager() {
                           <code>{companion.web.url}</code>
                         </span>
                         <span className="muted">
-                          Works anywhere this PC has internet, through Tailscale Funnel. The pairing code is still
-                          required, and the address is public while it is on.
+                          Works anywhere this PC has internet, through Tailscale Funnel. The pairing code is still required, and the address is public while it is on.
                         </span>
                         <div className="detail-actions">
                           <button
@@ -1619,7 +1610,7 @@ export default function ContainerManager() {
                     <span className="companion-code">{formatCompanionCode(companion.code) || 'Ask for a new code'}</span>
                   </div>
                   <span className="muted">
-                    The code works once and expires after five minutes. The phone keeps its place until you forget it.
+                    The code works once and expires after five minutes.
                     {companion.connected > 0 ? ` ${companion.connected} phone${companion.connected === 1 ? '' : 's'} connected now.` : ''}
                   </span>
                   {companion.urls?.length > 0 && (
@@ -1639,14 +1630,8 @@ export default function ContainerManager() {
                 </>
               ) : (
                 <>
-                  <span>
-                    Off. Turn it on to use an app from an iPhone: the phone shows an app that is already running here and
-                    sends your taps and typing to it. Nothing is installed on the phone.
-                  </span>
-                  <span className="muted">
-                    You need the PC switched on and the phone on the same Wi-Fi, or on a private network such as Tailscale
-                    when you are away. It is experimental, and it shows one app window rather than your screen.
-                  </span>
+                  <span>Off. Turn it on to use a running app from an iPhone. Nothing is installed on the phone.</span>
+                  <span className="muted">Needs the PC on and the phone on the same Wi-Fi.</span>
                 </>
               )}
               <div className="detail-actions">

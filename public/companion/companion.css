@@ -3,11 +3,11 @@
   --bg: #080b10;
   --bg-soft: #0d1219;
   --panel: rgba(18, 24, 33, 0.86);
-  --line: rgba(79, 216, 180, 0.18);
-  --line-strong: rgba(79, 216, 180, 0.42);
-  --accent: #3fcfaa;
-  --accent-soft: rgba(63, 207, 170, 0.14);
-  --accent-text: #d6fbf1;
+  --line: rgba(176, 186, 200, 0.18);
+  --line-strong: rgba(176, 186, 200, 0.42);
+  --accent: #9aa3b0;
+  --accent-soft: rgba(154, 163, 176, 0.14);
+  --accent-text: #e6e9ee;
   --text: #e8eefc;
   --muted: #93a4bf;
   --danger: #ff7d7d;
@@ -27,7 +27,7 @@ html, body { height: 100%; }
 body {
   margin: 0;
   background:
-    radial-gradient(1100px 620px at 78% -8%, rgba(63, 207, 170, 0.13), transparent 62%),
+    radial-gradient(1100px 620px at 78% -8%, rgba(154, 163, 176, 0.10), transparent 62%),
     radial-gradient(820px 520px at -12% 108%, rgba(38, 120, 255, 0.12), transparent 60%),
     linear-gradient(180deg, #0a0f15, #070a0e 62%);
   color: var(--text);
@@ -43,8 +43,8 @@ body {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(120, 200, 180, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(120, 200, 180, 0.05) 1px, transparent 1px);
+    linear-gradient(rgba(176, 186, 200, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(176, 186, 200, 0.05) 1px, transparent 1px);
   background-size: 46px 46px;
   mask-image: radial-gradient(720px 520px at 50% 0%, #000 20%, transparent 78%);
   -webkit-mask-image: radial-gradient(720px 520px at 50% 0%, #000 20%, transparent 78%);
@@ -59,23 +59,23 @@ body.nightly {
 }
 
 /* Daylight. The dark surface reads as flat grey on a bright screen, so the light theme
-   is a real palette rather than a lighter shade of the same one: pale mint paper, dark
-   ink, and the same teal accent for anything actionable. */
+   is a real palette rather than a lighter shade of the same one: neutral paper, dark
+   ink, and the same grey accent for anything actionable. */
 body[data-theme="light"] {
   color-scheme: light;
   --bg: #f1f6f5;
   --bg-soft: #ffffff;
   --panel: rgba(255, 255, 255, 0.92);
-  --line: rgba(11, 70, 59, 0.16);
-  --line-strong: rgba(11, 70, 59, 0.42);
-  --accent: #0f8c6f;
-  --accent-soft: rgba(15, 140, 111, 0.12);
-  --accent-text: #073c31;
+  --line: rgba(55, 65, 81, 0.16);
+  --line-strong: rgba(55, 65, 81, 0.42);
+  --accent: #4b5563;
+  --accent-soft: rgba(75, 85, 99, 0.12);
+  --accent-text: #1f2937;
   --text: #0c1a17;
   --muted: #4d625d;
   --danger: #b42318;
   background:
-    radial-gradient(1100px 620px at 78% -8%, rgba(15, 140, 111, 0.12), transparent 62%),
+    radial-gradient(1100px 620px at 78% -8%, rgba(75, 85, 99, 0.10), transparent 62%),
     radial-gradient(820px 520px at -12% 108%, rgba(38, 120, 255, 0.08), transparent 60%),
     linear-gradient(180deg, #f8fbfa, #eaf2f0 62%);
 }
@@ -89,8 +89,8 @@ body[data-theme="light"].nightly {
 
 body[data-theme="light"] .halo {
   background-image:
-    linear-gradient(rgba(11, 70, 59, 0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(11, 70, 59, 0.07) 1px, transparent 1px);
+    linear-gradient(rgba(55, 65, 81, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(55, 65, 81, 0.07) 1px, transparent 1px);
 }
 
 body[data-theme="light"] input {
@@ -109,7 +109,7 @@ body[data-theme="light"] .app-card {
 }
 
 body[data-theme="light"] .stage {
-  background: radial-gradient(700px 420px at 50% 0%, rgba(15, 140, 111, 0.08), transparent 70%), #ffffff;
+  background: radial-gradient(700px 420px at 50% 0%, rgba(75, 85, 99, 0.08), transparent 70%), #ffffff;
 }
 
 body[data-theme="light"] .stage-note,
@@ -122,7 +122,7 @@ body[data-theme="light"] .primary {
 }
 
 body[data-theme="light"] .mark {
-  box-shadow: 0 10px 24px -16px rgba(11, 70, 59, 0.5);
+  box-shadow: 0 10px 24px -16px rgba(31, 41, 55, 0.45);
 }
 
 .screen {
@@ -214,8 +214,8 @@ button:disabled { opacity: 0.55; }
   width: 100%;
   margin-top: 4px;
   padding: 15px 18px;
-  border: 1px solid rgba(140, 233, 208, 0.5);
-  background: linear-gradient(180deg, rgba(63, 207, 170, 0.92), rgba(40, 166, 136, 0.95));
+  border: 1px solid rgba(214, 219, 227, 0.5);
+  background: linear-gradient(180deg, rgba(154, 163, 176, 0.95), rgba(107, 116, 128, 0.96));
   color: #04120e;
   font-weight: 700;
   font-size: 16.5px;
@@ -309,7 +309,7 @@ body.nightly .primary {
   place-items: center;
   border-radius: 11px;
   border: 1px solid var(--line);
-  background: rgba(63, 207, 170, 0.08);
+  background: rgba(154, 163, 176, 0.08);
   color: var(--accent-text);
   font-weight: 700;
   font-size: 16px;
@@ -360,7 +360,7 @@ body.nightly .primary {
   border: 1px solid var(--line);
   border-radius: 18px;
   background:
-    radial-gradient(700px 420px at 50% 0%, rgba(63, 207, 170, 0.07), transparent 70%),
+    radial-gradient(700px 420px at 50% 0%, rgba(154, 163, 176, 0.07), transparent 70%),
     #05080c;
   overflow: hidden;
   box-shadow: 0 26px 70px -50px #000;
@@ -418,6 +418,41 @@ body.nightly .primary {
   font-size: 16px;
   border-radius: 12px;
 }
+
+@media (min-width: 700px) {
+  .screen { max-width: 980px; margin: 0 auto; }
+}
+
+/* First-open sheet: explains Add to Home Screen once. */
+.install-tip[hidden] { display: none; }
+.install-tip {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.install-card {
+  width: 100%;
+  max-width: 430px;
+  padding: 22px;
+  padding-bottom: calc(22px + var(--safe-bottom));
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  /* Opaque, so the pairing form does not show through the sheet. */
+  background: var(--bg-soft);
+  box-shadow: 0 30px 80px -50px #000;
+}
+/* Only the sheet's own title; the steps also use <strong> and must stay inline. */
+.install-card > strong { display: block; margin-bottom: 10px; font-size: 18px; }
+.install-card .steps { margin-bottom: 16px; }
+
+/* Shown while the PC is unreachable: the list is last-known, not live. */
+body.offline .hint { color: var(--danger); }
+body.offline .app-card:disabled { opacity: 0.72; }
 
 @media (min-width: 700px) {
   .screen { max-width: 980px; margin: 0 auto; }

@@ -73,7 +73,7 @@ function sampleColor(px, py, accent = ACCENT, opaque = false) {
 }
 
 function renderRgba(size, options = {}) {
-  const accent = options.nightly ? NIGHTLY_ACCENT : ACCENT;
+  const accent = options.accent || (options.nightly ? NIGHTLY_ACCENT : ACCENT);
   const opaque = Boolean(options.opaque);
   const data = Buffer.alloc(size * size * 4);
   const scale = UNIT / size;
