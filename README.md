@@ -44,7 +44,7 @@ RunContainer tries to show the app in a separate RunContainer window. Depending 
 
 ## From an iPhone
 
-The iPhone companion shows an app that is already running on the PC. Scan the QR code in Settings with the phone camera, then **Share → Add to Home Screen**; it opens like an app, with no port to type. With Tailscale signed in, Settings can open a real `https://…ts.net` address through Funnel, so it also works away from home. Apps keep running on the PC, and pairing is required.
+The iPhone companion shows an app that is already running on the PC. Scan the QR code in Settings with the phone camera, then **Share → Add to Home Screen**; it opens like an app, with no port to type. With Tailscale signed in, Settings can open a real `https://…ts.net` address through Funnel, so it also works away from home. Apps keep running on the PC, and pairing is required. While the companion is on, closing RunContainer's window leaves it running in the notification area, so the Home Screen shortcut keeps working; right-click that icon to reopen the window or to stop the companion and quit.
 
 ## Keeping apps apart
 
