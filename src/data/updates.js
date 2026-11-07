@@ -4,6 +4,16 @@
 
 export const UPDATES = [
   {
+    version: '0.9.10',
+    date: '2026-11-07',
+    title: 'Tweaks are checked on the app that starts',
+    changes: [
+      'Launch arguments, the memory limit, the CPU limit and the .NET JIT choice are now checked against the app that actually starts, not only against what was saved. The running app reports the limits Windows is enforcing on it, so a tweak that never reached the launch can no longer look applied.',
+      'The documentation screenshots show the current interface again: the Apps, Sources, Tweaks, Profiles, Settings, Updates and Info panels were captured from this build instead of an older one.',
+      'The iPhone companion, window hosting, containment and deletion paths were re-checked end to end on Windows as part of this release; nothing in them had to change.',
+    ],
+  },
+  {
     version: '0.9.9',
     date: '2026-11-05',
     title: 'The iPhone companion stays reachable',

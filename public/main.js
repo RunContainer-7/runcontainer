@@ -16,8 +16,9 @@ const PRODUCT_ICON = IS_NIGHTLY ? 'runcontainer-nightly-icon.ico' : 'runcontaine
 const explicitUserData = app.commandLine.getSwitchValue('user-data-dir');
 if (explicitUserData) app.setPath('userData', path.resolve(explicitUserData));
 else if (IS_NIGHTLY) app.setPath('userData', path.join(app.getPath('appData'), 'RunContainer Nightly'));
-// No Sandboxie backend: RunContainer's only isolation engines are Hyper-V VMs
-// (arbitrary software) and AppContainer (compatible apps, explicit opt-in).
+// No Sandboxie backend: RunContainer's isolation engines are RCVM process containment
+// (the default, all editions), QEMU and Hyper-V virtual machines (arbitrary software),
+// and AppContainer (compatible apps, explicit opt-in).
 // isWithinDirectory comes from isolated-launch (pure path validation).
 const {
   vmName,
