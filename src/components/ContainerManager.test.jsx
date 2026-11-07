@@ -522,14 +522,14 @@ describe("ContainerManager", () => {
     getPreferences.mockResolvedValue({});
     const container = render();
     await act(async () => { await Promise.resolve(); });
-    // Ten steps, numbered 0/9 to 9/9, starting with what RunContainer is.
-    expect(container.textContent).toContain("0/9");
+    // Eleven steps, numbered 0/10 to 10/10, starting with what RunContainer is.
+    expect(container.textContent).toContain("0/10");
     expect(container.textContent).toContain("RunContainer is an app that opens other apps inside itself");
-    for (let step = 0; step < 9; step += 1) {
+    for (let step = 0; step < 10; step += 1) {
       const next = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Next");
       act(() => { next.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     }
-    expect(container.textContent).toContain("9/9");
+    expect(container.textContent).toContain("10/10");
     expect(container.textContent).toContain("Where to get help, and how to support the project");
     expect(container.textContent).toContain("Discord");
     const finish = Array.from(container.querySelectorAll("button")).find((entry) => entry.textContent === "Start using RunContainer");
@@ -545,7 +545,7 @@ describe("ContainerManager", () => {
     getPreferences.mockResolvedValue({ beginnerSetupSeen: true });
     const container = render();
     await act(async () => { await Promise.resolve(); });
-    expect(container.textContent).not.toContain("0/9");
+    expect(container.textContent).not.toContain("0/10");
     expect(setPreference).not.toHaveBeenCalled();
     act(() => { ReactDOM.unmountComponentAtNode(container); });
   });

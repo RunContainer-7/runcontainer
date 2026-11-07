@@ -1988,3 +1988,119 @@ body[data-channel="nightly"][data-theme="light"] .update-banner,
 body[data-channel="nightly"][data-theme="light"] .pill { color: #174f8f; }
 body[data-channel="nightly"][data-theme="light"] .boot-overlay { background: radial-gradient(circle at top, rgba(74, 163, 255, .25), rgba(244, 247, 250, .97)); }
 body[data-channel="nightly"][data-theme="light"] .boot-copy { color: #174f8f; }
+
+/* EXE Store. A panel rather than a tab: it is a place you visit to add something, not a
+   fifth surface competing with the navigation bar. */
+.store-panel {
+    width: min(920px, 94vw);
+    max-height: 84vh;
+    overflow-y: auto;
+}
+.store-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 12px 0 14px;
+}
+.store-filter {
+    border: 1px solid var(--rc-line);
+    background: transparent;
+    color: var(--rc-ink-soft);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.store-filter.active {
+    border-color: var(--rc-line-strong);
+    background: rgba(47, 220, 180, .12);
+    color: var(--rc-ink, #eaf2ff);
+}
+.store-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+}
+.store-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid var(--rc-line);
+    border-radius: 14px;
+    padding: 12px;
+    background: rgba(255, 255, 255, .02);
+    min-width: 0;
+}
+.store-card-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.store-glyph {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    background: rgba(47, 220, 180, .14);
+    border: 1px solid var(--rc-line);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .02em;
+}
+.store-title {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.store-title strong {
+    font-size: 13.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.store-title .muted { font-size: 11px; }
+.store-summary {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--rc-ink-soft);
+}
+.store-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--rc-ink-soft);
+}
+.store-meta span {
+    border: 1px solid var(--rc-line);
+    border-radius: 999px;
+    padding: 2px 8px;
+}
+.store-note {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.4;
+}
+.store-actions {
+    margin-top: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.store-message {
+    margin: 14px 0 0;
+    padding: 10px 12px;
+    border: 1px solid var(--rc-line);
+    border-radius: 10px;
+    font-size: 12.5px;
+    background: rgba(47, 220, 180, .08);
+}
+body[data-theme="light"] .store-card { background: #fff; }
+body[data-theme="light"] .store-summary,
+body[data-theme="light"] .store-meta,
+body[data-theme="light"] .store-filter { color: #556377; }
+body[data-theme="light"] .store-filter.active { color: #16202b; }

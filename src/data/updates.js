@@ -4,6 +4,17 @@
 
 export const UPDATES = [
   {
+    version: '0.10.0',
+    date: '2026-11-07',
+    title: 'An EXE Store next to the + button',
+    changes: [
+      'A store button now sits beside the + button on Apps. It lists Windows programs you can add without hunting for an installer first, and Install downloads the publisher\u2019s file straight into RunContainer, so the app lands in My Apps with its own folder and its own limits instead of being installed into Windows.',
+      'Where a publisher\u2019s download file name changes with every release, the entry says Get installer and opens the official page rather than offering a link that may have moved. Nothing is mirrored or bundled: every download comes from the publisher.',
+      'A direct Install is only offered for a link that was fetched and answered with a Windows installer before release. Guessing a \u201clatest\u201d download path is how a store starts shipping buttons that do not work.',
+      'The beginner walkthrough has a tenth step for the store, and its counter now follows the number of steps instead of assuming nine.',
+    ],
+  },
+  {
     version: '0.9.10',
     date: '2026-11-07',
     title: 'Tweaks are checked on the app that starts',

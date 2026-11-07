@@ -4,8 +4,8 @@ import React, { useEffect, useMemo, useState } from "react";
 //
 // Why it exists: RunContainer's own idea is unusual — an app that opens other apps
 // inside itself — and a new user's first minute decides whether that idea lands. This
-// walks through it in ten steps (0/9 … 9/9): the idea, how a run works, what each tab
-// is for, and where to get help.
+// walks through it in eleven steps (0/10 … 10/10): the idea, how a run works, the EXE
+// Store, what each tab is for, and where to get help.
 //
 // It is shown once per installation and never again, including after an update: the
 // flag it reads and writes lives in an app-wide preferences file (see the
@@ -54,6 +54,23 @@ function stepsFor(version) {
           + "Whether a window is hosted here or not never changes how the app is isolated.",
       ],
       note: "Close or Stop ends the app and everything it started.",
+    },
+    {
+      key: "store",
+      title: "The EXE Store starts you off",
+      lead:
+        "The store button sits next to the + button on Apps, and it lists Windows programs "
+        + "you can add without hunting for an installer first.",
+      bullets: [
+        "Install downloads the publisher's installer and adds the app to My Apps, in its own folder. "
+          + "It is not installed into the rest of Windows.",
+        "Where the release file name changes with every version, the entry says Get installer and opens "
+          + "the official download page instead of offering a link that may have moved. Save the file, then "
+          + "use Install local EXE.",
+        "Nothing is mirrored or bundled: every download comes from the publisher, and the store works "
+          + "without an account.",
+      ],
+      note: "Adding your own app to the store is not open yet; the + button still installs anything you have.",
     },
     {
       key: "updates",
@@ -182,7 +199,7 @@ export default function BeginnerSetup({ version, onFinish, onOpenLink }) {
             <span className="beginner-kicker">Getting started</span>
             <h3>{step.title}</h3>
           </div>
-          <span className="beginner-count" aria-live="polite">{index}/9</span>
+          <span className="beginner-count" aria-live="polite">{index}/{steps.length - 1}</span>
         </div>
 
         <p className="beginner-lead">{step.lead}</p>

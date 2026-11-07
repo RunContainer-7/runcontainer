@@ -160,6 +160,9 @@ function clickTab(label) {
 }
 
 async function capture(client, name) {
+  // A window that Windows considers hidden stops producing frames, which leaves
+  // captureScreenshot waiting forever. Bringing it forward keeps the surface live.
+  await client.send('Page.bringToFront').catch(() => {});
   const shot = await client.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, fromSurface: true });
   const file = path.join(outDir, name);
   fs.writeFileSync(file, Buffer.from(shot.data, 'base64'));
@@ -272,6 +275,28 @@ async function main() {
     await capture(client, 'apps-menu.png');
     await evaluate(client, `document.body.click()`);
     await wait(400);
+
+    log('Capturing the EXE Store');
+    const storeOpened = await evaluate(client, `(() => {
+      const button = [...document.querySelectorAll('button')]
+        .find((element) => element.getAttribute('aria-label') === 'EXE Store');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!storeOpened) log('  ! no EXE Store button was found');
+    await wait(1200);
+    await capture(client, 'exe-store.png');
+    await evaluate(client, `(() => {
+      // The store panel is rendered last, so its Close is the last match; the app rows
+      // behind it also have one and closing those would not dismiss the panel.
+      const closes = [...document.querySelectorAll('button')]
+        .filter((element) => element.textContent.trim() === 'Close');
+      const close = closes[closes.length - 1];
+      if (close) { close.click(); return true; }
+      return false;
+    })()`);
+    await wait(700);
 
     const tabs = [
       ['Sources', 'sources-panel.png'],

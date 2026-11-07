@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { installContainer, importFromUrl, runContainer, killContainer, resetContainer, duplicateContainer, exportContainer, getAppLogs, onContainerStatus, cancelDeleteContainer, setIsolationEngine, setWindowHosting, getAppVersion, getHyperVStatus, setAppConfig, setAppProfile, resetEnvironment, openGuestDisplay, checkAppUpdates, openUpdateLink, snoozeUpdate, downloadUpdate, cancelUpdateDownload, getUpdateState, installDownloadedUpdate, onUpdateDownloadProgress, getQemuStatus, detectQemu, getPerformance, openExternalUrl, repairAppEnvironment, getAiStatus, getAiHistory, getAiExperiences, promoteAiExperiences, rollbackAiModel, setAiMonitoring, onAiDiagnosis, onAiRepairResult, onAiRecovered, onAiUnavailable, onAiStatus, onAiHistory, onAiVerified, onSetupProgress, onSetupComplete, runContainerWithJit, getPreferences, setPreference, getCompanionStatus, enableCompanion, disableCompanion, newCompanionCode, forgetCompanionDevices, enableCompanionWeb, disableCompanionWeb, onCompanionStatus } from "../services/containerService";
 import useContainers from "../hooks/useContainers";
 import BeginnerSetup from "./BeginnerSetup";
+import ExeStore from "./ExeStore";
 import CompanionQr from "./CompanionQr";
 import VirtualiseTab from "./VirtualiseTab";
 import { UPDATES } from "../data/updates";
@@ -44,7 +45,7 @@ function useBootAnimation() {
 // Used only until the main process reports the version from package.json.
 // Shown only for the moment before the main process reports the real version; the
 // test asserts that it tracks package.json, so it must be bumped with the release.
-const APP_VERSION_FALLBACK = "0.9.10";
+const APP_VERSION_FALLBACK = "0.10.0";
 // "4m 07s" - how long a setup has been running, for the one place a long wait
 // needs to be explained rather than look frozen.
 function formatElapsed(ms) {
@@ -125,6 +126,9 @@ export default function ContainerManager() {
   const { containers, addContainer, removeContainer, updateContainerStatus, refreshContainers } = useContainers();
   const [activeTab, setActiveTab] = useState("Apps");
   const [showInstallMenu, setShowInstallMenu] = useState(false);
+  const [showExeStore, setShowExeStore] = useState(false);
+  const [storeBusyId, setStoreBusyId] = useState(null);
+  const [storeMessage, setStoreMessage] = useState("");
   const [selectedExe, setSelectedExe] = useState(null);
   const [installMessage, setInstallMessage] = useState("");
   const [selectedApp, setSelectedApp] = useState(null);
@@ -669,6 +673,41 @@ export default function ContainerManager() {
       });
   }
 
+  // The EXE Store installs through the same path as "Import from URL": the file is
+  // downloaded into RunContainer's own folder and registered under My Apps. Nothing is
+  // installed into the rest of Windows, which is the point of adding it from here.
+  function handleStoreInstall(entry) {
+    if (!entry?.installerUrl) {
+      handleStoreOpenPage(entry);
+      return;
+    }
+    setStoreBusyId(entry.id);
+    setStoreMessage(`Downloading ${entry.name} into RunContainer…`);
+    setShowInstallWizard(true);
+    importFromUrl(entry.installerUrl)
+      .then((newContainer) => {
+        if (newContainer?.id) addContainer(newContainer);
+        setActiveTab("Apps");
+        setStoreMessage(`${newContainer?.name || entry.name} was added to My Apps. It runs from its own folder, not from Windows.`);
+        refreshContainers();
+      })
+      .catch((error) => {
+        setStoreMessage(`${entry.name} could not be installed: ${error?.message || "the download failed."}`);
+      })
+      .finally(() => {
+        setShowInstallWizard(false);
+        setStoreBusyId(null);
+      });
+  }
+
+  // No verified installer link means no download here. Opening the publisher's page is the
+  // honest version of that, and the message says what to do next.
+  function handleStoreOpenPage(entry) {
+    if (!entry?.downloadPage) return;
+    setStoreMessage(`Opening the official download page for ${entry.name}. Save the installer, then use Install local EXE.`);
+    openExternalUrl(entry.downloadPage);
+  }
+
   function handleDuplicate(container) {
     duplicateContainer(container)
       .then((duplicateApp) => {
@@ -1082,6 +1121,14 @@ export default function ContainerManager() {
         </div>
         {activeTab === "Apps" && (
           <div className="header-actions">
+            <button
+              className="icon-button"
+              aria-label="EXE Store"
+              title="EXE Store"
+              onClick={() => setShowExeStore(true)}
+            >
+              ▤
+            </button>
             <div className="action-menu">
               <button className="icon-button" onClick={() => setShowInstallMenu((prev) => !prev)} aria-label="Install options">＋</button>
               {showInstallMenu && (
@@ -2289,6 +2336,17 @@ export default function ContainerManager() {
           version={appVersion}
           onFinish={finishBeginnerSetup}
           onOpenLink={openExternalUrl}
+        />
+      )}
+
+      {showExeStore && (
+        <ExeStore
+          onClose={() => setShowExeStore(false)}
+          onInstall={handleStoreInstall}
+          onOpenPage={handleStoreOpenPage}
+          busyId={storeBusyId}
+          message={storeMessage}
+          installedNames={appContainers.map((container) => container.name)}
         />
       )}
 
